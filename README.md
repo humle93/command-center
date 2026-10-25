@@ -1,4 +1,4 @@
-# Command Center v7.3 PRO
+# Command Center v7.4 PRO
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 
@@ -26,6 +26,13 @@ Eller med Docker: `cp .env.example .env && docker compose up -d --build`
 1. `cp .env.example .env` og udfyld noegler
 2. `./run.sh` → http://127.0.0.1:8000
 3. (VPS) saet `APP_TOKEN` i `.env` og kør bag reverse proxy, eller brug `deploy/command-center.service` + SSH-tunnel
+
+## v7.4 PRO tilfoejelser
+- **Crawl-diff** (Screaming Frog-stil): sammenlign to crawls — nye/fjernede sider, aendret indhold (hash), score-fald >10
+- **Redirect-audit**: kæder (2+ hop), redirect-loops og usikre http-redirects fra crawleren
+- **Sitemap-generator**: download sitemap.xml bygget fra seneste crawl (/api/sitemap.xml)
+- **Keyword-svaerhedsgrad** (Ahrefs-kopi): heuristic over top 10 — autoritetsdomaener, unikke domaener, annoncer → 0-100 score
+- **AI titel/meta-rewrite**: Gemini foreslar 3 titler + 3 meta descriptions direkte fra deep audit (klik for at kopiere)
 
 ## PRO-funktioner (betalt-varktoej-kloner)
 - **Content Gap** (Semrush-kopi): top 10 SERP hentes via SerpAPI, gennemsnit af ord/H2 beregnes, og dine artikel-kladder scores mod markedet (Content Score)

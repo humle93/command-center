@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="da" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Command Center — Login</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans flex items-center justify-center">
+    <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-8 w-full max-w-sm space-y-4">
+        <h1 class="font-bold text-lg">⚡ COMMAND CENTER</h1>
+        <p class="text-xs text-zinc-400">Indtast din adgangstoken</p>
+        {% if error %}<p class="text-xs text-rose-400">{{ error }}</p>{% endif %}
+        <form action="/login" method="POST" class="space-y-3">
+            <input type="password" name="token" required autofocus
+                   class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+            <button class="w-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">
+                Log ind
+            </button>
+        </form>
+    </div>
+</body>
+</html>

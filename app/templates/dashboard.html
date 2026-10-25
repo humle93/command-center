@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="da" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Command Center</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null }">
+<header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
+    <div class="max-w-7xl mx-auto flex items-center justify-between">
+        <div>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.1</span></h1>
+            <p class="text-xs text-zinc-400">WordPress, SEO, indhold & overvågning</p>
+        </div>
+        <div class="flex items-center gap-3">
+            <a href="/health" class="text-xs text-emerald-400">Systemstatus</a>
+            {% if auth_required %}<a href="/logout" class="text-xs text-zinc-500 hover:text-rose-400">Log ud</a>{% endif %}
+        </div>
+    </div>
+</header>
+<nav class="border-b border-zinc-800 bg-zinc-900/30 px-4 py-2">
+    <div class="max-w-7xl mx-auto flex gap-2 overflow-x-auto">
+        <button @click="tab='cockpit'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='cockpit' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🎛️ Cockpit</button>
+        <button @click="tab='seo'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='seo' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🔍 SEO Scanner</button>
+        <button @click="tab='spy'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='spy' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🕷️ SERP & Spy</button>
+        <button @click="tab='articles'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='articles' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">✍️ Artikler</button>
+        <button @click="tab='keywords'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='keywords' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🎯 Keywords</button>
+        <button @click="tab='links'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='links' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🔗 Links</button>
+        <button @click="tab='social'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='social' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">📱 Social</button>
+        <button @click="tab='alarms'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='alarms' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🚨 Alarmer{% if alarms %} ({{ alarms|length }}){% endif %}</button>
+        <button @click="tab='notes'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='notes' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">📝 Noter</button>
+    </div>
+</nav>
+<main class="max-w-7xl mx-auto p-4 space-y-4">
+
+    {% if not ai_enabled or not wp_enabled or not auth_required %}
+    <div class="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-3 text-xs text-amber-300">
+        Setup: AI {{ '✅' if ai_enabled else '❌ (AIMLAPI_KEY)' }} · WordPress {{ '✅' if wp_enabled else '❌ (WP_URL/WP_USER/WP_APP_PASSWORD)' }} · SerpAPI {{ '✅' if serpapi_enabled else '❌ (SERPAPI_KEY)' }} · Telegram {{ '✅' if telegram_enabled else '— (valgfrit)' }} · Login {{ '✅' if auth_required else '❌ (APP_TOKEN — sæt den, hvis dashboardet kører på en VPS!)' }} — se .env.example
+    </div>
+    {% endif %}
+
+    <!-- COCKPIT -->
+    <section x-show="tab === 'cockpit'" class="space-y-4">
+        {% if alarms %}
+        <div class="bg-rose-500/10 border border-rose-500/30 rounded-2xl p-4">
+            <div class="flex items-center justify-between mb-2">
+                <h2 class="text-xs uppercase tracking-wider text-rose-300">🚨 Åbne alarmer ({{ alarms|length }})</h2>
+                <button @click="tab='alarms'" class="text-xs text-rose-300 hover:underline">Se alle</button>
+            </div>
+            {% for alarm in alarms[:3] %}<p class="text-xs text-zinc-300">• [{{ alarm.severity }}] {{ alarm.type }}: {{ alarm.message }}</p>{% endfor %}
+        </div>
+        {% endif %}
+
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Tilføj domæne</h2>
+            <form action="/domains/add" method="POST" class="flex gap-2">
+                <input type="text" name="url" placeholder="ditsite.dk" required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Tilføj</button>
+            </form>
+        </div>
+
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Overvågede domæner <span class="text-zinc-600 normal-case">(tjekker automatisk hver 6. time)</span></h2>
+                <form action="/domains/check" method="POST"><button class="text-xs text-emerald-400">🔄 Kør tjek nu</button></form>
+            </div>
+            <div class="space-y-2">
+                {% for domain in domains %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 flex justify-between items-center text-xs">
+                    <div>
+                        <div class="font-medium">{{ domain.url }}</div>
+                        <div class="text-zinc-500">{{ domain.status }} • {{ domain.response_time }} • SSL: {{ domain.ssl_days }}
+                            {% if domain.last_error %}• <span class="text-rose-400">{{ domain.last_error }}</span>{% endif %}
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <button @click="tab='seo'; showHistory({{ domain.id }}, '{{ domain.url }}')" class="text-emerald-400 hover:underline">📈</button>
+                        <form action="/domains/delete" method="POST">
+                            <input type="hidden" name="id" value="{{ domain.id }}">
+                            <button class="text-zinc-500 hover:text-rose-400">✕</button>
+                        </form>
+                    </div>
+                </div>
+                {% else %}
+                <p class="text-xs text-zinc-500">Ingen domæner tilføjet endnu.</p>
+                {% endfor %}
+            </div>
+        </div>
+
+        {% if drift_rows %}
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Daglig drift (pushet fra Juno)</h2>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {% for d in drift_rows[:3] %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs">
+                    <div class="text-zinc-500">{{ d.checked_at[:16] }}</div>
+                    <div class="mt-1">🛒 Ordrer: <span class="font-bold">{{ d.orders }}</span> · ${(d.revenue or 0)|round(2)}</div>
+                    <div>Woo: <span class="{{ 'text-emerald-400' if d.woo_status == 'ok' else 'text-rose-400' }}">{{ d.woo_status }}</span> · Checkout: <span class="{{ 'text-emerald-400' if d.checkout_status == 'ok' else 'text-rose-400' }}">{{ d.checkout_status }}</span></div>
+                    {% if d.notes %}<div class="text-zinc-500 mt-1">{{ d.notes }}</div>{% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+    </section>
+
+    <!-- SEO SCANNER -->
+    <section x-show="tab === 'seo'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Deep audit af enkelt side (RankMath-stil)</h2>
+            <form @submit.prevent="
+                seoLoading = true; seoResult = null;
+                fetch('/seo/audit', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: 'url=' + encodeURIComponent($el.querySelector('input[name=url]').value) + '&keyword=' + encodeURIComponent($el.querySelector('input[name=keyword]').value || '') })
+                .then(r => r.json()).then(data => { seoResult = data; seoLoading = false; })"
+                class="flex flex-col md:flex-row gap-2">
+                <input type="text" name="url" placeholder="https://steamgears.eu/guide..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <input type="text" name="keyword" placeholder="Focus keyword (valgfrit)" class="md:w-64 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Analysér</button>
+            </form>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5" x-show="seoLoading" style="display: none;">
+            <p class="text-xs text-zinc-400">Analyserer side (20+ kontroller)...</p>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5" x-show="seoResult" style="display: none;">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Resultat</h2>
+                <div class="text-sm font-bold px-3 py-1 rounded-xl border" :class="seoResult?.score >= 80 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : seoResult?.score >= 50 ? 'bg-amber-500/10 text-amber-400 border-amber-500/30' : 'bg-rose-500/10 text-rose-400 border-rose-500/30'" x-text="seoResult?.score + ' / 100'"></div>
+            </div>
+            <ul class="space-y-2 text-xs">
+                <template x-for="item in seoResult?.items">
+                    <li class="flex items-center gap-2">
+                        <span x-text="item.ok ? '✅' : '❌'"></span>
+                        <span :class="item.ok ? 'text-zinc-300' : 'text-rose-400'" x-text="item.text"></span>
+                    </li>
+                </template>
+            </ul>
+        </div>
+
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Site-crawl (flerside-scan)</h2>
+            <form action="/seo/crawl" method="POST" class="flex gap-2">
+                <input type="text" name="url" placeholder="https://steamgears.eu" required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <input type="number" name="max_pages" value="30" min="5" max="100" class="w-24 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Crawl</button>
+            </form>
+            {% if crawl %}
+            <div class="mt-3 text-xs text-zinc-400">
+                Seneste crawl: {{ crawl.host }} · {{ crawl.pages }} sider · snitscore <span class="font-bold" :class="">{{ crawl.avg_score if crawl.avg_score is not none else '—' }}</span>/100 · robots.txt {{ '✅' if crawl.robots_ok else '❌' }} · sitemap {{ '✅ ' ~ crawl.sitemap_urls ~ ' URLs' if crawl.sitemap_ok else '❌' }}
+            </div>
+            {% endif %}
+        </div>
+
+        {% if seo_pages %}
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Side-rapport (dårligste først)</h2>
+                <form action="/seo/crawl/delete" method="POST"><button class="text-xs text-zinc-500 hover:text-rose-400">Ryd</button></form>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-xs">
+                    <thead class="text-zinc-500 text-left">
+                        <tr><th class="py-2 pr-2">Score</th><th class="py-2 pr-2">URL</th><th class="py-2 pr-2">Ord</th><th class="py-2 pr-2">Status</th><th class="py-2">Problemer</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for p in seo_pages %}
+                        <tr class="border-t border-zinc-800">
+                            <td class="py-2 pr-2"><span class="px-2 py-0.5 rounded {% if p.score >= 80 %}bg-emerald-500/10 text-emerald-400{% elif p.score >= 50 %}bg-amber-500/10 text-amber-400{% else %}bg-rose-500/10 text-rose-400{% endif %}">{{ p.score }}</span></td>
+                            <td class="py-2 pr-2 max-w-xs truncate" title="{{ p.url }}">{{ p.url }}</td>
+                            <td class="py-2 pr-2 text-zinc-400">{{ p.words }}</td>
+                            <td class="py-2 pr-2 text-zinc-400">{{ p.http_status }}</td>
+                            <td class="py-2 text-zinc-500">{{ p.issues }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% endif %}
+
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5" x-show="false" id="histcard">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3" id="histtitle">Historik</h2>
+            <canvas id="histchart" height="80"></canvas>
+        </div>
+    </section>
+
+    <!-- SERP & SPY -->
+    <section x-show="tab === 'spy'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Opdag konkurrenter (SERP)</h2>
+            <form action="/serp/discover" method="POST" class="flex gap-2">
+                <input type="text" name="keyword" placeholder="Søgeord / emne..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Søg & Scan</button>
+            </form>
+            <p class="text-[10px] text-zinc-600 mt-2">Fejl logges nu under Alarmer i stedet for at forsvinde.</p>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Fundne konkurrenter</h2>
+            <div class="space-y-2">
+                {% for comp in competitors %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs space-y-1">
+                    <div class="flex justify-between items-center">
+                        <a href="{{ comp.url }}" target="_blank" class="font-medium text-emerald-400 hover:underline">{{ comp.name }}</a>
+                        <form action="/competitors/delete" method="POST">
+                            <input type="hidden" name="id" value="{{ comp.id }}">
+                            <button class="text-zinc-500 hover:text-rose-400">✕</button>
+                        </form>
+                    </div>
+                    <div class="text-zinc-400">{{ comp.crawled_info }}</div>
+                </div>
+                {% else %}
+                <p class="text-xs text-zinc-500">Ingen konkurrenter fundet endnu.</p>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+
+    <!-- ARTIKLER -->
+    <section x-show="tab === 'articles'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Generér artikel {{ '(AI: Gemini via aimlapi)' if ai_enabled else '(skabelon — sæt AIMLAPI_KEY for AI)' }}</h2>
+            <form action="/articles/generate" method="POST" class="flex gap-2">
+                <input type="text" name="keyword" placeholder="Emne / søgeord..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Generér</button>
+            </form>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Kladder</h2>
+            <div class="space-y-3">
+                {% for art in articles %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-4 text-xs space-y-2">
+                    <div class="flex justify-between items-start gap-2">
+                        <div class="font-bold text-sm">{{ art.title }} <span class="text-[10px] font-normal text-zinc-500">({{ art.source }})</span></div>
+                        <div class="flex gap-2 items-center shrink-0">
+                            {% if art.wp_link %}<a href="{{ art.wp_link }}" target="_blank" class="text-emerald-400">Åbn i WP ↗</a>
+                            {% else %}
+                            <form action="/articles/push" method="POST">
+                                <input type="hidden" name="id" value="{{ art.id }}">
+                                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-3 py-1 rounded-lg">⬆ Push til WP (kladde)</button>
+                            </form>
+                            {% endif %}
+                            <form action="/articles/delete" method="POST">
+                                <input type="hidden" name="id" value="{{ art.id }}">
+                                <button class="text-zinc-500 hover:text-rose-400">✕</button>
+                            </form>
+                        </div>
+                    </div>
+                    <div class="text-zinc-400 max-h-48 overflow-y-auto border-t border-zinc-800 pt-2">{{ art.content | safe }}</div>
+                </div>
+                {% else %}
+                <p class="text-xs text-zinc-500">Ingen artikler oprettet endnu.</p>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+
+    <!-- KEYWORDS -->
+    <section x-show="tab === 'keywords'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Keyword-positioner (SerpAPI, dagligt kl. 06:00) — sporer: {{ 'steamgears.eu' }}</h2>
+                <form action="/keywords/check" method="POST"><button class="text-xs text-emerald-400">🔄 Tjek nu</button></form>
+            </div>
+            <form action="/keywords/add" method="POST" class="flex gap-2 mb-3">
+                <input type="text" name="keyword" placeholder="fx steampunk goggles" required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Tilføj</button>
+            </form>
+            <div class="space-y-2">
+                {% for kw in keywords %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs flex justify-between items-center">
+                    <div>
+                        <span class="font-medium">{{ kw.keyword }}</span>
+                        {% if kw.position %}<span class="ml-2 px-2 py-0.5 rounded {% if kw.position <= 3 %}bg-emerald-500/10 text-emerald-400{% elif kw.position <= 10 %}bg-amber-500/10 text-amber-400{% else %}bg-zinc-800 text-zinc-400{% endif %}">#{{ kw.position }}</span>{% else %}<span class="text-zinc-600 ml-2">ikke i top 50</span>{% endif %}
+                        {% if kw.target_url %}<a href="{{ kw.target_url }}" target="_blank" class="text-zinc-500 ml-2 truncate inline-block max-w-xs align-bottom">{{ kw.target_url }}</a>{% endif %}
+                    </div>
+                    <form action="/keywords/delete" method="POST">
+                        <input type="hidden" name="id" value="{{ kw.id }}">
+                        <button class="text-zinc-500 hover:text-rose-400">✕</button>
+                    </form>
+                </div>
+                {% else %}
+                <p class="text-xs text-zinc-500">Ingen keywords tilføjet endnu.</p>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+
+    <!-- LINKS -->
+    <section x-show="tab === 'links'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Tjek link-struktur</h2>
+            <form action="/links/check" method="POST" class="flex gap-2">
+                <input type="text" name="url" placeholder="https://eksempel.dk" required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Tjek links</button>
+            </form>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Historik</h2>
+            <div class="space-y-2">
+                {% for item in linkchecks %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs space-y-1">
+                    <div class="font-medium text-emerald-400">{{ item.url }}</div>
+                    <div class="text-zinc-300">{{ item.result }}</div>
+                    <div class="text-zinc-500 text-[10px]">{{ item.checked_at }}</div>
+                </div>
+                {% else %}
+                <p class="text-xs text-zinc-500">Ingen linktjek udført.</p>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+
+    <!-- SOCIAL -->
+    <section x-show="tab === 'social'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Tilføj socialt opslag</h2>
+            <form action="/social/add" method="POST" class="space-y-3">
+                <input type="text" name="platform" placeholder="Platform (f.eks. Pinterest, LinkedIn, X)" required class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <textarea name="message" placeholder="Opslagets tekst..." rows="3" required class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm"></textarea>
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Tilføj til kø</button>
+            </form>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Opslagskø</h2>
+                <a href="/social/export.csv" class="text-xs text-emerald-400">⬇ Export CSV</a>
+            </div>
+            <div class="space-y-2">
+                {% for post in socialqueue %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs flex justify-between items-start">
+                    <div class="space-y-1">
+                        <span class="inline-block bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded text-[10px]">{{ post.platform }}</span>
+                        <p class="text-zinc-300 whitespace-pre-wrap">{{ post.message }}</p>
+                    </div>
+                    <form action="/social/delete" method="POST">
+                        <input type="hidden" name="id" value="{{ post.id }}">
+                        <button class="text-zinc-500 hover:text-rose-400">✕</button>
+                    </form>
+                </div>
+                {% else %}
+                <p class="text-xs text-zinc-500">Ingen opslag i køen.</p>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+
+    <!-- ALARMER -->
+    <section x-show="tab === 'alarms'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Åbne alarmer {% if telegram_enabled %}<span class="text-emerald-400">· Telegram 🔔 aktiv</span>{% endif %}</h2>
+            <div class="space-y-2">
+                {% for alarm in alarms %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs flex justify-between items-start">
+                    <div>
+                        <span class="inline-block px-2 py-0.5 rounded text-[10px] {% if alarm.severity == 'kritisk' %}bg-rose-500/10 text-rose-400{% else %}bg-amber-500/10 text-amber-400{% endif %}">{{ alarm.severity }}</span>
+                        <span class="ml-2">{{ alarm.type }}: {{ alarm.message }}</span>
+                        <div class="text-zinc-500 text-[10px] mt-1">{{ alarm.created_at }}</div>
+                    </div>
+                    <form action="/alarms/resolve" method="POST">
+                        <input type="hidden" name="id" value="{{ alarm.id }}">
+                        <button class="text-zinc-500 hover:text-emerald-400">✓</button>
+                    </form>
+                </div>
+                {% else %}
+                <p class="text-xs text-zinc-500">Ingen åbne alarmer. 🎉</p>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+
+    <!-- NOTER -->
+    <section x-show="tab === 'notes'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Ny note</h2>
+            <form action="/notes/add" method="POST" class="space-y-3">
+                <textarea name="content" placeholder="Skriv en hurtig note..." rows="3" required class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm"></textarea>
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Gem note</button>
+            </form>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Noter</h2>
+            <div class="space-y-2">
+                {% for note in notes %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs flex justify-between items-start">
+                    <div class="space-y-1">
+                        <p class="text-zinc-300 whitespace-pre-wrap">{{ note.content }}</p>
+                        <p class="text-zinc-500 text-[10px]">{{ note.created_at }}</p>
+                    </div>
+                    <form action="/notes/delete" method="POST">
+                        <input type="hidden" name="id" value="{{ note.id }}">
+                        <button class="text-zinc-500 hover:text-rose-400">✕</button>
+                    </form>
+                </div>
+                {% else %}
+                <p class="text-xs text-zinc-500">Ingen noter oprettet endnu.</p>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+</main>
+
+<script>
+function showHistory(domainId, url) {
+    document.getElementById('histcard').style.display = '';
+    document.getElementById('histtitle').textContent = 'Svartid-historik: ' + url;
+    fetch('/api/history/' + domainId).then(r => r.json()).then(data => {
+        const ctx = document.getElementById('histchart');
+        if (window.histChartInstance) window.histChartInstance.destroy();
+        window.histChartInstance = new Chart(ctx, {
+            type: 'line',
+            data: { labels: data.labels, datasets: [{ label: 'ms', data: data.ms, borderColor: '#34d399', tension: 0.3, pointRadius: 2 }] },
+            options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#71717a', font: { size: 9 } } }, y: { ticks: { color: '#71717a' } } } }
+        });
+    });
+}
+</script>
+</body>
+</html>

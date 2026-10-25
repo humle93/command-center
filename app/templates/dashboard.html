@@ -8,11 +8,11 @@
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
-<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null, dups: null, healthChart: null }">
+<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.3 PRO</span></h1>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.4 PRO</span></h1>
             <p class="text-xs text-zinc-400">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
@@ -134,6 +134,17 @@
                 <h2 class="text-xs uppercase tracking-wider text-zinc-400">Resultat</h2>
                 <div class="text-sm font-bold px-3 py-1 rounded-xl border" :class="seoResult?.score >= 80 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : seoResult?.score >= 50 ? 'bg-amber-500/10 text-amber-400 border-amber-500/30' : 'bg-rose-500/10 text-rose-400 border-rose-500/30'" x-text="seoResult?.score + ' / 100'"></div>
             </div>
+            <div class="mb-3">
+                <button @click="loadRewrite()" class="text-xs bg-purple-500/10 text-purple-400 border border-purple-500/30 px-3 py-1.5 rounded-lg">✨ AI-rewrite titel/meta</button>
+            </div>
+            <div x-show="rewrite" style="display: none;" class="mb-3 text-xs bg-zinc-950 border border-purple-500/30 rounded-xl p-3 space-y-2">
+                <div x-show="rewrite?.error" class="text-amber-400" x-text="rewrite?.error"></div>
+                <div class="font-medium text-purple-400">Titel-forslag</div>
+                <template x-for="t in (rewrite?.titles || [])"><div class="text-zinc-300 cursor-pointer hover:text-emerald-400" @click="navigator.clipboard.writeText(t)" x-text="t"></div></template>
+                <div class="font-medium text-purple-400 pt-1">Meta-forslag</div>
+                <template x-for="d in (rewrite?.descriptions || [])"><div class="text-zinc-300 cursor-pointer hover:text-emerald-400" @click="navigator.clipboard.writeText(d)" x-text="d"></div></template>
+                <div class="text-zinc-500" x-text="rewrite?.note"></div>
+            </div>
             <div x-show="seoResult?.psi" style="display: none;" class="mb-3 text-xs bg-zinc-950 border border-zinc-800 rounded-xl p-3">
                 <span class="text-zinc-400">Core Web Vitals (mobile):</span>
                 Performance <span class="text-emerald-400 font-bold" x-text="seoResult?.psi?.perf + '/100'"></span> ·
@@ -157,6 +168,28 @@
                 <input type="number" name="max_pages" value="30" min="5" max="100" class="w-24 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Crawl</button>
             </form>
+            <div class="flex gap-2 mt-2">
+                <button @click="loadDiff()" class="text-xs bg-zinc-800 text-zinc-300 border border-zinc-700 px-3 py-1.5 rounded-lg">🔄 Sammenlign med forrige crawl</button>
+                <a href="/api/sitemap.xml" class="text-xs bg-zinc-800 text-zinc-300 border border-zinc-700 px-3 py-1.5 rounded-lg">⬇️ Download sitemap.xml</a>
+                <button @click="loadRedirects()" class="text-xs bg-zinc-800 text-zinc-300 border border-zinc-700 px-3 py-1.5 rounded-lg">🔀 Redirect-audit</button>
+            </div>
+            <div x-show="diff" style="display: none;" class="mt-3 text-xs bg-zinc-950 border border-zinc-800 rounded-xl p-3 space-y-1">
+                <div x-show="diff?.error" class="text-amber-400" x-text="diff?.error"></div>
+                <div><span class="text-emerald-400" x-text="'➕ Nye sider: ' + (diff?.new?.length || 0)"></span>
+                     <span class="text-rose-400 ml-3" x-text="'➖ Fjernede: ' + (diff?.removed?.length || 0)"></span>
+                     <span class="text-amber-400 ml-3" x-text="'✏️ Ændret indhold: ' + (diff?.changed_content?.length || 0)"></span>
+                     <span class="text-rose-400 ml-3" x-text="'📉 Score-fald >10: ' + (diff?.score_drops?.length || 0)"></span></div>
+                <template x-for="u in (diff?.score_drops || [])"><div class="text-zinc-500 truncate">📉 <span x-text="u.url"></span> <span x-text="u.old_score + ' → ' + u.score"></span></div></template>
+                <template x-for="u in (diff?.removed || []).slice(0,5)"><div class="text-zinc-500 truncate">➖ <span x-text="u"></span></div></template>
+            </div>
+            <div x-show="redir" style="display: none;" class="mt-3 text-xs bg-zinc-950 border border-zinc-800 rounded-xl p-3 space-y-1">
+                <div><span class="text-zinc-400" x-text="'Sider med redirects: ' + (redir?.with_redirects || 0)"></span>
+                     <span class="text-amber-400 ml-3" x-text="'Kæder (2+ hop): ' + (redir?.chains?.length || 0)"></span>
+                     <span class="text-rose-400 ml-3" x-text="'🌀 Loops: ' + (redir?.loops?.length || 0)"></span>
+                     <span class="text-amber-400 ml-3" x-text="'🔓 http-links: ' + (redir?.insecure?.length || 0)"></span></div>
+                <template x-for="c in (redir?.chains || []).slice(0,5)"><div class="text-zinc-500 truncate">🔗 <span x-text="c.chain"></span></div></template>
+                <template x-for="l in (redir?.loops || [])"><div class="text-rose-400 truncate">🌀 <span x-text="l.chain"></span></div></template>
+            </div>
             {% if crawl %}
             <div class="mt-3 text-xs text-zinc-400">
                 Seneste crawl: {{ crawl.host }} · {{ crawl.pages }} sider · snitscore <span class="font-bold" :class="">{{ crawl.avg_score if crawl.avg_score is not none else '—' }}</span>/100 · robots.txt {{ '✅' if crawl.robots_ok else '❌' }} · sitemap {{ '✅ ' ~ crawl.sitemap_urls ~ ' URLs' if crawl.sitemap_ok else '❌' }}
@@ -542,6 +575,7 @@
             <form action="/serp/gap" method="POST" class="flex gap-2">
                 <input type="text" name="keyword" placeholder="Søgeord..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Analysér top 10</button>
+                <button formaction="/keywords/difficulty" class="bg-amber-500/10 text-amber-400 border border-amber-500/30 px-5 py-2 rounded-xl text-sm whitespace-nowrap">🎯 Sværhedsgrad</button>
             </form>
             <div class="space-y-2 mt-3">
                 {% for g in gaps %}
@@ -551,6 +585,18 @@
                 </div>
                 {% else %}
                 <p class="text-xs text-zinc-500">Ingen gap-analyser endnu.</p>
+                {% endfor %}
+            </div>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Keyword-sværhedsgrad (Ahrefs-kopi — heuristic over top 10)</h2>
+            <div class="flex flex-wrap gap-2">
+                {% for k in difficulties %}
+                <span class="px-2 py-1 rounded-lg text-[11px] {% if k.difficulty < 35 %}bg-emerald-500/10 text-emerald-400{% elif k.difficulty < 60 %}bg-amber-500/10 text-amber-400{% else %}bg-rose-500/10 text-rose-400{% endif %}">
+                    {{ k.keyword }} · {{ k.difficulty }}/100 · {{ k.authority }} autoritetsdomæner
+                </span>
+                {% else %}
+                <p class="text-xs text-zinc-500">Ingen analyser endnu — brug 🎯-knappen ovenfor.</p>
                 {% endfor %}
             </div>
         </div>
@@ -633,6 +679,27 @@ function loadHealth() {
 }
 if (document.getElementById('healthchart')) loadHealth();
 
+function ccState() { return Alpine.$data(document.body); }
+function loadDiff() {
+    fetch('/api/crawl/diff').then(r => r.json()).then(d => {
+        const s = ccState();
+        if (d.error) { s.redir = null; s.diff = { new: [], removed: [], changed_content: [], score_drops: [], error: d.error }; }
+        else { s.redir = null; s.diff = d; }
+    });
+}
+function loadRedirects() {
+    fetch('/api/redirects').then(r => r.json()).then(d => { const s = ccState(); s.diff = null; s.redir = d; });
+}
+function loadRewrite() {
+    const s = ccState();
+    const form = document.querySelector('input[name=psi]')?.closest('form');
+    const url = (form?.querySelector('input[name=url]')?.value || '').trim();
+    const kw = (form?.querySelector('input[name=keyword]')?.value || '').trim();
+    if (!url) return;
+    fetch('/seo/rewrite', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: 'url=' + encodeURIComponent(url) + '&keyword=' + encodeURIComponent(kw) })
+        .then(r => r.json()).then(d => { s.rewrite = d.error ? { error: d.error } : d; });
+}
 function loadVis() {
     fetch('/api/visibility').then(r => r.json()).then(data => {
         if (!data.scores.length) return;

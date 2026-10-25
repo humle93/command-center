@@ -310,6 +310,16 @@ def init_db():
             day TEXT PRIMARY KEY,
             score REAL
         );
+        CREATE TABLE IF NOT EXISTS keyword_difficulty (
+            keyword TEXT PRIMARY KEY,
+            difficulty INTEGER,
+            domains INTEGER,
+            authority INTEGER,
+            ads INTEGER,
+            avg_words INTEGER,
+            top_domains TEXT,
+            created_at TEXT
+        );
         """)
 
 
@@ -689,6 +699,7 @@ async def run_seo_audit(request: Request):
     use_psi = form.get("psi", "") == "1"
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(executor, analyze_page, url, keyword)
+    result["url"] = url
     if use_psi:
         loop2 = asyncio.get_event_loop()
         psi = await loop2.run_in_executor(executor, psi_fetch, url)
@@ -832,6 +843,67 @@ async def start_crawl(url: str = Form(...), max_pages: int = Form(30)):
 @app.get("/api/crawl/status")
 async def crawl_status():
     return JSONResponse(CRAWL_STATE)
+
+
+@app.get("/api/crawl/diff")
+async def crawl_diff():
+    with get_db() as db:
+        runs = db.execute("SELECT id FROM crawl_runs ORDER BY id DESC LIMIT 2").fetchall()
+        if len(runs) < 2:
+            return JSONResponse({"error": "Kræver mindst to crawls"})
+        new_r, old_r = runs[0]["id"], runs[1]["id"]
+        new_pages = {r["url"]: r for r in db.execute("SELECT * FROM seopages WHERE run_id=?", (new_r,)).fetchall()}
+        old_pages = {r["url"]: r for r in db.execute("SELECT * FROM seopages WHERE run_id=?", (old_r,)).fetchall()}
+        added = [u for u in new_pages if u not in old_pages]
+        removed = [u for u in old_pages if u not in new_pages]
+        changed = []
+        for u in new_pages:
+            if u in old_pages:
+                n, o = new_pages[u], old_pages[u]
+                if n["content_hash"] and o["content_hash"] and n["content_hash"] != o["content_hash"]:
+                    changed.append({"url": u, "score": n["score"], "old_score": o["score"]})
+        score_drops = [{"url": u, "score": new_pages[u]["score"], "old_score": old_pages[u]["score"]}
+                       for u in new_pages if u in old_pages and old_pages[u]["score"] and new_pages[u]["score"] and new_pages[u]["score"] < old_pages[u]["score"] - 10]
+        return JSONResponse({"new": added, "removed": removed, "changed_content": changed, "score_drops": score_drops,
+                             "new_run": new_r, "old_run": old_r})
+
+
+@app.get("/api/sitemap.xml")
+async def gen_sitemap():
+    with get_db() as db:
+        run = db.execute("SELECT id FROM crawl_runs ORDER BY id DESC LIMIT 1").fetchone()
+        if not run:
+            return JSONResponse({"error": "Ingen crawl-data — kør et crawl først"}, status_code=400)
+        pages = db.execute("SELECT url FROM seopages WHERE run_id=? AND http_status=200 ORDER BY url", (run["id"],)).fetchall()
+    today = datetime.now().strftime("%Y-%m-%d")
+    rows = ['<?xml version="1.0" encoding="UTF-8"?>',
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    for pg in pages:
+        rows.append("  <url><loc>" + pg["url"] + "</loc><lastmod>" + today + "</lastmod></url>")
+    rows.append("</urlset>")
+    return Response("\n".join(rows), media_type="application/xml")
+
+
+@app.get("/api/redirects")
+async def redirect_audit():
+    with get_db() as db:
+        rows = db.execute("SELECT url, redirects, http_status FROM seopages WHERE redirects != ''").fetchall()
+    chains = []
+    loops = []
+    insecure = []
+    for r in rows:
+        parts = (r["redirects"] or "").split(" | ")
+        if len(parts) != 2:
+            continue
+        codes = parts[0].split(" -> ")
+        urls = parts[1].split(" -> ")
+        if len(codes) > 2:
+            chains.append({"url": r["url"], "chain": " -> ".join(urls), "codes": parts[0]})
+        if len(set(urls)) < len(urls):
+            loops.append({"url": r["url"], "chain": " -> ".join(urls)})
+        if any(u.startswith("http://") for u in urls):
+            insecure.append({"url": r["url"], "chain": " -> ".join(urls)})
+    return JSONResponse({"with_redirects": len(rows), "chains": chains, "loops": loops, "insecure": insecure})
 
 # ---------- SERP & konkurrenter ----------# ---------- SERP & konkurrenter ----------
 def discover_competitors_sync(keyword: str):
@@ -1276,6 +1348,61 @@ async def suggest_internal_links():
         return JSONResponse({"ok": False, "error": str(e)[:200]})
 
 
+def rewrite_meta_sync(url: str, title: str, desc: str, keyword: str):
+    if not AIMLAPI_KEY:
+        return {"error": "AIMLAPI_KEY ikke sat"}
+    prompt = (
+        "Du er en SEO-ekspert for " + TRACK_DOMAIN + ". Optimer denne side:\n"
+        "URL: " + url + "\n"
+        "Nuvaerende title: " + (title or "(ingen)") + "\n"
+        "Nuvaerende meta description: " + (desc or "(ingen)") + "\n"
+        "Focus keyword: " + (keyword or title[:60]) + "\n\n"
+        "Svar KUN med gyldig JSON (ingen markdown): "
+        '{"titles": ["<60 tegn titel 1", "titel 2", "titel 3"], '
+        '"descriptions": ["<155 tegn description 1", "description 2", "description 3"], '
+        '"note": "kort begrundelse pa dansk"}'
+    )
+    return ai_chat(prompt, max_tokens=800, temperature=0.7)
+
+
+@app.post("/seo/rewrite")
+async def seo_rewrite(request: Request):
+    if not is_authed(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    form = await request.form()
+    url = str(form.get("url", "")).strip()
+    if not url:
+        return JSONResponse({"error": "url paakraevet"}, status_code=400)
+    # hent eksisterende titel/meta fra seneste crawl, ellers hent live
+    title = desc = ""
+    with get_db() as db:
+        row = db.execute("SELECT title, meta_len FROM seopages WHERE url=? ORDER BY id DESC LIMIT 1", (url,)).fetchone()
+    if not row:
+        try:
+            r = safe_request(url, timeout=10)
+            soup = BeautifulSoup(r.text, "html.parser")
+            t = soup.find("title")
+            title = t.get_text(strip=True) if t else ""
+            m = soup.find("meta", attrs={"name": "description"})
+            desc = m.get("content", "") if m else ""
+        except Exception:
+            pass
+    else:
+        try:
+            r = safe_request(url, timeout=10)
+            soup = BeautifulSoup(r.text, "html.parser")
+            t = soup.find("title")
+            title = t.get_text(strip=True) if t else ""
+            m = soup.find("meta", attrs={"name": "description"})
+            desc = m.get("content", "") if m else ""
+        except Exception:
+            pass
+    kw = str(form.get("keyword", "")).strip()
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(executor, rewrite_meta_sync, url, title, desc, kw)
+    return JSONResponse(result)
+
+
 @app.post("/articles/meta")
 async def generate_meta(id: int = Form(...)):
     if not AIMLAPI_KEY:
@@ -1475,6 +1602,70 @@ async def keyword_ideas(keyword: str = Form(...)):
         for idea, source in ideas:
             db.execute("INSERT OR IGNORE INTO keyword_ideas (keyword, idea, source, created_at) VALUES (?,?,?,?)",
                        (keyword, idea, source, now_iso()))
+    return RedirectResponse("/", status_code=303)
+
+
+AUTHORITY_DOMAINS = {
+    "wikipedia.org", "youtube.com", "amazon.com", "reddit.com", "pinterest.com",
+    "facebook.com", "instagram.com", "tiktok.com", "etsy.com", "ebay.com",
+    "quora.com", "linkedin.com", "forbes.com", "nytimes.com", "wikihow.com",
+}
+
+
+def keyword_difficulty_sync(keyword: str):
+    if not SERPAPI_KEY:
+        return {"error": "SERPAPI_KEY ikke sat i .env"}
+    try:
+        resp = requests.get(
+            "https://serpapi.com/search",
+            params={"engine": "google", "q": keyword, "api_key": SERPAPI_KEY, "num": 10},
+            timeout=25,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        organic = data.get("organic_results", [])[:10]
+        ads = len(data.get("ads", data.get("shopping_results", [])) or [])
+        domains = []
+        authority = 0
+        for item in organic:
+            d = urlparse(item.get("link", "")).netloc.lower().replace("www.", "")
+            if d and d not in domains:
+                domains.append(d)
+            if any(d == a or d.endswith("." + a) for a in AUTHORITY_DOMAINS):
+                authority += 1
+        # heuristic: baseline + authority-domains + faa unikke domainer (domineret af eet site) + ads
+        difficulty = 20
+        difficulty += authority * 9
+        if len(domains) <= 4 and organic:
+            difficulty += 15
+        difficulty += 3 if ads else 0
+        difficulty = max(5, min(95, difficulty))
+        label = "Let" if difficulty < 35 else ("Middel" if difficulty < 60 else ("Svaer" if difficulty < 80 else "Meget svaer"))
+        top = ", ".join(domains[:5])
+        with get_db() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO keyword_difficulty (keyword, difficulty, domains, authority, ads, top_domains, created_at) VALUES (?,?,?,?,?,?,?)",
+                (keyword, difficulty, len(domains), authority, ads, top, now_iso()),
+            )
+        return {"ok": True, "keyword": keyword, "difficulty": difficulty, "label": label,
+                "domains": len(domains), "authority": authority, "ads": ads, "top_domains": top}
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
+
+@app.post("/keywords/difficulty")
+async def kw_difficulty(request: Request):
+    if not is_authed(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    form = await request.form()
+    keyword = str(form.get("keyword", "")).strip()
+    if not keyword:
+        return RedirectResponse("/", status_code=303)
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(executor, keyword_difficulty_sync, keyword)
+    if result.get("ok"):
+        with get_db() as db2:
+            add_alarm(db2, "keyword-difficulty", "Keyword '" + keyword + "': sværhedsgrad " + str(result["difficulty"]) + "/100 (" + result["label"] + ") — top: " + result["top_domains"][:80], "info")
     return RedirectResponse("/", status_code=303)
 
 
@@ -1725,11 +1916,11 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
-<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null, dups: null, healthChart: null }">
+<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.3 PRO</span></h1>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.4 PRO</span></h1>
             <p class="text-xs text-zinc-400">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
@@ -1851,6 +2042,17 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                 <h2 class="text-xs uppercase tracking-wider text-zinc-400">Resultat</h2>
                 <div class="text-sm font-bold px-3 py-1 rounded-xl border" :class="seoResult?.score >= 80 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : seoResult?.score >= 50 ? 'bg-amber-500/10 text-amber-400 border-amber-500/30' : 'bg-rose-500/10 text-rose-400 border-rose-500/30'" x-text="seoResult?.score + ' / 100'"></div>
             </div>
+            <div class="mb-3">
+                <button @click="loadRewrite()" class="text-xs bg-purple-500/10 text-purple-400 border border-purple-500/30 px-3 py-1.5 rounded-lg">✨ AI-rewrite titel/meta</button>
+            </div>
+            <div x-show="rewrite" style="display: none;" class="mb-3 text-xs bg-zinc-950 border border-purple-500/30 rounded-xl p-3 space-y-2">
+                <div x-show="rewrite?.error" class="text-amber-400" x-text="rewrite?.error"></div>
+                <div class="font-medium text-purple-400">Titel-forslag</div>
+                <template x-for="t in (rewrite?.titles || [])"><div class="text-zinc-300 cursor-pointer hover:text-emerald-400" @click="navigator.clipboard.writeText(t)" x-text="t"></div></template>
+                <div class="font-medium text-purple-400 pt-1">Meta-forslag</div>
+                <template x-for="d in (rewrite?.descriptions || [])"><div class="text-zinc-300 cursor-pointer hover:text-emerald-400" @click="navigator.clipboard.writeText(d)" x-text="d"></div></template>
+                <div class="text-zinc-500" x-text="rewrite?.note"></div>
+            </div>
             <div x-show="seoResult?.psi" style="display: none;" class="mb-3 text-xs bg-zinc-950 border border-zinc-800 rounded-xl p-3">
                 <span class="text-zinc-400">Core Web Vitals (mobile):</span>
                 Performance <span class="text-emerald-400 font-bold" x-text="seoResult?.psi?.perf + '/100'"></span> ·
@@ -1874,6 +2076,28 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                 <input type="number" name="max_pages" value="30" min="5" max="100" class="w-24 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Crawl</button>
             </form>
+            <div class="flex gap-2 mt-2">
+                <button @click="loadDiff()" class="text-xs bg-zinc-800 text-zinc-300 border border-zinc-700 px-3 py-1.5 rounded-lg">🔄 Sammenlign med forrige crawl</button>
+                <a href="/api/sitemap.xml" class="text-xs bg-zinc-800 text-zinc-300 border border-zinc-700 px-3 py-1.5 rounded-lg">⬇️ Download sitemap.xml</a>
+                <button @click="loadRedirects()" class="text-xs bg-zinc-800 text-zinc-300 border border-zinc-700 px-3 py-1.5 rounded-lg">🔀 Redirect-audit</button>
+            </div>
+            <div x-show="diff" style="display: none;" class="mt-3 text-xs bg-zinc-950 border border-zinc-800 rounded-xl p-3 space-y-1">
+                <div x-show="diff?.error" class="text-amber-400" x-text="diff?.error"></div>
+                <div><span class="text-emerald-400" x-text="'➕ Nye sider: ' + (diff?.new?.length || 0)"></span>
+                     <span class="text-rose-400 ml-3" x-text="'➖ Fjernede: ' + (diff?.removed?.length || 0)"></span>
+                     <span class="text-amber-400 ml-3" x-text="'✏️ Ændret indhold: ' + (diff?.changed_content?.length || 0)"></span>
+                     <span class="text-rose-400 ml-3" x-text="'📉 Score-fald >10: ' + (diff?.score_drops?.length || 0)"></span></div>
+                <template x-for="u in (diff?.score_drops || [])"><div class="text-zinc-500 truncate">📉 <span x-text="u.url"></span> <span x-text="u.old_score + ' → ' + u.score"></span></div></template>
+                <template x-for="u in (diff?.removed || []).slice(0,5)"><div class="text-zinc-500 truncate">➖ <span x-text="u"></span></div></template>
+            </div>
+            <div x-show="redir" style="display: none;" class="mt-3 text-xs bg-zinc-950 border border-zinc-800 rounded-xl p-3 space-y-1">
+                <div><span class="text-zinc-400" x-text="'Sider med redirects: ' + (redir?.with_redirects || 0)"></span>
+                     <span class="text-amber-400 ml-3" x-text="'Kæder (2+ hop): ' + (redir?.chains?.length || 0)"></span>
+                     <span class="text-rose-400 ml-3" x-text="'🌀 Loops: ' + (redir?.loops?.length || 0)"></span>
+                     <span class="text-amber-400 ml-3" x-text="'🔓 http-links: ' + (redir?.insecure?.length || 0)"></span></div>
+                <template x-for="c in (redir?.chains || []).slice(0,5)"><div class="text-zinc-500 truncate">🔗 <span x-text="c.chain"></span></div></template>
+                <template x-for="l in (redir?.loops || [])"><div class="text-rose-400 truncate">🌀 <span x-text="l.chain"></span></div></template>
+            </div>
             {% if crawl %}
             <div class="mt-3 text-xs text-zinc-400">
                 Seneste crawl: {{ crawl.host }} · {{ crawl.pages }} sider · snitscore <span class="font-bold" :class="">{{ crawl.avg_score if crawl.avg_score is not none else '—' }}</span>/100 · robots.txt {{ '✅' if crawl.robots_ok else '❌' }} · sitemap {{ '✅ ' ~ crawl.sitemap_urls ~ ' URLs' if crawl.sitemap_ok else '❌' }}
@@ -2259,6 +2483,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             <form action="/serp/gap" method="POST" class="flex gap-2">
                 <input type="text" name="keyword" placeholder="Søgeord..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Analysér top 10</button>
+                <button formaction="/keywords/difficulty" class="bg-amber-500/10 text-amber-400 border border-amber-500/30 px-5 py-2 rounded-xl text-sm whitespace-nowrap">🎯 Sværhedsgrad</button>
             </form>
             <div class="space-y-2 mt-3">
                 {% for g in gaps %}
@@ -2268,6 +2493,18 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                 </div>
                 {% else %}
                 <p class="text-xs text-zinc-500">Ingen gap-analyser endnu.</p>
+                {% endfor %}
+            </div>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Keyword-sværhedsgrad (Ahrefs-kopi — heuristic over top 10)</h2>
+            <div class="flex flex-wrap gap-2">
+                {% for k in difficulties %}
+                <span class="px-2 py-1 rounded-lg text-[11px] {% if k.difficulty < 35 %}bg-emerald-500/10 text-emerald-400{% elif k.difficulty < 60 %}bg-amber-500/10 text-amber-400{% else %}bg-rose-500/10 text-rose-400{% endif %}">
+                    {{ k.keyword }} · {{ k.difficulty }}/100 · {{ k.authority }} autoritetsdomæner
+                </span>
+                {% else %}
+                <p class="text-xs text-zinc-500">Ingen analyser endnu — brug 🎯-knappen ovenfor.</p>
                 {% endfor %}
             </div>
         </div>
@@ -2350,6 +2587,27 @@ function loadHealth() {
 }
 if (document.getElementById('healthchart')) loadHealth();
 
+function ccState() { return Alpine.$data(document.body); }
+function loadDiff() {
+    fetch('/api/crawl/diff').then(r => r.json()).then(d => {
+        const s = ccState();
+        if (d.error) { s.redir = null; s.diff = { new: [], removed: [], changed_content: [], score_drops: [], error: d.error }; }
+        else { s.redir = null; s.diff = d; }
+    });
+}
+function loadRedirects() {
+    fetch('/api/redirects').then(r => r.json()).then(d => { const s = ccState(); s.diff = null; s.redir = d; });
+}
+function loadRewrite() {
+    const s = ccState();
+    const form = document.querySelector('input[name=psi]')?.closest('form');
+    const url = (form?.querySelector('input[name=url]')?.value || '').trim();
+    const kw = (form?.querySelector('input[name=keyword]')?.value || '').trim();
+    if (!url) return;
+    fetch('/seo/rewrite', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: 'url=' + encodeURIComponent(url) + '&keyword=' + encodeURIComponent(kw) })
+        .then(r => r.json()).then(d => { s.rewrite = d.error ? { error: d.error } : d; });
+}
 function loadVis() {
     fetch('/api/visibility').then(r => r.json()).then(data => {
         if (!data.scores.length) return;

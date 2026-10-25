@@ -64,6 +64,8 @@ import secrets
 import csv
 import io
 import time
+import hashlib
+import json as jsonlib
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data", "center.db")
@@ -82,8 +84,9 @@ SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "").strip()
 TRACK_DOMAIN = os.environ.get("TRACK_DOMAIN", "steamgears.eu").strip()
 SSL_WARN_DAYS = int(os.environ.get("SSL_WARN_DAYS", "30"))
 LINKCHECK_LIMIT = int(os.environ.get("LINKCHECK_LIMIT", "25"))
+PSI_API_KEY = os.environ.get("PSI_API_KEY", "").strip()   # Google PageSpeed API (gratis noegle)
 
-app = FastAPI(title="Command Center Engine", version="7.0")
+app = FastAPI(title="Command Center Engine", version="7.2")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 scheduler = AsyncIOScheduler(timezone="Europe/Copenhagen")
@@ -248,11 +251,86 @@ def init_db():
             started_at TEXT,
             finished_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS monitors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            type TEXT NOT NULL DEFAULT 'contains',
+            expected TEXT NOT NULL,
+            last_status TEXT DEFAULT 'Ikke tjekket',
+            last_result TEXT,
+            last_checked TEXT
+        );
+        CREATE TABLE IF NOT EXISTS ai_visibility (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            question TEXT NOT NULL,
+            mention_found INTEGER DEFAULT 0,
+            snippet TEXT,
+            answer TEXT,
+            checked_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS health_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            host TEXT,
+            avg_score INTEGER,
+            pages INTEGER,
+            run_id INTEGER,
+            checked_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS internal_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_url TEXT,
+            to_url TEXT,
+            anchor TEXT,
+            reason TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS keyword_ideas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            keyword TEXT,
+            idea TEXT,
+            source TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS content_gap (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            keyword TEXT NOT NULL,
+            stats_json TEXT,
+            top_titles TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS outreach (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            source_url TEXT,
+            found_at TEXT,
+            UNIQUE(email, source_url)
+        );
+        CREATE TABLE IF NOT EXISTS visibility (
+            day TEXT PRIMARY KEY,
+            score REAL
+        );
         """)
 
 
 init_db()
 
+
+def migrate_db():
+    with get_db() as db:
+        cols = {}
+        for table, want in {
+            "articles": ["meta_title", "meta_desc"],
+            "seopages": ["content_hash", "redirects"],
+            "crawl_runs": ["sitemap_broken", "sitemap_missing"],
+        }.items():
+            existing = [r[1] for r in db.execute(f"PRAGMA table_info({table})").fetchall()]
+            for c in want:
+                if c not in existing:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {c} TEXT")
+
+
+migrate_db()
 
 # ---------- Auth ----------
 def is_authed(request: Request) -> bool:
@@ -525,6 +603,16 @@ def analyze_page(url: str, keyword: str = "", html: str = None, status_code: int
         sentences = [s for s in re.split(r"[.!?]+\s", text) if len(s.strip()) > 2]
         avg_sent = round(wc / max(len(sentences), 1), 1)
         items.append(_check("Lesbarhed: saetninger < 25 ord", avg_sent < 25, 1, f"snit {avg_sent} ord"))
+        def _syllables(w):
+            w = w.lower()
+            groups = re.findall(r"[aeiouyaeiouy]+", w)
+            return max(len(groups), 1)
+        try:
+            syl = sum(_syllables(w) for w in words)
+            flesch = round(206.835 - 1.015 * (wc / max(len(sentences), 1)) - 84.6 * (syl / max(wc, 1)))
+            items.append(_check("Flesch-lesbarhed > 50", flesch > 50, 1, f"score {flesch}"))
+        except Exception:
+            pass
         paragraphs = [p for p in soup.find_all("p") if len(p.get_text(strip=True)) > 20]
         long_paras = 0
         for p in paragraphs:
@@ -572,13 +660,40 @@ def analyze_page(url: str, keyword: str = "", html: str = None, status_code: int
                 "title": "", "meta": "", "h1": "", "words": 0, "internal": 0, "external": 0}
 
 
+def psi_fetch(url: str):
+    if not PSI_API_KEY:
+        return None
+    try:
+        r = requests.get(
+            "https://www.googleapis.com/pagespeedonline/v5/runPagespeed",
+            params={"url": url, "key": PSI_API_KEY, "strategy": "mobile"},
+            timeout=60,
+        )
+        r.raise_for_status()
+        d = r.json()
+        lr = d.get("lighthouseResult", {})
+        cats = lr.get("categories", {}).get("performance", {}).get("score")
+        audits = lr.get("audits", {})
+        lcp = audits.get("largest-contentful-paint", {}).get("displayValue", "")
+        cls = audits.get("cumulative-layout-shift", {}).get("displayValue", "")
+        return {"perf": round((cats or 0) * 100), "lcp": lcp, "cls": cls}
+    except Exception:
+        return None
+
+
 @app.post("/seo/audit")
 async def run_seo_audit(request: Request):
     form = await request.form()
     url = form.get("url", "")
     keyword = form.get("keyword", "")
+    use_psi = form.get("psi", "") == "1"
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(executor, analyze_page, url, keyword)
+    if use_psi:
+        loop2 = asyncio.get_event_loop()
+        psi = await loop2.run_in_executor(executor, psi_fetch, url)
+        if psi:
+            result["psi"] = psi
     return JSONResponse(result)
 
 
@@ -637,13 +752,22 @@ def site_crawl_sync(start_url: str, max_pages: int = 30):
                 res = {"score": 0, "title": "", "meta": "", "h1": "", "words": 0, "raw": []}
                 status = 0
             issues = [c["name"] for c in res.get("raw", []) if not c["ok"]]
+            redirects = ""
+            if resp is not None and resp.history:
+                redirects = " -> ".join([str(r.status_code) for r in resp.history] + [str(resp.status_code)]) +                             " | " + " -> ".join([r.url for r in resp.history] + [resp.url])
+            content_hash = ""
+            if resp is not None and resp.status_code == 200:
+                psoup2 = BeautifulSoup(resp.text, "html.parser")
+                for t in psoup2(["script", "style", "noscript"]):
+                    t.decompose()
+                content_hash = hashlib.md5(" ".join(psoup2.get_text().split()).encode()).hexdigest()
             with get_db() as db:
                 db.execute(
-                    "INSERT INTO seopages (run_id, url, http_status, title, meta_len, h1, words, score, issues, crawled_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO seopages (run_id, url, http_status, title, meta_len, h1, words, score, issues, redirects, content_hash, crawled_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (run_id, current, status, res.get("title", "")[:200], len(res.get("meta", "")),
                      res.get("h1", "")[:200], res.get("words", 0), res["score"],
-                     "; ".join(issues[:8]), now_iso()),
+                     "; ".join(issues[:8]), redirects[:300], content_hash, now_iso()),
                 )
             if resp is not None and resp.status_code < 400:
                 total_score += res["score"]
@@ -660,9 +784,33 @@ def site_crawl_sync(start_url: str, max_pages: int = 30):
             CRAWL_STATE["done"] = len(seen)
             time.sleep(0.4)
         avg = round(total_score / pages_saved) if pages_saved else 0
+        # sitemap-validering: tjek foerste 50 sitemap-URLs for 404/fejl
+        sitemap_broken = []
+        sitemap_missing = 0
+        if sitemap_ok:
+            try:
+                sm_urls = []
+                r3 = safe_request(sitemap_url, timeout=10)
+                for loc in BeautifulSoup(r3.text, "html.parser").find_all("loc"):
+                    sm_urls.append(loc.get_text(strip=True))
+                for su in sm_urls[:50]:
+                    try:
+                        rr = safe_request(su, timeout=8)
+                        if rr.status_code >= 400:
+                            sitemap_broken.append(f"{su} ({rr.status_code})")
+                    except Exception:
+                        sitemap_broken.append(f"{su} (timeout)")
+                    time.sleep(0.2)
+            except Exception:
+                pass
         with get_db() as db:
-            db.execute("UPDATE crawl_runs SET pages=?, avg_score=?, finished_at=? WHERE id=?",
-                       (pages_saved, avg, now_iso(), run_id))
+            db.execute("UPDATE crawl_runs SET pages=?, avg_score=?, finished_at=?, sitemap_broken=?, sitemap_missing=? WHERE id=?",
+                       (pages_saved, avg, now_iso(), "; ".join(sitemap_broken[:10]) if sitemap_broken else "",
+                        max(sitemap_count - pages_saved, 0) if sitemap_ok else 0, run_id))
+            db.execute("INSERT INTO health_history (host, avg_score, pages, run_id, checked_at) VALUES (?,?,?,?,?)",
+                       (host, avg, pages_saved, run_id, now_iso()))
+            if sitemap_broken:
+                add_alarm(db, "sitemap", f"{len(sitemap_broken)} sitemap-URLs fejler (foerste 50 tjekket)", "advarsel")
         CRAWL_STATE.update({"running": False, "avg": avg})
         return {"ok": True, "pages": pages_saved, "avg_score": avg, "robots_ok": robots_ok,
                 "sitemap_ok": sitemap_ok, "sitemap_urls": sitemap_count}
@@ -969,6 +1117,18 @@ def check_all_keywords_sync():
                     "UPDATE keywords SET position=?, target_url=?, checked_at=? WHERE id=?",
                     (res["position"], res["url"], now_iso(), kw["id"]),
                 )
+    with get_db() as db:
+        kws2 = db.execute("SELECT * FROM keywords").fetchall()
+        score = 0.0
+        for kw in kws2:
+            if kw["position"] and kw["position"] <= 50:
+                score += (51 - kw["position"]) / 50
+        vis = round(score / max(len(kws2), 1) * 100, 1) if kws2 else 0.0
+        db.execute(
+            "INSERT INTO visibility (day, score) VALUES (?,?) "
+            "ON CONFLICT(day) DO UPDATE SET score=excluded.score",
+            (date.today().isoformat(), vis),
+        )
 
 
 @app.post("/keywords/add")
@@ -1045,6 +1205,404 @@ async def bridge_drift(request: Request):
     return {"ok": True}
 
 
+# ---------- Duplicates & redirects rapport ----------
+def duplicates_report():
+    with get_db() as db:
+        dup_titles = db.execute(
+            "SELECT title, COUNT(*) AS n, GROUP_CONCAT(url, ' | ') AS urls FROM seopages "
+            "WHERE title != '' GROUP BY LOWER(TRIM(title)) HAVING n > 1 ORDER BY n DESC LIMIT 20"
+        ).fetchall()
+        dup_h1 = db.execute(
+            "SELECT h1, COUNT(*) AS n, GROUP_CONCAT(url, ' | ') AS urls FROM seopages "
+            "WHERE h1 != '' GROUP BY LOWER(TRIM(h1)) HAVING n > 1 ORDER BY n DESC LIMIT 20"
+        ).fetchall()
+        dup_content = db.execute(
+            "SELECT content_hash, COUNT(*) AS n, GROUP_CONCAT(url, ' | ') AS urls FROM seopages "
+            "WHERE content_hash != '' GROUP BY content_hash HAVING n > 1 ORDER BY n DESC LIMIT 20"
+        ).fetchall()
+        redirects = db.execute(
+            "SELECT url, redirects FROM seopages WHERE redirects != '' ORDER BY id LIMIT 50"
+        ).fetchall()
+    return {"titles": [dict(r) for r in dup_titles], "h1": [dict(r) for r in dup_h1],
+            "content": [dict(r) for r in dup_content], "redirects": [dict(r) for r in redirects]}
+
+
+@app.get("/api/duplicates")
+async def get_duplicates():
+    return JSONResponse(duplicates_report())
+
+
+# ---------- AI: interne links, meta/social, synlighed ----------
+def ai_chat(prompt: str, max_tokens: int = 1500):
+    resp = requests.post(
+        "https://api.aimlapi.com/v1/chat/completions",
+        headers={"Authorization": f"Bearer {AIMLAPI_KEY}", "Content-Type": "application/json"},
+        json={"model": AI_MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens},
+        timeout=120,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
+
+@app.post("/seo/linksuggest")
+async def suggest_internal_links():
+    if not AIMLAPI_KEY:
+        return JSONResponse({"ok": False, "error": "AIMLAPI_KEY ikke sat"})
+    with get_db() as db:
+        pages = db.execute("SELECT url, title, h1, words FROM seopages ORDER BY score DESC LIMIT 40").fetchall()
+        kws = [r["keyword"] for r in db.execute("SELECT keyword FROM keywords LIMIT 20").fetchall()]
+    if len(pages) < 3:
+        return JSONResponse({"ok": False, "error": "Koer foerst et site-crawl (min. 3 sider)"})
+    listing = "\n".join([f"- {p['url']} | titel: {p['title'][:70]} | H1: {p['h1'][:50]}" for p in pages])
+    prompt = (
+        "You are an internal linking strategist for a steampunk cosplay webshop. "
+        "Given this list of pages:\n" + listing +
+        "\nAnd target keywords: " + ", ".join(kws) +
+        "\nSuggest 8-12 internal links that should be added (from one page to another, both must be in the list). "
+        'Return ONLY a JSON array like [{"from":"URL","to":"URL","anchor":"anchor text","reason":"short reason"}]. No markdown.'
+    )
+    try:
+        loop = asyncio.get_event_loop()
+        raw = await loop.run_in_executor(executor, ai_chat, prompt)
+        m = re.search(r"\[.*\]", raw, re.S)
+        suggestions = jsonlib.loads(m.group(0)) if m else []
+        with get_db() as db:
+            db.execute("DELETE FROM internal_links")
+            for s in suggestions[:12]:
+                db.execute("INSERT INTO internal_links (from_url, to_url, anchor, reason, created_at) VALUES (?,?,?,?,?)",
+                           (s.get("from", ""), s.get("to", ""), s.get("anchor", ""), s.get("reason", ""), now_iso()))
+        return JSONResponse({"ok": True, "count": len(suggestions)})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)[:200]})
+
+
+@app.post("/articles/meta")
+async def generate_meta(id: int = Form(...)):
+    if not AIMLAPI_KEY:
+        return RedirectResponse("/", status_code=303)
+    with get_db() as db:
+        art = db.execute("SELECT * FROM articles WHERE id=?", (id,)).fetchone()
+    if not art:
+        return RedirectResponse("/", status_code=303)
+    text = re.sub(r"<[^>]+>", " ", art["content"])[:3000]
+    prompt = (
+        f"For this article titled '{art['title']}', produce EXACTLY this JSON (no markdown): "
+        '{"meta_title":"max 60 chars","meta_description":"70-160 chars","social_post":"punchy social media post, max 240 chars, 2-3 relevant hashtags"}. '
+        "Article text:\n" + text
+    )
+    try:
+        loop = asyncio.get_event_loop()
+        raw = await loop.run_in_executor(executor, ai_chat, prompt)
+        m = re.search(r"\{.*\}", raw, re.S)
+        data = jsonlib.loads(m.group(0)) if m else {}
+        with get_db() as db:
+            db.execute("UPDATE articles SET meta_title=?, meta_desc=? WHERE id=?",
+                       (data.get("meta_title", ""), data.get("meta_description", ""), id))
+            post = data.get("social_post", "")
+            if post:
+                db.execute("INSERT INTO socialqueue (platform, message, created_at) VALUES (?,?,?)",
+                           ("auto: " + art["keyword"], post, now_iso()))
+    except Exception as e:
+        with get_db() as db:
+            add_alarm(db, "ai-meta", f"Meta/social-generering fejlede for artikel #{id}: {str(e)[:150]}", "advarsel")
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/ai/visibility")
+async def ai_visibility(question: str = Form(...)):
+    if not AIMLAPI_KEY:
+        return RedirectResponse("/", status_code=303)
+    question = question.strip()
+    if not question:
+        return RedirectResponse("/", status_code=303)
+    try:
+        loop = asyncio.get_event_loop()
+        answer = await loop.run_in_executor(executor, ai_chat, question + " Name specific websites and shops in your answer.", 800)
+        found = TRACK_DOMAIN.lower() in answer.lower()
+        snippet = ""
+        idx = answer.lower().find(TRACK_DOMAIN.lower())
+        if idx >= 0:
+            snippet = answer[max(idx - 120, 0):idx + 160]
+        with get_db() as db:
+            db.execute("INSERT INTO ai_visibility (question, mention_found, snippet, answer, checked_at) VALUES (?,?,?,?,?)",
+                       (question, int(found), snippet, answer[:2000], now_iso()))
+    except Exception as e:
+        with get_db() as db:
+            add_alarm(db, "ai-synlighed", f"Synlighedstjek fejlede: {str(e)[:150]}", "advarsel")
+    return RedirectResponse("/", status_code=303)
+
+
+# ---------- Keyword/content-monitors ----------
+
+def add_alarm_sync_global(message):
+    try:
+        with get_db() as db:
+            add_alarm(db, "pris-monitor", message, "advarsel")
+    except Exception:
+        pass
+
+
+def run_monitor_sync(m):
+    url = m["url"]
+    try:
+        resp = safe_request(url, timeout=10)
+        if resp.status_code >= 400:
+            return f"HTTP-fejl {resp.status_code}", False
+        if m["type"] == "contains":
+            ok = m["expected"] in resp.text
+            return ("Fundet" if ok else "IKKE fundet: " + m["expected"][:50], ok)
+        elif m["type"] == "price":
+            psoup = BeautifulSoup(resp.text, "html.parser")
+            price = None
+            pm = psoup.find("meta", attrs={"property": "product:price:amount"})
+            if pm:
+                price = pm.get("content")
+            if not price:
+                for s in psoup.find_all("script", attrs={"type": "application/ld+json"}):
+                    try:
+                        d = jsonlib.loads(s.string or "{}")
+                        offers = d.get("offers") or {}
+                        if isinstance(offers, list) and offers:
+                            offers = offers[0]
+                        price = offers.get("price") or d.get("price")
+                        if price:
+                            break
+                    except Exception:
+                        continue
+            if price is None:
+                return "Ingen pris fundet paa siden", False
+            prev = m["last_result"] or ""
+            try:
+                changed = abs(float(prev) - float(price)) > 0.001 if prev else False
+            except Exception:
+                changed = False
+            if changed:
+                add_alarm_sync_global(f"Prisaendring paa {url}: {prev} -> {price}")
+            return f"Pris: {price}" + (f" (var {prev})" if changed else ""), True
+        elif m["type"] == "json":
+            data = resp.json()
+            node = data
+            for part in m["expected"].split("."):
+                if isinstance(node, list) and part.isdigit():
+                    node = node[int(part)]
+                elif isinstance(node, dict):
+                    node = node.get(part)
+                else:
+                    node = None
+                    break
+            ok = bool(node)
+            return (f"JSON-path '{m['expected']}' = {str(node)[:60]}", ok)
+        return "Ukendt type", False
+    except Exception as e:
+        return f"Fejl: {str(e)[:120]}", False
+
+
+def check_all_monitors_sync():
+    with get_db() as db:
+        monitors = db.execute("SELECT * FROM monitors").fetchall()
+    for m in monitors:
+        status, ok = run_monitor_sync(m)
+        with get_db() as db:
+            db.execute("UPDATE monitors SET last_status=?, last_result=?, last_checked=? WHERE id=?",
+                       (status, status, now_iso(), m["id"]))
+            if not ok:
+                add_alarm(db, "monitor", f"{m['name']} ({m['url']}): {status}", "kritisk")
+
+
+@app.post("/monitors/add")
+async def add_monitor(name: str = Form(...), url: str = Form(...), type_: str = Form(...), expected: str = Form(...)):
+    if name.strip() and url.strip() and expected.strip():
+        with get_db() as db:
+            db.execute("INSERT INTO monitors (name, url, type, expected) VALUES (?,?,?,?)",
+                       (name.strip(), normalize_url(url), type_, expected.strip()))
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/monitors/delete")
+async def delete_monitor(id: int = Form(...)):
+    with get_db() as db:
+        db.execute("DELETE FROM monitors WHERE id=?", (id,))
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/monitors/check")
+async def check_monitors():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(executor, check_all_monitors_sync)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.get("/api/health-history")
+async def health_history():
+    with get_db() as db:
+        rows = db.execute("SELECT checked_at, avg_score FROM health_history ORDER BY id DESC LIMIT 40").fetchall()
+    rows = list(reversed(rows))
+    return JSONResponse({"labels": [r["checked_at"][5:16] for r in rows], "scores": [r["avg_score"] for r in rows]})
+
+
+# ---------- PRO: keyword-ideer, content gap, outreach ----------
+def autocomplete_sources(keyword: str):
+    ideas = []
+    try:
+        r = requests.get(
+            "https://suggestqueries.google.com/complete/search",
+            params={"client": "firefox", "q": keyword, "hl": "en"},
+            timeout=8,
+        )
+        for item in r.json()[1][:15]:
+            ideas.append((item, "Google suggest"))
+    except Exception:
+        pass
+    try:
+        r2 = requests.get("https://duckduckgo.com/ac/", params={"q": keyword, "type": "list"}, timeout=8)
+        data = r2.json()
+        for item in (data[1] if isinstance(data, list) and len(data) > 1 else []):
+            if item not in [i for i, _ in ideas]:
+                ideas.append((item, "DuckDuckGo"))
+    except Exception:
+        pass
+    return ideas
+
+
+@app.post("/keywords/ideas")
+async def keyword_ideas(keyword: str = Form(...)):
+    keyword = keyword.strip()
+    if not keyword:
+        return RedirectResponse("/", status_code=303)
+    loop = asyncio.get_event_loop()
+    ideas = await loop.run_in_executor(executor, autocomplete_sources, keyword)
+    with get_db() as db:
+        for idea, source in ideas:
+            db.execute("INSERT OR IGNORE INTO keyword_ideas (keyword, idea, source, created_at) VALUES (?,?,?,?)",
+                       (keyword, idea, source, now_iso()))
+    return RedirectResponse("/", status_code=303)
+
+
+def serp_gap_sync(keyword: str):
+    if not SERPAPI_KEY:
+        return {"error": "SERPAPI_KEY ikke sat i .env"}
+    try:
+        resp = requests.get(
+            "https://serpapi.com/search",
+            params={"engine": "google", "q": keyword, "api_key": SERPAPI_KEY, "num": 10},
+            timeout=25,
+        )
+        resp.raise_for_status()
+        organic = resp.json().get("organic_results", [])[:10]
+        stats = []
+        titles = []
+        for item in organic:
+            link = item.get("link", "")
+            title = item.get("title", "")
+            titles.append(title)
+            words = h2s = 0
+            try:
+                pr = safe_request(link, timeout=8)
+                psoup = BeautifulSoup(pr.text, "html.parser")
+                for t in psoup(["script", "style", "noscript"]):
+                    t.decompose()
+                words = len(psoup.get_text().split())
+                h2s = len(psoup.find_all("h2"))
+            except Exception:
+                pass
+            stats.append({"url": link, "words": words, "h2": h2s})
+        good = [s for s in stats if s["words"]]
+        summary = {
+            "avg_words": round(sum(s["words"] for s in good) / len(good)) if good else 0,
+            "avg_h2": round(sum(s["h2"] for s in good) / len(good), 1) if good else 0,
+            "pages_fetched": len(good),
+        }
+        with get_db() as db:
+            db.execute("INSERT INTO content_gap (keyword, stats_json, top_titles, created_at) VALUES (?,?,?,?)",
+                       (keyword, jsonlib.dumps({"summary": summary, "stats": stats}), " | ".join(titles[:10]), now_iso()))
+        return {"ok": True, "summary": summary, "stats": stats, "titles": titles}
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
+
+@app.post("/serp/gap")
+async def serp_gap(keyword: str = Form(...)):
+    keyword = keyword.strip()
+    if not keyword:
+        return RedirectResponse("/", status_code=303)
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(executor, serp_gap_sync, keyword)
+    return RedirectResponse("/", status_code=303)
+
+
+def content_score(article, gap):
+    if not gap or "summary" not in gap:
+        return None
+    target_words = gap["summary"]["avg_words"] or 600
+    target_h2 = gap["summary"]["avg_h2"] or 4
+    soup = BeautifulSoup(article["content"], "html.parser")
+    words = len(soup.get_text().split())
+    h2s = len(soup.find_all("h2"))
+    kw = (article["keyword"] or "").lower()
+    text_l = soup.get_text().lower()
+    kw_hits = text_l.count(kw) if kw else 0
+    w_score = min(words / target_words, 1.0) * 40
+    h_score = min(h2s / target_h2, 1.0) * 30
+    k_score = min(kw_hits / 6, 1.0) * 30
+    return {"score": round(w_score + h_score + k_score), "words": words, "target_words": target_words,
+            "h2": h2s, "target_h2": target_h2, "kw_hits": kw_hits}
+
+
+@app.post("/articles/score")
+async def article_score(id: int = Form(...)):
+    with get_db() as db:
+        art = db.execute("SELECT * FROM articles WHERE id=?", (id,)).fetchone()
+    if not art:
+        return RedirectResponse("/", status_code=303)
+    with get_db() as db:
+        gap_row = db.execute("SELECT * FROM content_gap WHERE keyword=? ORDER BY id DESC LIMIT 1", (art["keyword"],)).fetchone()
+    if gap_row:
+        gap = {"summary": jsonlib.loads(gap_row["stats_json"])["summary"]}
+    else:
+        loop = asyncio.get_event_loop()
+        gap = await loop.run_in_executor(executor, serp_gap_sync, art["keyword"])
+    result = content_score(art, gap)
+    if result:
+        result["status"] = f"Content Score: {result['score']}/100 (mal: {result['target_words']} ord, {result['target_h2']} H2)"
+    else:
+        result = {"status": f"Kunne ikke saette score: {gap.get('error', 'ingen SERP-data')}" if isinstance(gap, dict) else "Ingen data"}
+    with get_db() as db:
+        db.execute("INSERT INTO notes (content, created_at) VALUES (?,?)",
+                   (f"[Content Score] {art['title']}: {result.get('status', '')}", now_iso()))
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/outreach/scan")
+async def outreach_scan(url: str = Form(...)):
+    try:
+        url = normalize_url(url)
+    except ValueError:
+        return RedirectResponse("/", status_code=303)
+    def scan(u):
+        try:
+            resp = safe_request(u, timeout=10)
+            emails = set(re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]{2,}", resp.text))
+            emails = {e for e in emails if not e.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))}
+            return emails
+        except Exception:
+            return set()
+    loop = asyncio.get_event_loop()
+    emails = await loop.run_in_executor(executor, scan, url)
+    with get_db() as db:
+        for e in emails:
+            db.execute("INSERT OR IGNORE INTO outreach (email, source_url, found_at) VALUES (?,?,?)",
+                       (e, url, now_iso()))
+    return RedirectResponse("/", status_code=303)
+
+
+@app.get("/api/visibility")
+async def visibility_series():
+    with get_db() as db:
+        rows = db.execute("SELECT day, score FROM visibility ORDER BY day DESC LIMIT 60").fetchall()
+    rows = list(reversed(rows))
+    return JSONResponse({"labels": [r["day"][5:] for r in rows], "scores": [r["score"] for r in rows]})
+
+
 # ---------- Dashboard ----------
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
@@ -1063,6 +1621,13 @@ async def dashboard(request: Request):
             "FROM gsc_queries GROUP BY query ORDER BY clicks DESC LIMIT 10"
         ).fetchall()
         drift_rows = db.execute("SELECT * FROM drift ORDER BY id DESC LIMIT 7").fetchall()
+        ideas = db.execute("SELECT * FROM keyword_ideas ORDER BY id DESC LIMIT 30").fetchall()
+        gaps = db.execute("SELECT * FROM content_gap ORDER BY id DESC LIMIT 5").fetchall()
+        outreach_rows = db.execute("SELECT DISTINCT email FROM outreach ORDER BY id DESC LIMIT 30").fetchall()
+        monitors = db.execute("SELECT * FROM monitors ORDER BY id DESC").fetchall()
+        ai_vis = db.execute("SELECT * FROM ai_visibility ORDER BY id DESC LIMIT 5").fetchall()
+        links_sug = db.execute("SELECT * FROM internal_links ORDER BY id").fetchall()
+        health_hist = db.execute("SELECT COUNT(*) AS n FROM health_history").fetchone()["n"]
         seo_pages = db.execute("SELECT * FROM seopages ORDER BY score ASC LIMIT 100").fetchall()
         crawl = db.execute("SELECT * FROM crawl_runs ORDER BY id DESC LIMIT 1").fetchone()
     return templates.TemplateResponse("dashboard.html", {
@@ -1084,6 +1649,13 @@ async def dashboard(request: Request):
         "telegram_enabled": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "auth_required": bool(APP_TOKEN),
         "seo_pages": seo_pages,
+        "monitors": monitors,
+        "ideas": ideas,
+        "gaps": gaps,
+        "outreach_rows": outreach_rows,
+        "ai_vis": ai_vis,
+        "links_sug": links_sug,
+        "health_hist_n": health_hist,
         "crawl": crawl,
     })
 
@@ -1107,7 +1679,7 @@ async def delete_note(id: int = Form(...)):
 async def health():
     return {
         "status": "ok",
-        "version": "7.1",
+        "version": "7.3",
         "ai": bool(AIMLAPI_KEY),
         "wordpress": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "serpapi": bool(SERPAPI_KEY),
@@ -1153,11 +1725,11 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
-<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null }">
+<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null, dups: null, healthChart: null }">
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.1</span></h1>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.3 PRO</span></h1>
             <p class="text-xs text-zinc-400">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
@@ -1175,6 +1747,9 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
         <button @click="tab='keywords'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='keywords' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🎯 Keywords</button>
         <button @click="tab='links'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='links' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🔗 Links</button>
         <button @click="tab='social'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='social' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">📱 Social</button>
+        <button @click="tab='ai'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='ai' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🤖 AI Tools</button>
+        <button @click="tab='monitors'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='monitors' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🩺 Monitors</button>
+        <button @click="tab='pro'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='pro' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">💼 Pro</button>
         <button @click="tab='alarms'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='alarms' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🚨 Alarmer{% if alarms %} ({{ alarms|length }}){% endif %}</button>
         <button @click="tab='notes'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='notes' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">📝 Noter</button>
     </div>
@@ -1259,11 +1834,12 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             <form @submit.prevent="
                 seoLoading = true; seoResult = null;
                 fetch('/seo/audit', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-                    body: 'url=' + encodeURIComponent($el.querySelector('input[name=url]').value) + '&keyword=' + encodeURIComponent($el.querySelector('input[name=keyword]').value || '') })
+                    body: 'url=' + encodeURIComponent($el.querySelector('input[name=url]').value) + '&keyword=' + encodeURIComponent($el.querySelector('input[name=keyword]').value || '') + '&psi=' + ($el.querySelector('input[name=psi]')?.checked ? '1' : '0') })
                 .then(r => r.json()).then(data => { seoResult = data; seoLoading = false; })"
                 class="flex flex-col md:flex-row gap-2">
                 <input type="text" name="url" placeholder="https://steamgears.eu/guide..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
-                <input type="text" name="keyword" placeholder="Focus keyword (valgfrit)" class="md:w-64 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <input type="text" name="keyword" placeholder="Focus keyword (valgfrit)" class="md:w-52 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <label class="flex items-center gap-1 text-xs text-zinc-400 whitespace-nowrap"><input type="checkbox" name="psi"> Core Web Vitals</label>
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Analysér</button>
             </form>
         </div>
@@ -1274,6 +1850,12 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             <div class="flex items-center justify-between mb-4">
                 <h2 class="text-xs uppercase tracking-wider text-zinc-400">Resultat</h2>
                 <div class="text-sm font-bold px-3 py-1 rounded-xl border" :class="seoResult?.score >= 80 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : seoResult?.score >= 50 ? 'bg-amber-500/10 text-amber-400 border-amber-500/30' : 'bg-rose-500/10 text-rose-400 border-rose-500/30'" x-text="seoResult?.score + ' / 100'"></div>
+            </div>
+            <div x-show="seoResult?.psi" style="display: none;" class="mb-3 text-xs bg-zinc-950 border border-zinc-800 rounded-xl p-3">
+                <span class="text-zinc-400">Core Web Vitals (mobile):</span>
+                Performance <span class="text-emerald-400 font-bold" x-text="seoResult?.psi?.perf + '/100'"></span> ·
+                LCP <span class="text-zinc-300" x-text="seoResult?.psi?.lcp"></span> ·
+                CLS <span class="text-zinc-300" x-text="seoResult?.psi?.cls"></span>
             </div>
             <ul class="space-y-2 text-xs">
                 <template x-for="item in seoResult?.items">
@@ -1325,6 +1907,55 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             </div>
         </div>
         {% endif %}
+
+        {% if health_hist_n %}
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Site Health over tid (crawl-snitscore)</h2>
+            <canvas id="healthchart" height="70"></canvas>
+        </div>
+        {% endif %}
+
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Duplikater & redirects (Screaming Frog-stil)</h2>
+                <button @click="fetch('/api/duplicates').then(r=>r.json()).then(d=>dups=d)" class="text-xs text-emerald-400">Analyser</button>
+            </div>
+            <div x-show="dups" style="display: none;" class="space-y-3 text-xs">
+                <template x-if="dups">
+                    <div class="space-y-3">
+                        <div>
+                            <p class="text-zinc-400 mb-1 font-medium">Dublettitler</p>
+                            <template x-for="(d, i) in dups.titles" :key="i">
+                                <p class="text-zinc-500">• <span class="text-zinc-300" x-text="d.n + 'x: '"></span><span x-text="d.urls"></span></p>
+                            </template>
+                            <p x-show="dups.titles.length === 0" class="text-emerald-400">✅ Ingen dublettitler</p>
+                        </div>
+                        <div>
+                            <p class="text-zinc-400 mb-1 font-medium">Dublet-H1</p>
+                            <template x-for="(d, i) in dups.h1" :key="'h'+i">
+                                <p class="text-zinc-500">• <span class="text-zinc-300" x-text="d.n + 'x: '"></span><span x-text="d.urls"></span></p>
+                            </template>
+                            <p x-show="dups.h1.length === 0" class="text-emerald-400">✅ Ingen dublet-H1'er</p>
+                        </div>
+                        <div>
+                            <p class="text-zinc-400 mb-1 font-medium">Næsten-identisk indhold</p>
+                            <template x-for="(d, i) in dups.content" :key="'c'+i">
+                                <p class="text-rose-400">• <span x-text="d.n + 'x: '"></span><span x-text="d.urls"></span></p>
+                            </template>
+                            <p x-show="dups.content.length === 0" class="text-emerald-400">✅ Intet duplikeret indhold</p>
+                        </div>
+                        <div>
+                            <p class="text-zinc-400 mb-1 font-medium">Redirects</p>
+                            <template x-for="(d, i) in dups.redirects" :key="'r'+i">
+                                <p class="text-zinc-500">• <span x-text="d.url"></span> → <span class="text-amber-400" x-text="d.redirects"></span></p>
+                            </template>
+                            <p x-show="dups.redirects.length === 0" class="text-emerald-400">✅ Ingen redirects fundet</p>
+                        </div>
+                    </div>
+                </template>
+            </div>
+            <p x-show="!dups" class="text-xs text-zinc-500">Kør et site-crawl først — kræver crawl-data.</p>
+        </div>
 
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5" x-show="false" id="histcard">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3" id="histtitle">Historik</h2>
@@ -1382,6 +2013,14 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                         <div class="flex gap-2 items-center shrink-0">
                             {% if art.wp_link %}<a href="{{ art.wp_link }}" target="_blank" class="text-emerald-400">Åbn i WP ↗</a>
                             {% else %}
+                            <form action="/articles/score" method="POST">
+                                <input type="hidden" name="id" value="{{ art.id }}">
+                                <button class="bg-zinc-800 text-zinc-300 border border-zinc-700 px-3 py-1 rounded-lg">📊 Score vs SERP</button>
+                            </form>
+                            <form action="/articles/meta" method="POST">
+                                <input type="hidden" name="id" value="{{ art.id }}">
+                                <button class="bg-zinc-800 text-zinc-300 border border-zinc-700 px-3 py-1 rounded-lg">✨ Meta/social</button>
+                            </form>
                             <form action="/articles/push" method="POST">
                                 <input type="hidden" name="id" value="{{ art.id }}">
                                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-3 py-1 rounded-lg">⬆ Push til WP (kladde)</button>
@@ -1393,6 +2032,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                             </form>
                         </div>
                     </div>
+                    {% if art.meta_title %}<div class="text-zinc-500 border-t border-zinc-800 pt-2">📌 <span class="text-zinc-300">{{ art.meta_title }}</span> — {{ art.meta_desc }}</div>{% endif %}
                     <div class="text-zinc-400 max-h-48 overflow-y-auto border-t border-zinc-800 pt-2">{{ art.content | safe }}</div>
                 </div>
                 {% else %}
@@ -1430,6 +2070,24 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                 <p class="text-xs text-zinc-500">Ingen keywords tilføjet endnu.</p>
                 {% endfor %}
             </div>
+        </div>
+    </section>
+
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Keyword-ideer (Ubersuggest-kopi — Google/DDG autocomplete)</h2>
+            <form action="/keywords/ideas" method="POST" class="flex gap-2">
+                <input type="text" name="keyword" placeholder="fx steampunk goggles" required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Find idéer</button>
+            </form>
+            <div class="flex flex-wrap gap-2 mt-3">
+                {% for i in ideas %}
+                <span class="px-2 py-0.5 rounded-lg bg-zinc-800 text-zinc-300 text-[11px]">{{ i.idea }} <span class="text-zinc-600">{{ i.source }}</span></span>
+                {% endfor %}
+            </div>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Visibility Index (SE Ranking-kopi — beregnes ved hvert keyword-tjek)</h2>
+            <canvas id="vischart" height="70"></canvas>
         </div>
     </section>
 
@@ -1516,6 +2174,123 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
         </div>
     </section>
 
+    <!-- AI TOOLS -->
+    <section x-show="tab === 'ai'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">AI interne link-forslag (AI Link Genius-stil)</h2>
+                <button @click="$el.textContent='Arbejder...'; fetch('/seo/linksuggest', {method:'POST'}).then(r=>r.json()).then(r=>{$el.textContent = r.ok ? '✅ ' + r.count + ' forslag' : '❌ ' + r.error; setTimeout(()=>location.reload(), 1200)})"
+                        class="text-xs text-emerald-400">Generér forslag</button>
+            </div>
+            <div class="space-y-2">
+                {% for l in links_sug %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs">
+                    <div class="text-zinc-300">{{ l.anchor }} — <span class="text-zinc-500">{{ l.reason }}</span></div>
+                    <div class="text-zinc-500 truncate">{{ l.from_url }} → <span class="text-emerald-400">{{ l.to_url }}</span></div>
+                </div>
+                {% else %}
+                <p class="text-xs text-zinc-500">Ingen forslag endnu. Kør site-crawl først, og kræver AIMLAPI_KEY.</p>
+                {% endfor %}
+            </div>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">AI-synlighed (RankMath AI Visibility-stil)</h2>
+            <form action="/ai/visibility" method="POST" class="flex gap-2">
+                <input type="text" name="question" placeholder="Hvor køber man steampunk goggles online?" required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Spørg AI</button>
+            </form>
+            <div class="space-y-2 mt-3">
+                {% for v in ai_vis %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs space-y-1">
+                    <div class="flex justify-between">
+                        <span class="text-zinc-300">{{ v.question }}</span>
+                        <span class="{% if v.mention_found %}text-emerald-400{% else %}text-rose-400{% endif %}">{{ '✅ Nævnt' if v.mention_found else '❌ Ikke nævnt' }}</span>
+                    </div>
+                    {% if v.snippet %}<div class="text-zinc-500">...{{ v.snippet }}...</div>{% endif %}
+                    <div class="text-zinc-500 text-[10px]">{{ v.checked_at }}</div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+
+    <!-- MONITORS -->
+    <section x-show="tab === 'monitors'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Content-monitors (Uptime Kuma-stil, tjekkes hver time)</h2>
+                <form action="/monitors/check" method="POST"><button class="text-xs text-emerald-400">🔄 Tjek nu</button></form>
+            </div>
+            <form action="/monitors/add" method="POST" class="grid grid-cols-1 md:grid-cols-5 gap-2 mb-3">
+                <input type="text" name="name" placeholder="Navn" required class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <input type="text" name="url" placeholder="https://steamgears.eu/shop/" required class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <select name="type_" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                    <option value="contains">contains (tekst på siden)</option>
+                    <option value="json">json (API-felt)</option>
+                    <option value="price">pris (JSON-LD / product:price)</option>
+                </select>
+                <input type="text" name="expected" placeholder="fx 'Add to cart' eller products.0.name" required class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Tilføj</button>
+            </form>
+            <div class="space-y-2">
+                {% for m in monitors %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs flex justify-between items-center">
+                    <div>
+                        <span class="font-medium">{{ m.name }}</span>
+                        <span class="text-zinc-500 ml-2">{{ m.url }}</span>
+                        <div class="text-zinc-500">{{ m.last_status }} · {{ m.last_checked or 'ikke tjekket' }}</div>
+                    </div>
+                    <form action="/monitors/delete" method="POST">
+                        <input type="hidden" name="id" value="{{ m.id }}">
+                        <button class="text-zinc-500 hover:text-rose-400">✕</button>
+                    </form>
+                </div>
+                {% else %}
+                <p class="text-xs text-zinc-500">Ingen monitors endnu — fx: tjek at shop-siden indeholder 'Add to cart'.</p>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+
+    <!-- PRO -->
+    <section x-show="tab === 'pro'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Content Gap (Semrush-kopi — kræver SERPAPI_KEY)</h2>
+            <form action="/serp/gap" method="POST" class="flex gap-2">
+                <input type="text" name="keyword" placeholder="Søgeord..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Analysér top 10</button>
+            </form>
+            <div class="space-y-2 mt-3">
+                {% for g in gaps %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs">
+                    <div class="font-medium text-emerald-400">{{ g.keyword }} <span class="text-zinc-500 text-[10px]">{{ g.created_at[:16] }}</span></div>
+                    <div class="text-zinc-400">{{ g.stats_json | truncate(160) }}</div>
+                </div>
+                {% else %}
+                <p class="text-xs text-zinc-500">Ingen gap-analyser endnu.</p>
+                {% endfor %}
+            </div>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Email-finder til outreach (Hunter.io-kopi)</h2>
+            <form action="/outreach/scan" method="POST" class="flex gap-2">
+                <input type="text" name="url" placeholder="https://konkurrent.dk/kontakt" required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Scan emails</button>
+            </form>
+            <div class="flex flex-wrap gap-2 mt-3">
+                {% for o in outreach_rows %}
+                <span class="px-2 py-0.5 rounded-lg bg-emerald-500/10 text-emerald-400 text-[11px]">{{ o.email }}</span>
+                {% else %}
+                <p class="text-xs text-zinc-500">Ingen emails fundet endnu.</p>
+                {% endfor %}
+            </div>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Pris-overvågning</h2>
+            <p class="text-xs text-zinc-400">Tilføj en monitor med typen <span class="text-emerald-400">pris</span> under 🩺 Monitors — så alarmeres der (Telegram + alarmer) når konkurrenter ændrer pris. Bruges fx på AliExpress-/konkurrent-produktsider med JSON-LD eller product:price-meta.</p>
+        </div>
+    </section>
+
     <!-- NOTER -->
     <section x-show="tab === 'notes'" class="space-y-4" style="display: none;">
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
@@ -1561,6 +2336,32 @@ function showHistory(domainId, url) {
         });
     });
 }
+
+function loadHealth() {
+    fetch('/api/health-history').then(r => r.json()).then(data => {
+        if (!data.scores.length) return;
+        if (window.healthChartInstance) window.healthChartInstance.destroy();
+        window.healthChartInstance = new Chart(document.getElementById('healthchart'), {
+            type: 'line',
+            data: { labels: data.labels, datasets: [{ label: 'snitscore', data: data.scores, borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', fill: true, tension: 0.3 }] },
+            options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#71717a', font: { size: 9 } } }, y: { ticks: { color: '#71717a' }, min: 0, max: 100 } } }
+        });
+    });
+}
+if (document.getElementById('healthchart')) loadHealth();
+
+function loadVis() {
+    fetch('/api/visibility').then(r => r.json()).then(data => {
+        if (!data.scores.length) return;
+        if (window.visChartInstance) window.visChartInstance.destroy();
+        window.visChartInstance = new Chart(document.getElementById('vischart'), {
+            type: 'line',
+            data: { labels: data.labels, datasets: [{ label: 'visibility %', data: data.scores, borderColor: '#34d399', backgroundColor: 'rgba(52,211,153,0.1)', fill: true, tension: 0.3 }] },
+            options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#71717a', font: { size: 9 } } }, y: { ticks: { color: '#71717a' }, min: 0, max: 100 } } }
+        });
+    });
+}
+if (document.getElementById('vischart')) loadVis();
 </script>
 </body>
 </html>
@@ -1656,7 +2457,7 @@ EOF_SERVICE
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.1
+# Command Center v7.3 PRO
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 
@@ -1684,6 +2485,15 @@ Eller med Docker: `cp .env.example .env && docker compose up -d --build`
 1. `cp .env.example .env` og udfyld noegler
 2. `./run.sh` → http://127.0.0.1:8000
 3. (VPS) saet `APP_TOKEN` i `.env` og kør bag reverse proxy, eller brug `deploy/command-center.service` + SSH-tunnel
+
+## PRO-funktioner (betalt-varktoej-kloner)
+- **Content Gap** (Semrush-kopi): top 10 SERP hentes via SerpAPI, gennemsnit af ord/H2 beregnes, og dine artikel-kladder scores mod markedet (Content Score)
+- **Keyword-ideer** (Ubersuggest-kopi): Google + DuckDuckGo autocomplete, gratis
+- **Email-finder** (Hunter.io-kopi): scan sider for kontakt-emails til linkbuilding-outreach
+- **Pris-overvaagning**: monitors med typen "pris" laeser JSON-LD/product:price og alarmerer ved pris-andringer hos konkurrenter
+- **Visibility Index** (SE Ranking-kopi): samlet synlighedstal ud fra dine keyword-positioner, graf over tid
+- **Core Web Vitals**: valgfri Google PageSpeed API-noegle (PSI_API_KEY) giver perf/LCP/CLS i deep audit
+- **Flesch-lesbarhed** (Hemingway-kopi) i hver side-audit
 
 ## Sikkerhed
 - `APP_TOKEN` = login til hele UI'et og noeglen til Juno-broerne (header `X-CC-Token`)

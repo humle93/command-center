@@ -1,4 +1,4 @@
-# Command Center v7.1
+# Command Center v7.3 PRO
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 
@@ -26,6 +26,15 @@ Eller med Docker: `cp .env.example .env && docker compose up -d --build`
 1. `cp .env.example .env` og udfyld noegler
 2. `./run.sh` → http://127.0.0.1:8000
 3. (VPS) saet `APP_TOKEN` i `.env` og kør bag reverse proxy, eller brug `deploy/command-center.service` + SSH-tunnel
+
+## PRO-funktioner (betalt-varktoej-kloner)
+- **Content Gap** (Semrush-kopi): top 10 SERP hentes via SerpAPI, gennemsnit af ord/H2 beregnes, og dine artikel-kladder scores mod markedet (Content Score)
+- **Keyword-ideer** (Ubersuggest-kopi): Google + DuckDuckGo autocomplete, gratis
+- **Email-finder** (Hunter.io-kopi): scan sider for kontakt-emails til linkbuilding-outreach
+- **Pris-overvaagning**: monitors med typen "pris" laeser JSON-LD/product:price og alarmerer ved pris-andringer hos konkurrenter
+- **Visibility Index** (SE Ranking-kopi): samlet synlighedstal ud fra dine keyword-positioner, graf over tid
+- **Core Web Vitals**: valgfri Google PageSpeed API-noegle (PSI_API_KEY) giver perf/LCP/CLS i deep audit
+- **Flesch-lesbarhed** (Hemingway-kopi) i hver side-audit
 
 ## Sikkerhed
 - `APP_TOKEN` = login til hele UI'et og noeglen til Juno-broerne (header `X-CC-Token`)

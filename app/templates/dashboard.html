@@ -8,11 +8,11 @@
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
-<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null }">
+<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null, dups: null, healthChart: null }">
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.1</span></h1>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.3 PRO</span></h1>
             <p class="text-xs text-zinc-400">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
@@ -30,6 +30,9 @@
         <button @click="tab='keywords'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='keywords' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🎯 Keywords</button>
         <button @click="tab='links'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='links' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🔗 Links</button>
         <button @click="tab='social'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='social' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">📱 Social</button>
+        <button @click="tab='ai'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='ai' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🤖 AI Tools</button>
+        <button @click="tab='monitors'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='monitors' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🩺 Monitors</button>
+        <button @click="tab='pro'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='pro' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">💼 Pro</button>
         <button @click="tab='alarms'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='alarms' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🚨 Alarmer{% if alarms %} ({{ alarms|length }}){% endif %}</button>
         <button @click="tab='notes'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='notes' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">📝 Noter</button>
     </div>
@@ -114,11 +117,12 @@
             <form @submit.prevent="
                 seoLoading = true; seoResult = null;
                 fetch('/seo/audit', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-                    body: 'url=' + encodeURIComponent($el.querySelector('input[name=url]').value) + '&keyword=' + encodeURIComponent($el.querySelector('input[name=keyword]').value || '') })
+                    body: 'url=' + encodeURIComponent($el.querySelector('input[name=url]').value) + '&keyword=' + encodeURIComponent($el.querySelector('input[name=keyword]').value || '') + '&psi=' + ($el.querySelector('input[name=psi]')?.checked ? '1' : '0') })
                 .then(r => r.json()).then(data => { seoResult = data; seoLoading = false; })"
                 class="flex flex-col md:flex-row gap-2">
                 <input type="text" name="url" placeholder="https://steamgears.eu/guide..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
-                <input type="text" name="keyword" placeholder="Focus keyword (valgfrit)" class="md:w-64 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <input type="text" name="keyword" placeholder="Focus keyword (valgfrit)" class="md:w-52 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <label class="flex items-center gap-1 text-xs text-zinc-400 whitespace-nowrap"><input type="checkbox" name="psi"> Core Web Vitals</label>
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Analysér</button>
             </form>
         </div>
@@ -129,6 +133,12 @@
             <div class="flex items-center justify-between mb-4">
                 <h2 class="text-xs uppercase tracking-wider text-zinc-400">Resultat</h2>
                 <div class="text-sm font-bold px-3 py-1 rounded-xl border" :class="seoResult?.score >= 80 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : seoResult?.score >= 50 ? 'bg-amber-500/10 text-amber-400 border-amber-500/30' : 'bg-rose-500/10 text-rose-400 border-rose-500/30'" x-text="seoResult?.score + ' / 100'"></div>
+            </div>
+            <div x-show="seoResult?.psi" style="display: none;" class="mb-3 text-xs bg-zinc-950 border border-zinc-800 rounded-xl p-3">
+                <span class="text-zinc-400">Core Web Vitals (mobile):</span>
+                Performance <span class="text-emerald-400 font-bold" x-text="seoResult?.psi?.perf + '/100'"></span> ·
+                LCP <span class="text-zinc-300" x-text="seoResult?.psi?.lcp"></span> ·
+                CLS <span class="text-zinc-300" x-text="seoResult?.psi?.cls"></span>
             </div>
             <ul class="space-y-2 text-xs">
                 <template x-for="item in seoResult?.items">
@@ -180,6 +190,55 @@
             </div>
         </div>
         {% endif %}
+
+        {% if health_hist_n %}
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Site Health over tid (crawl-snitscore)</h2>
+            <canvas id="healthchart" height="70"></canvas>
+        </div>
+        {% endif %}
+
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Duplikater & redirects (Screaming Frog-stil)</h2>
+                <button @click="fetch('/api/duplicates').then(r=>r.json()).then(d=>dups=d)" class="text-xs text-emerald-400">Analyser</button>
+            </div>
+            <div x-show="dups" style="display: none;" class="space-y-3 text-xs">
+                <template x-if="dups">
+                    <div class="space-y-3">
+                        <div>
+                            <p class="text-zinc-400 mb-1 font-medium">Dublettitler</p>
+                            <template x-for="(d, i) in dups.titles" :key="i">
+                                <p class="text-zinc-500">• <span class="text-zinc-300" x-text="d.n + 'x: '"></span><span x-text="d.urls"></span></p>
+                            </template>
+                            <p x-show="dups.titles.length === 0" class="text-emerald-400">✅ Ingen dublettitler</p>
+                        </div>
+                        <div>
+                            <p class="text-zinc-400 mb-1 font-medium">Dublet-H1</p>
+                            <template x-for="(d, i) in dups.h1" :key="'h'+i">
+                                <p class="text-zinc-500">• <span class="text-zinc-300" x-text="d.n + 'x: '"></span><span x-text="d.urls"></span></p>
+                            </template>
+                            <p x-show="dups.h1.length === 0" class="text-emerald-400">✅ Ingen dublet-H1'er</p>
+                        </div>
+                        <div>
+                            <p class="text-zinc-400 mb-1 font-medium">Næsten-identisk indhold</p>
+                            <template x-for="(d, i) in dups.content" :key="'c'+i">
+                                <p class="text-rose-400">• <span x-text="d.n + 'x: '"></span><span x-text="d.urls"></span></p>
+                            </template>
+                            <p x-show="dups.content.length === 0" class="text-emerald-400">✅ Intet duplikeret indhold</p>
+                        </div>
+                        <div>
+                            <p class="text-zinc-400 mb-1 font-medium">Redirects</p>
+                            <template x-for="(d, i) in dups.redirects" :key="'r'+i">
+                                <p class="text-zinc-500">• <span x-text="d.url"></span> → <span class="text-amber-400" x-text="d.redirects"></span></p>
+                            </template>
+                            <p x-show="dups.redirects.length === 0" class="text-emerald-400">✅ Ingen redirects fundet</p>
+                        </div>
+                    </div>
+                </template>
+            </div>
+            <p x-show="!dups" class="text-xs text-zinc-500">Kør et site-crawl først — kræver crawl-data.</p>
+        </div>
 
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5" x-show="false" id="histcard">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3" id="histtitle">Historik</h2>
@@ -237,6 +296,14 @@
                         <div class="flex gap-2 items-center shrink-0">
                             {% if art.wp_link %}<a href="{{ art.wp_link }}" target="_blank" class="text-emerald-400">Åbn i WP ↗</a>
                             {% else %}
+                            <form action="/articles/score" method="POST">
+                                <input type="hidden" name="id" value="{{ art.id }}">
+                                <button class="bg-zinc-800 text-zinc-300 border border-zinc-700 px-3 py-1 rounded-lg">📊 Score vs SERP</button>
+                            </form>
+                            <form action="/articles/meta" method="POST">
+                                <input type="hidden" name="id" value="{{ art.id }}">
+                                <button class="bg-zinc-800 text-zinc-300 border border-zinc-700 px-3 py-1 rounded-lg">✨ Meta/social</button>
+                            </form>
                             <form action="/articles/push" method="POST">
                                 <input type="hidden" name="id" value="{{ art.id }}">
                                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-3 py-1 rounded-lg">⬆ Push til WP (kladde)</button>
@@ -248,6 +315,7 @@
                             </form>
                         </div>
                     </div>
+                    {% if art.meta_title %}<div class="text-zinc-500 border-t border-zinc-800 pt-2">📌 <span class="text-zinc-300">{{ art.meta_title }}</span> — {{ art.meta_desc }}</div>{% endif %}
                     <div class="text-zinc-400 max-h-48 overflow-y-auto border-t border-zinc-800 pt-2">{{ art.content | safe }}</div>
                 </div>
                 {% else %}
@@ -285,6 +353,24 @@
                 <p class="text-xs text-zinc-500">Ingen keywords tilføjet endnu.</p>
                 {% endfor %}
             </div>
+        </div>
+    </section>
+
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Keyword-ideer (Ubersuggest-kopi — Google/DDG autocomplete)</h2>
+            <form action="/keywords/ideas" method="POST" class="flex gap-2">
+                <input type="text" name="keyword" placeholder="fx steampunk goggles" required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Find idéer</button>
+            </form>
+            <div class="flex flex-wrap gap-2 mt-3">
+                {% for i in ideas %}
+                <span class="px-2 py-0.5 rounded-lg bg-zinc-800 text-zinc-300 text-[11px]">{{ i.idea }} <span class="text-zinc-600">{{ i.source }}</span></span>
+                {% endfor %}
+            </div>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Visibility Index (SE Ranking-kopi — beregnes ved hvert keyword-tjek)</h2>
+            <canvas id="vischart" height="70"></canvas>
         </div>
     </section>
 
@@ -371,6 +457,123 @@
         </div>
     </section>
 
+    <!-- AI TOOLS -->
+    <section x-show="tab === 'ai'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">AI interne link-forslag (AI Link Genius-stil)</h2>
+                <button @click="$el.textContent='Arbejder...'; fetch('/seo/linksuggest', {method:'POST'}).then(r=>r.json()).then(r=>{$el.textContent = r.ok ? '✅ ' + r.count + ' forslag' : '❌ ' + r.error; setTimeout(()=>location.reload(), 1200)})"
+                        class="text-xs text-emerald-400">Generér forslag</button>
+            </div>
+            <div class="space-y-2">
+                {% for l in links_sug %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs">
+                    <div class="text-zinc-300">{{ l.anchor }} — <span class="text-zinc-500">{{ l.reason }}</span></div>
+                    <div class="text-zinc-500 truncate">{{ l.from_url }} → <span class="text-emerald-400">{{ l.to_url }}</span></div>
+                </div>
+                {% else %}
+                <p class="text-xs text-zinc-500">Ingen forslag endnu. Kør site-crawl først, og kræver AIMLAPI_KEY.</p>
+                {% endfor %}
+            </div>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">AI-synlighed (RankMath AI Visibility-stil)</h2>
+            <form action="/ai/visibility" method="POST" class="flex gap-2">
+                <input type="text" name="question" placeholder="Hvor køber man steampunk goggles online?" required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Spørg AI</button>
+            </form>
+            <div class="space-y-2 mt-3">
+                {% for v in ai_vis %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs space-y-1">
+                    <div class="flex justify-between">
+                        <span class="text-zinc-300">{{ v.question }}</span>
+                        <span class="{% if v.mention_found %}text-emerald-400{% else %}text-rose-400{% endif %}">{{ '✅ Nævnt' if v.mention_found else '❌ Ikke nævnt' }}</span>
+                    </div>
+                    {% if v.snippet %}<div class="text-zinc-500">...{{ v.snippet }}...</div>{% endif %}
+                    <div class="text-zinc-500 text-[10px]">{{ v.checked_at }}</div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+
+    <!-- MONITORS -->
+    <section x-show="tab === 'monitors'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Content-monitors (Uptime Kuma-stil, tjekkes hver time)</h2>
+                <form action="/monitors/check" method="POST"><button class="text-xs text-emerald-400">🔄 Tjek nu</button></form>
+            </div>
+            <form action="/monitors/add" method="POST" class="grid grid-cols-1 md:grid-cols-5 gap-2 mb-3">
+                <input type="text" name="name" placeholder="Navn" required class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <input type="text" name="url" placeholder="https://steamgears.eu/shop/" required class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <select name="type_" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                    <option value="contains">contains (tekst på siden)</option>
+                    <option value="json">json (API-felt)</option>
+                    <option value="price">pris (JSON-LD / product:price)</option>
+                </select>
+                <input type="text" name="expected" placeholder="fx 'Add to cart' eller products.0.name" required class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Tilføj</button>
+            </form>
+            <div class="space-y-2">
+                {% for m in monitors %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs flex justify-between items-center">
+                    <div>
+                        <span class="font-medium">{{ m.name }}</span>
+                        <span class="text-zinc-500 ml-2">{{ m.url }}</span>
+                        <div class="text-zinc-500">{{ m.last_status }} · {{ m.last_checked or 'ikke tjekket' }}</div>
+                    </div>
+                    <form action="/monitors/delete" method="POST">
+                        <input type="hidden" name="id" value="{{ m.id }}">
+                        <button class="text-zinc-500 hover:text-rose-400">✕</button>
+                    </form>
+                </div>
+                {% else %}
+                <p class="text-xs text-zinc-500">Ingen monitors endnu — fx: tjek at shop-siden indeholder 'Add to cart'.</p>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+
+    <!-- PRO -->
+    <section x-show="tab === 'pro'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Content Gap (Semrush-kopi — kræver SERPAPI_KEY)</h2>
+            <form action="/serp/gap" method="POST" class="flex gap-2">
+                <input type="text" name="keyword" placeholder="Søgeord..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Analysér top 10</button>
+            </form>
+            <div class="space-y-2 mt-3">
+                {% for g in gaps %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs">
+                    <div class="font-medium text-emerald-400">{{ g.keyword }} <span class="text-zinc-500 text-[10px]">{{ g.created_at[:16] }}</span></div>
+                    <div class="text-zinc-400">{{ g.stats_json | truncate(160) }}</div>
+                </div>
+                {% else %}
+                <p class="text-xs text-zinc-500">Ingen gap-analyser endnu.</p>
+                {% endfor %}
+            </div>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Email-finder til outreach (Hunter.io-kopi)</h2>
+            <form action="/outreach/scan" method="POST" class="flex gap-2">
+                <input type="text" name="url" placeholder="https://konkurrent.dk/kontakt" required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Scan emails</button>
+            </form>
+            <div class="flex flex-wrap gap-2 mt-3">
+                {% for o in outreach_rows %}
+                <span class="px-2 py-0.5 rounded-lg bg-emerald-500/10 text-emerald-400 text-[11px]">{{ o.email }}</span>
+                {% else %}
+                <p class="text-xs text-zinc-500">Ingen emails fundet endnu.</p>
+                {% endfor %}
+            </div>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Pris-overvågning</h2>
+            <p class="text-xs text-zinc-400">Tilføj en monitor med typen <span class="text-emerald-400">pris</span> under 🩺 Monitors — så alarmeres der (Telegram + alarmer) når konkurrenter ændrer pris. Bruges fx på AliExpress-/konkurrent-produktsider med JSON-LD eller product:price-meta.</p>
+        </div>
+    </section>
+
     <!-- NOTER -->
     <section x-show="tab === 'notes'" class="space-y-4" style="display: none;">
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
@@ -416,6 +619,32 @@ function showHistory(domainId, url) {
         });
     });
 }
+
+function loadHealth() {
+    fetch('/api/health-history').then(r => r.json()).then(data => {
+        if (!data.scores.length) return;
+        if (window.healthChartInstance) window.healthChartInstance.destroy();
+        window.healthChartInstance = new Chart(document.getElementById('healthchart'), {
+            type: 'line',
+            data: { labels: data.labels, datasets: [{ label: 'snitscore', data: data.scores, borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', fill: true, tension: 0.3 }] },
+            options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#71717a', font: { size: 9 } } }, y: { ticks: { color: '#71717a' }, min: 0, max: 100 } } }
+        });
+    });
+}
+if (document.getElementById('healthchart')) loadHealth();
+
+function loadVis() {
+    fetch('/api/visibility').then(r => r.json()).then(data => {
+        if (!data.scores.length) return;
+        if (window.visChartInstance) window.visChartInstance.destroy();
+        window.visChartInstance = new Chart(document.getElementById('vischart'), {
+            type: 'line',
+            data: { labels: data.labels, datasets: [{ label: 'visibility %', data: data.scores, borderColor: '#34d399', backgroundColor: 'rgba(52,211,153,0.1)', fill: true, tension: 0.3 }] },
+            options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#71717a', font: { size: 9 } } }, y: { ticks: { color: '#71717a' }, min: 0, max: 100 } } }
+        });
+    });
+}
+if (document.getElementById('vischart')) loadVis();
 </script>
 </body>
 </html>

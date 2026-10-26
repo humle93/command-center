@@ -1348,7 +1348,8 @@ exec ./run.sh
 
 ---
 
-## v7.7-ændringer (install.sh)
+## v7.7-ændringer + stabilitet (install.sh)
 - Nye heredocs: growth-autopilot (autopilot_sync + cron 05:15 med module_on("growth")-guard), backlink-prospector (tabel backlink_prospects + classify_site + EMAIL_RE), MODULES-modulsystem (11 moduler, 3 niveauer), guidet nav + workflow-guide i Cockpit, serp_competitor_context (fakta-prompt til AI-artikler), s9-autoideas (Google-autocomplete via suggestqueries.google.com)
+- Stabilitet: init-fejl kan ikke længere crashe opstart (retry + videre-kørsel), scheduler-fejl stopper ikke appen, cron-løkker er guardet pr. element
 - install.sh er idempotent — genkoer scriptet for at opdatere, eller brug /self-update fra UI-et
 - Stoerrelse: ca. 168 KB

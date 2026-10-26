@@ -353,7 +353,21 @@ def init_db():
         """)
 
 
-init_db()
+def _safe(fn):
+    """Koer en init-funktion uden at lade importen crashe (opstart-stabilitet)."""
+    try:
+        fn()
+    except Exception as e:
+        print("[cc] init-fejl (proever igen om 5s):", repr(e), flush=True)
+        import time as _t
+        _t.sleep(5)
+        try:
+            fn()
+        except Exception as e2:
+            print("[cc] init-fejl fortsaetter (app starter alligevel):", repr(e2), flush=True)
+
+
+_safe(init_db)
 
 
 def migrate_db():
@@ -370,7 +384,7 @@ def migrate_db():
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {c} TEXT")
 
 
-migrate_db()
+_safe(migrate_db)
 
 
 def create_indexes():
@@ -389,7 +403,7 @@ def create_indexes():
         db.execute("ANALYZE")
 
 
-create_indexes()
+_safe(create_indexes)
 
 
 MODULES = ["domains", "keywords", "ai", "monitors", "social", "links", "bridge", "spy", "wp_push", "telegram", "growth"]
@@ -555,7 +569,10 @@ def check_all_domains_sync():
     with get_db() as db:
         domains = db.execute("SELECT * FROM domains").fetchall()
     for d in domains:
-        res = check_domain_sync(d["url"])
+        try:
+            res = check_domain_sync(d["url"])
+        except Exception as e:
+            res = {"status": "Fejl", "ms": None, "ssl_days": None, "error": str(e)[:120]}
         results.append((d["id"], d["url"], res))
         with get_db() as db:
             db.execute(
@@ -1550,7 +1567,10 @@ def check_all_keywords_sync():
     with get_db() as db:
         kws = db.execute("SELECT * FROM keywords").fetchall()
     for kw in kws:
-        res = check_keyword_sync(kw)
+        try:
+            res = check_keyword_sync(kw)
+        except Exception as e:
+            res = {"position": None, "url": None, "error": str(e)[:120]}
         with get_db() as db:
             if res["error"]:
                 add_alarm(db, "keyword-tjek", f"'{kw['keyword']}': {res['error']}", "advarsel")
@@ -2342,12 +2362,15 @@ async def job_check_keywords():
 
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
-    scheduler.add_job(job_check_domains, IntervalTrigger(hours=6), id="domain_checks", replace_existing=True)
-    scheduler.add_job(job_check_keywords, CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True)
-    scheduler.add_job(job_growth_autopilot, CronTrigger(hour=5, minute=15), id="growth_autopilot", replace_existing=True)
-    scheduler.add_job(cleanup_old_data, CronTrigger(hour=4, minute=30), id="cleanup", replace_existing=True)
-    scheduler.add_job(pull_bridge_sync, IntervalTrigger(minutes=BRIDGE_POLL_MINUTES), id="pull_bridge", replace_existing=True)
-    scheduler.start()
+    try:
+        scheduler.add_job(job_check_domains, IntervalTrigger(hours=6), id="domain_checks", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_check_keywords, CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_growth_autopilot, CronTrigger(hour=5, minute=15), id="growth_autopilot", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(cleanup_old_data, CronTrigger(hour=4, minute=30), id="cleanup", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(pull_bridge_sync, IntervalTrigger(minutes=BRIDGE_POLL_MINUTES), id="pull_bridge", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.start()
+    except Exception as e:
+        print("[cc] scheduler kunne ikke starte (app koerer videre uden cron):", repr(e), flush=True)
     yield
     scheduler.shutdown()
 

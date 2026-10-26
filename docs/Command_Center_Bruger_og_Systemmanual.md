@@ -40,6 +40,8 @@ Fanerne er nummereret i den rækkefølge, et normalt arbejdsflow bruger dem:
 - Difficulty-tjek og diff-rapport.
 
 ### 4. Indhold (Artikler)
+
+**SEO-strategi-vælger** (øverst på fanen): vælg mellem *AdSense-indkomst*, *Affiliate* og *Backlink-vækst*. Valget styrer AI-artiklernes stil og længde (begge manuel generering OG autopilot) og hvad autopiloten gør (artikel vs. prospector/outreach). Efter hvert valg kører CC et **automatisk pre-flight-tjek**: AIMLAPI/SERPAPI-nøgler, WordPress-creds, modul-status, autopilot-cron og DB-skrivetest — vist som grøn/rød-checkliste, med kritisk alarm hvis noget vigtigt mangler. Valget gemmes i settings og overlever genstart.
 - **Generér artikel**: indtast emne/keyword → AI-artikel (Gemini via aimlapi). Prompten henter **top 5 Google-resultater via SerpAPI** og kræver, at artiklen er fakta-baseret og dækker deres content gap — ingen sludder.
 - **Kladde-liste**: hver artikel har knapperne *Score vs SERP* (position + score), *Meta/social* (AI-genereret titel/meta), *Push til WP (kladde)* og slet.
 - **Autopilot**: én knap kører hele cyklussen — vælg idé → AI-artikel → WP-kladde. Kører også automatisk hver dag kl. 05:15 (kræver modul *Growth* aktiveret). Nye idéer hentes automatisk fra Google-autocomplete.

@@ -36,7 +36,7 @@
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.7 PRO</span></h1>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.8 PRO</span></h1>
             <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
@@ -358,6 +358,30 @@
 
     <!-- ARTIKLER -->
     <section x-show="tab === 'articles'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-amber-600/40 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-amber-400/90 mb-1">SEO-strategi</h2>
+            <p class="text-[10px] text-zinc-500 mb-3">Styrer AI-artikler (stil + lÃ¦ngde) og autopiloten. GÃ¦lder bÃ¥de manuel generering og autopilot.</p>
+            <form action="/settings/strategy" method="POST" class="flex gap-2 items-center">
+                <select name="strategy" onchange="this.form.submit()" class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                    {% for skey, st in strategies.items() %}
+                    <option value="{{ skey }}"{{ ' selected' if skey == active_strategy else '' }}>{{ st.label }} — {{ st.desc }}</option>
+                    {% endfor %}
+                </select>
+                <span class="text-[10px] text-zinc-500 whitespace-nowrap">skifter automatisk</span>
+            </form>
+            {% if strategy_check %}
+            <div class="mt-3 border-t border-zinc-800 pt-3">
+                <p class="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Pre-flight-tjek ({{ strategy_check.checked_at }})</p>
+                <ul class="space-y-1">
+                    {% for c in strategy_check.checks %}
+                    <li class="text-xs {{ 'text-emerald-400' if c.ok else ('text-red-400' if c.kritisk else 'text-amber-400') }}">
+                        {{ '✅' if c.ok else ('❌' if c.kritisk else '⚠️') }} {{ c.text }}
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+        </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Generér artikel {{ '(AI: Gemini via aimlapi)' if ai_enabled else '(skabelon — sæt AIMLAPI_KEY for AI)' }}</h2>
             <form action="/articles/generate" method="POST" class="flex gap-2">
@@ -365,7 +389,7 @@
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Generér</button>
             </form>
             <form action="/articles/autopilot" method="POST" class="mt-2">
-                <button class="text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-1.5 rounded-lg">🌱 Autopilot: vælg idé → AI-artikel → WP-kladde</button>
+                <button class="text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-1.5 rounded-lg">🌱 Autopilot ({{ strategy_autopilot_label }}): vælg idé → {{ 'prospecting + outreach' if strategy_autopilot == 'backlink' else 'AI-artikel' }} → WP-kladde</button>
                 <span class="text-[10px] text-zinc-500 ml-2">kører også automatisk hver dag kl. 05:15 (modulet Growth)</span>
             </form>
         </div>

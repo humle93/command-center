@@ -50,9 +50,10 @@ Command Center er bygget som en selv-installerende arkitektur, der automatiserer
 
 ---
 
-## v7.7 (oktober 2026)
+## v7.7 + v7.8 (oktober 2026)
 - Growth Pack: growth-autopilot (daglig kl. 05:15), backlink-prospector (SerpAPI top 10 + AI-outreach-draft), keyword-ideer via Google-autocomplete, visibility-index i keywords-fanen
 - Guidet navigation: 8 nummererede faner i arbejdsflow-raekkefoelge + "Sådan bruger du Command Center"-guide i Cockpit
 - Modulsystem: 11 moduler i 3 niveauer (kerne/udvidet/fuld) — UI og cron følger modulet
 - Fakta-baserede AI-artikler: top 5 SERP-konkurrenter hentes ind i prompten (serp_competitor_context); artiklen skal dække content gap og indeholde rene fakta, ingen fyld
 - Ny Bruger- og Systemmanual med screenshots: docs/Command_Center_Bruger_og_Systemmanual.md + docs/img/
+- v7.8: SEO-strategi-vaælger (AdSense/Affiliate/Backlink-vækst) i Indhold-fanen — styrer AI-artikler + autopilot; automatisk pre-flight-tjek (noegler, moduler, cron, DB-skrivetest) med groen/roed-checkliste og alarm ved kritiske mangler

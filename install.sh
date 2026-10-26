@@ -1179,7 +1179,60 @@ def serp_competitor_context(keyword: str, n: int = 5):
         return ""
 
 
-def generate_article_ai(keyword: str):
+# ---------- SEO-strategier (v7.8) ----------
+STRATEGIES = {
+    "adsense": {
+        "label": "AdSense-indkomst",
+        "desc": "Long-tail informationsartikler, volumen forst, rolig CTA",
+        "words": "1000-1400",
+        "style": (
+            "Artikeltypen er LANG og informationsrig (1000-1400 ord). Maalgruppe: laesere fra "
+            "Google-sogninger der vil vide noget. Dybdegaaende sektioner, tabel eller liste med "
+            "konkrete data, FAQ-sektion med 4-5 spoergsmaal. Roelig, nyttig tone; hojst 1 diskret "
+            "produktlink. Fokus: laesetid, laesbarhed og reelle svar."
+        ),
+        "autopilot": "artikel",
+    },
+    "affiliate": {
+        "label": "Affiliate",
+        "desc": "Buyer-intent (best/vs/review), sammenligningstabeller, CTA-tung",
+        "words": "900-1200",
+        "style": (
+            "Artikeltypen er koebeside-venlig (900-1200 ord). Keywordet er typisk buyer-intent "
+            "(best, vs, review, hvor kan man koebe). Indhold: sammenligningstabel med 3-5 produkter/"
+            "valg, fordele-ulemper-lister, tydelig men aeldelig CTA efter hver stor sektion, FAQ med "
+            "4 koeb-relaterede spoergsmaal. Fokus: hjaelp laeseren at vælge."
+        ),
+        "autopilot": "artikel",
+    },
+    "backlinks": {
+        "label": "Backlink-vÃ¦kst",
+        "desc": "Link-vÃ¦rdigt indhold + prospector/outreach autopilot",
+        "words": "700-1000",
+        "style": (
+            "Artikeltypen er link-venlig (700-1000 ord): lister ('10 bedste ...'), checklister, "
+            "begynder-guides og ressourcesider andre sider naturligt vil linke til. Klar struktur, "
+            "citervenlige facts, faerre produktlinks. Autopiloten koerer ogsa backlink-prospecting "
+            "paa keywords i denne strategi."
+        ),
+        "autopilot": "backlink",
+    },
+}
+DEFAULT_STRATEGY = "adsense"
+
+
+def get_active_strategy() -> dict:
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone()
+        key = row["value"] if row else DEFAULT_STRATEGY
+    except Exception:
+        key = DEFAULT_STRATEGY
+    return STRATEGIES.get(key, STRATEGIES[DEFAULT_STRATEGY])
+
+
+def generate_article_ai(keyword: str, strategy: dict = None):
+    st = strategy or get_active_strategy()
     competitors = serp_competitor_context(keyword)
     if competitors:
         comp_block = (
@@ -1203,8 +1256,9 @@ def generate_article_ai(keyword: str):
     prompt = (
         f"Write an SEO-optimized blog article draft in English about '{keyword}' for a steampunk "
         f"cosplay & merchandise webshop. Output raw HTML (h2/h3/p/ul/ol only, no <html> wrapper). "
-        f"Include: engaging intro, 3-4 H2 sections, a bullet list, an FAQ section with 3 questions, "
-        f"and a short conclusion. Around 600-900 words. No images. Natural, helpful tone.\n\n"
+        f"Include: engaging intro, 3-4 H2 sections, a bullet list, an FAQ section, "
+        f"and a short conclusion. Around {st['words']} words. No images. Natural, helpful tone.\n\n"
+        f"STRATEGI ({st['label']}): {st['style']}\n\n"
         f"{comp_block}"
     )
     resp = requests.post(
@@ -1233,7 +1287,8 @@ async def create_article(keyword: str = Form(...)):
     if AIMLAPI_KEY:
         try:
             loop = asyncio.get_event_loop()
-            content = await loop.run_in_executor(executor, generate_article_ai, keyword)
+            st_active = get_active_strategy()
+            content = await loop.run_in_executor(executor, generate_article_ai, keyword, st_active)
             title = f"Guide: {keyword}"
             source = f"AI ({AI_MODEL})"
         except Exception as e:
@@ -1333,8 +1388,18 @@ def autopilot_sync():
         if not row:
             return "no-ideas"
     idea = row["idea"].strip()
+    st_auto = get_active_strategy()
+    if st_auto.get("autopilot") == "backlink":
+        try:
+            prospect_sync(idea)
+        except Exception as e:
+            with get_db() as db:
+                add_alarm(db, "growth", f"Autopilot-prospecting fejlede for '{idea}': {str(e)[:120]}", "advarsel")
+        with get_db() as db:
+            db.execute("DELETE FROM keyword_ideas WHERE id=?", (row["id"],))
+        return "backlink-prospect"
     try:
-        content = generate_article_ai(idea)
+        content = generate_article_ai(idea, st_auto)
     except Exception as e:
         with get_db() as db:
             add_alarm(db, "growth", f"Autopilot-generering fejlede for '{idea}': {str(e)[:150]}", "advarsel")
@@ -2302,6 +2367,11 @@ async def dashboard(request: Request):
         "track_domain": TRACK_DOMAIN,
         "difficulties": difficulties,
         "modules": {m: module_on(m) for m in MODULES},
+        "strategies": STRATEGIES,
+        "active_strategy": (db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone() or [None])[0] or DEFAULT_STRATEGY,
+        "strategy_autopilot": get_active_strategy()["autopilot"],
+        "strategy_autopilot_label": get_active_strategy()["label"],
+        "strategy_check": (lambda r: (jsonlib.loads(r) if r else None))(db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone() and db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone()["value"]),
     })
 
 
@@ -2312,6 +2382,78 @@ async def settings_module(request: Request):
     state = "on" if str(form.get("state", "on")) == "on" else "off"
     if name in MODULES:
         set_module(name, state)
+    return RedirectResponse("/", status_code=303)
+
+
+def strategy_check_sync(key: str):
+    """Pre-flight-tjek: er alt udfyldt og koerende for den valgte strategi? Gemmer checkliste i settings."""
+    st = STRATEGIES.get(key) or STRATEGIES[DEFAULT_STRATEGY]
+    checks = []
+    is_backlink = st.get("autopilot") == "backlink"
+
+    def add(ok, text, kritisk=False):
+        checks.append({"ok": bool(ok), "text": text, "kritisk": kritisk})
+
+    # AI-noegle (artikel-strategier: kritisk; backlink: til AI-drafts)
+    if is_backlink:
+        add(bool(SERPAPI_KEY), "SERPAPI_KEY: " + ("OK" if SERPAPI_KEY else "MANGLER (prospecting kan ikke kore)"), kritisk=True)
+        add(bool(AIMLAPI_KEY), "AIMLAPI_KEY (AI-outreach-drafts): " + ("OK" if AIMLAPI_KEY else "mangler - drafts skrives manuelt"))
+    else:
+        add(bool(AIMLAPI_KEY), "AIMLAPI_KEY (AI-artikler): " + ("OK" if AIMLAPI_KEY else "MANGLER (generering falder tilbage til skabelon)"), kritisk=True)
+        add(bool(SERPAPI_KEY), "SERPAPI_KEY (konkurrent-analyse): " + ("OK" if SERPAPI_KEY else "mangler - prompten kobrer uden SERP-kontekst"))
+
+    # WordPress-push
+    wp_ok = bool(WP_URL and WP_USER and WP_APP_PASSWORD)
+    add(wp_ok, "WordPress-push (kladde): " + ("OK" if wp_ok else "mangler - artikler gemmes kun i CC"))
+
+    # Moduler
+    add(module_on("ai"), "Modul 'ai' er aktivt")
+    add(module_on("growth"), "Modul 'growth' er aktivt (autopilot-cron)")
+    if wp_ok:
+        add(module_on("wp_push"), "Modul 'wp_push' er aktivt")
+
+    # Autopilot-cron registreret?
+    try:
+        add(scheduler.get_job("growth_autopilot") is not None, "Autopilot-cron (05:15) er planlagt")
+    except Exception:
+        add(False, "Autopilot-cron kunne ikke verificeres")
+
+    # DB-skrivetest
+    try:
+        with get_db() as db:
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_strategy_check', ?)", (now_iso(),))
+        add(True, "Database: skrivetest OK")
+    except Exception as e:
+        add(False, "Database: skrivetest FEJLEDE - " + str(e)[:80], kritisk=True)
+
+    # Alarm ved kritiske mangler
+    for c in checks:
+        if c["kritisk"] and not c["ok"]:
+            with get_db() as db:
+                add_alarm(db, "strategi", f"Strategi '{st['label']}': {c['text']}", "kritisk")
+
+    try:
+        with get_db() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('strategy_check', ?)",
+                (jsonlib.dumps({"key": key, "checks": checks, "checked_at": now_iso()}),),
+            )
+    except Exception:
+        pass
+    return checks
+
+
+@app.post("/settings/strategy")
+async def settings_strategy(request: Request):
+    form = await request.form()
+    key = str(form.get("strategy", ""))
+    if key in STRATEGIES:
+        with get_db() as db:
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('active_strategy', ?)", (key,))
+        try:
+            await asyncio.get_event_loop().run_in_executor(executor, strategy_check_sync, key)
+        except Exception:
+            pass
     return RedirectResponse("/", status_code=303)
 
 
@@ -2419,7 +2561,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.7 PRO</span></h1>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.8 PRO</span></h1>
             <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
@@ -2741,6 +2883,30 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 
     <!-- ARTIKLER -->
     <section x-show="tab === 'articles'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-amber-600/40 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-amber-400/90 mb-1">SEO-strategi</h2>
+            <p class="text-[10px] text-zinc-500 mb-3">Styrer AI-artikler (stil + lÃ¦ngde) og autopiloten. GÃ¦lder bÃ¥de manuel generering og autopilot.</p>
+            <form action="/settings/strategy" method="POST" class="flex gap-2 items-center">
+                <select name="strategy" onchange="this.form.submit()" class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                    {% for skey, st in strategies.items() %}
+                    <option value="{{ skey }}"{{ ' selected' if skey == active_strategy else '' }}>{{ st.label }} — {{ st.desc }}</option>
+                    {% endfor %}
+                </select>
+                <span class="text-[10px] text-zinc-500 whitespace-nowrap">skifter automatisk</span>
+            </form>
+            {% if strategy_check %}
+            <div class="mt-3 border-t border-zinc-800 pt-3">
+                <p class="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Pre-flight-tjek ({{ strategy_check.checked_at }})</p>
+                <ul class="space-y-1">
+                    {% for c in strategy_check.checks %}
+                    <li class="text-xs {{ 'text-emerald-400' if c.ok else ('text-red-400' if c.kritisk else 'text-amber-400') }}">
+                        {{ '✅' if c.ok else ('❌' if c.kritisk else '⚠️') }} {{ c.text }}
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+        </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Generér artikel {{ '(AI: Gemini via aimlapi)' if ai_enabled else '(skabelon — sæt AIMLAPI_KEY for AI)' }}</h2>
             <form action="/articles/generate" method="POST" class="flex gap-2">
@@ -2748,7 +2914,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Generér</button>
             </form>
             <form action="/articles/autopilot" method="POST" class="mt-2">
-                <button class="text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-1.5 rounded-lg">🌱 Autopilot: vælg idé → AI-artikel → WP-kladde</button>
+                <button class="text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-1.5 rounded-lg">🌱 Autopilot ({{ strategy_autopilot_label }}): vælg idé → {{ 'prospecting + outreach' if strategy_autopilot == 'backlink' else 'AI-artikel' }} → WP-kladde</button>
                 <span class="text-[10px] text-zinc-500 ml-2">kører også automatisk hver dag kl. 05:15 (modulet Growth)</span>
             </form>
         </div>
@@ -3298,7 +3464,7 @@ EOF_SERVICE
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.7 PRO
+# Command Center v7.8 PRO
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 
@@ -3306,6 +3472,7 @@ Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Y
 - 🎛️ **Cockpit** — domæneovervågning (uptime, svartid, SSL), daglig drift-kort (Woo/checkout via Juno-bro)
 - 🔍 **SEO Scanner** — deep audit af enkelt side (20+ vægtede kontroller inkl. focus keyword, lesbarhed, mixed content, schema, OG/Twitter) + **site-crawl** med score per side og robots.txt/sitemap-tjek
 - ✍️ **Artikler** — AI-generering (Gemini via aimlapi) eller skabelon, **push direkte til WordPress som udkast**, **fakta-prompt med SerpAPI-konkurrentanalyse** (top 5 resultater ind i prompten — artiklen skal slå dem), autopilot (idé → artikel → WP-kladde, ny idé via Google-autocomplete når puljen er tom)
+- 🎯 **SEO-strategi-vælger** — dropdown (AdSense-indkomst / Affiliate / Backlink-vækst): styler AI-artikler (stil + længde) og autopiloten (artikel vs. prospecting), med automatisk pre-flight-tjek af nøgler, moduler, cron og DB efter hvert valg (grøn/rød-checkliste)
 - 🌱 **Growth Pack** — autopilot-nøgleord-side (05:15 dagligt), **backlink-prospector** (SerpAPI top 10 → sitetype + kontakt-e-mail + AI-outreach-draft), visibility-index\n- 🧩 **Moduler** — slå funktioner fra/til i 3 niveauer (kerne/udvidet/fuld); alt visuelles følger modulet
 - 🎯 **Keywords** — Google-positioner via SerpAPI, tjekket automatisk daglig kl. 06:00
 - 🕷️ **SERP & Spy** — konkurrent-opdagelse + crawl af titel/H1/beskrivelse

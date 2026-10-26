@@ -1,4 +1,4 @@
-# Command Center v7.4 PRO
+# Command Center v7.5 PRO
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 
@@ -26,6 +26,13 @@ Eller med Docker: `cp .env.example .env && docker compose up -d --build`
 1. `cp .env.example .env` og udfyld noegler
 2. `./run.sh` → http://127.0.0.1:8000
 3. (VPS) saet `APP_TOKEN` i `.env` og kør bag reverse proxy, eller brug `deploy/command-center.service` + SSH-tunnel
+
+## v7.5 — performance & drift
+- **Pull-bro**: Juno committer JSON-filer til repoets bridge/pending/, CC henter selv hver time (GITHUB_TOKEN i .env) — ingen tunnel eller FTP noedvendig
+- **Selv-opdatering**: Opdater-knap i toppen henter nyeste install.sh og koerer den
+- **SQLite**: WAL-mode, busy_timeout, 8 indekser, daglig oprydning kl. 04:30
+- **HTTP**: connection-pooling og gzip-komprimering
+- **UI**: sticky nav, preconnect, spinner, hover/focus-puds, mobile-forbedringer
 
 ## v7.4 PRO tilfoejelser
 - **Crawl-diff** (Screaming Frog-stil): sammenlign to crawls — nye/fjernede sider, aendret indhold (hash), score-fald >10

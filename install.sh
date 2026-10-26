@@ -37,12 +37,17 @@ TRACK_DOMAIN=steamgears.eu
 # Tuninge
 SSL_WARN_DAYS=30
 LINKCHECK_LIMIT=25
+# GitHub pull-bro + selv-opdatering (Juno committer bridge-filer, CC henter selv)
+GITHUB_TOKEN=
+GITHUB_REPO=humle93/command-center
+BRIDGE_POLL_MINUTES=60
 EOF_ENVDOT
 
 echo "📄 app/main.py..."
 cat << 'EOF_MAIN' > "$PROJECT_DIR/app/main.py"
 from fastapi import FastAPI, Request, Form, Header
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, PlainTextResponse
+from fastapi import Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi import HTTPException
@@ -68,6 +73,7 @@ import io
 import time
 import hashlib
 import json as jsonlib
+import subprocess
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data", "center.db")
@@ -75,7 +81,10 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 # --- Konfiguration via miljoevariabler / .env ---
 APP_TOKEN = os.environ.get("APP_TOKEN", "").strip()          # login-token (tom = ingen auth, lokal tilstand)
-JUNO_TOKEN = os.environ.get("JUNO_TOKEN", "").strip()        # Juno-adgang: kun /api/* (bridge + data) — ingen UI/login
+JUNO_TOKEN = os.environ.get("JUNO_TOKEN", "").strip()
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()     # GitHub-token: pull-bro + selv-opdatering
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "humle93/command-center").strip()
+BRIDGE_POLL_MINUTES = int(os.environ.get("BRIDGE_POLL_MINUTES", "60"))  # hvor ofte CC henter bridge-filer
 AIMLAPI_KEY = os.environ.get("AIMLAPI_KEY", "").strip()      # AI-artikelgenerator (gemini via aimlapi)
 AI_MODEL = os.environ.get("AI_MODEL", "google/gemini-3-8-flash")
 WP_URL = os.environ.get("WP_URL", "").strip()                # fx https://steamgears.eu
@@ -881,6 +890,14 @@ def site_crawl_sync(start_url: str, max_pages: int = 30):
         return {"ok": False, "error": str(e)[:200]}
 
 
+@app.post("/seo/crawl/delete")
+async def crawl_delete():
+    with get_db() as db:
+        db.execute("DELETE FROM seopages")
+        db.execute("DELETE FROM crawl_runs")
+    return RedirectResponse("/", status_code=303)
+
+
 @app.post("/seo/crawl")
 async def start_crawl(url: str = Form(...), max_pages: int = Form(30)):
     if CRAWL_STATE["running"]:
@@ -1286,46 +1303,105 @@ async def resolve_alarm(id: int = Form(...)):
 
 
 # ---------- Juno-broer (ekstern push af data) ----------
+def ingest_gsc_data(db, data):
+    days = data.get("daily", [])
+    queries = data.get("queries", [])
+    for d in days:
+        db.execute(
+            "INSERT INTO gsc_daily (day, clicks, impressions, ctr, avg_position) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(day) DO UPDATE SET clicks=excluded.clicks, impressions=excluded.impressions, "
+            "ctr=excluded.ctr, avg_position=excluded.avg_position",
+            (d.get("day"), d.get("clicks", 0), d.get("impressions", 0), d.get("ctr", 0), d.get("position", 0)),
+        )
+    for q in queries:
+        db.execute(
+            "INSERT INTO gsc_queries (day, query, clicks, impressions, position) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(day, query) DO UPDATE SET clicks=excluded.clicks, "
+            "impressions=excluded.impressions, position=excluded.position",
+            (data.get("date", date.today().isoformat()), q.get("query", ""), q.get("clicks", ""),
+             q.get("impressions", 0), q.get("position", 0)),
+        )
+    return len(days), len(queries)
+
+
 @app.post("/api/bridge/gsc")
 async def bridge_gsc(request: Request):
     data = await request.json()
-    days = data.get("daily", [])
-    queries = data.get("queries", [])
-    if not isinstance(days, list):
+    if not isinstance(data.get("daily", []), list):
         raise HTTPException(400, "daily skal vaere en liste")
     with get_db() as db:
-        for d in days:
-            db.execute(
-                """INSERT INTO gsc_daily (day, clicks, impressions, ctr, avg_position)
-                   VALUES (?,?,?,?,?)
-                   ON CONFLICT(day) DO UPDATE SET clicks=excluded.clicks, impressions=excluded.impressions,
-                   ctr=excluded.ctr, avg_position=excluded.avg_position""",
-                (d.get("day"), d.get("clicks", 0), d.get("impressions", 0), d.get("ctr", 0), d.get("position", 0)),
-            )
-        for q in queries:
-            db.execute(
-                """INSERT INTO gsc_queries (day, query, clicks, impressions, position)
-                   VALUES (?,?,?,?,?)
-                   ON CONFLICT(day, query) DO UPDATE SET clicks=excluded.clicks,
-                   impressions=excluded.impressions, position=excluded.position""",
-                (data.get("date", date.today().isoformat()), q.get("query", ""), q.get("clicks", 0),
-                 q.get("impressions", 0), q.get("position", 0)),
-            )
-    return {"ok": True, "days": len(days), "queries": len(queries)}
+        days, queries = ingest_gsc_data(db, data)
+    return {"ok": True, "days": days, "queries": queries}
+
+
+def ingest_drift_data(db, data):
+    db.execute(
+        "INSERT INTO drift (checked_at, orders, revenue, woo_status, checkout_status, notes) VALUES (?,?,?,?,?,?)",
+        (now_iso(), data.get("orders"), data.get("revenue"), data.get("woo_status", "ok"),
+         data.get("checkout_status", "ok"), data.get("notes", "")),
+    )
+    if data.get("woo_status") not in (None, "ok", ""):
+        add_alarm(db, "drift", f"Woo-status: {data.get('woo_status')}", "kritisk")
 
 
 @app.post("/api/bridge/drift")
 async def bridge_drift(request: Request):
     data = await request.json()
     with get_db() as db:
-        db.execute(
-            "INSERT INTO drift (checked_at, orders, revenue, woo_status, checkout_status, notes) VALUES (?,?,?,?,?,?)",
-            (now_iso(), data.get("orders"), data.get("revenue"), data.get("woo_status", "ok"),
-             data.get("checkout_status", "ok"), data.get("notes", "")),
-        )
-        if data.get("woo_status") not in (None, "ok", ""):
-            add_alarm(db, "drift", f"Woo-status: {data.get('woo_status')}", "kritisk")
+        ingest_drift_data(db, data)
     return {"ok": True}
+
+
+# ---------- Pull-bro: CC henter selv fra GitHub (ingen tunnel noedvendig) ----------
+def pull_bridge_sync():
+    if not GITHUB_TOKEN:
+        return
+    try:
+        headers = {"Authorization": "Bearer " + GITHUB_TOKEN, "Accept": "application/vnd.github+json"}
+        r = HTTP.get(f"https://api.github.com/repos/{GITHUB_REPO}/contents/bridge/pending", headers=headers, timeout=15)
+        if r.status_code != 200:
+            return
+        for item in r.json():
+            name = item.get("name", "")
+            if not name.endswith(".json"):
+                continue
+            rr = HTTP.get(item.get("url"), headers={"Authorization": "Bearer " + GITHUB_TOKEN, "Accept": "application/vnd.github.raw"}, timeout=15)
+            try:
+                data = jsonlib.loads(rr.text)
+            except Exception:
+                continue
+            with get_db() as db:
+                if name.startswith("gsc-"):
+                    ingest_gsc_data(db, data)
+                elif name.startswith("drift-"):
+                    ingest_drift_data(db, data)
+            HTTP.delete(item.get("url"), headers={"Authorization": "Bearer " + GITHUB_TOKEN}, timeout=15)
+    except Exception:
+        pass
+
+
+def self_update_sync():
+    try:
+        headers = {"Authorization": "Bearer " + GITHUB_TOKEN, "Accept": "application/vnd.github.raw"}
+        r = HTTP.get(f"https://api.github.com/repos/{GITHUB_REPO}/contents/install.sh", headers=headers, timeout=30)
+        r.raise_for_status()
+        script_path = os.path.join(os.path.dirname(BASE_DIR), "install.sh")
+        with open(script_path, "w") as f:
+            f.write(r.text)
+        subprocess.Popen(["bash", script_path], cwd=os.path.dirname(script_path))
+        return True
+    except Exception as e:
+        with get_db() as db:
+            add_alarm(db, "self-update", "Selv-opdatering fejlede: " + str(e)[:120], "advarsel")
+        return False
+
+
+@app.post("/self-update")
+async def self_update():
+    if GITHUB_TOKEN:
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(executor, self_update_sync)
+    return RedirectResponse("/", status_code=303)
 
 
 # ---------- Duplicates & redirects rapport ----------
@@ -1872,6 +1948,7 @@ async def dashboard(request: Request):
         health_hist = db.execute("SELECT COUNT(*) AS n FROM health_history").fetchone()["n"]
         seo_pages = db.execute("SELECT * FROM seopages ORDER BY score ASC LIMIT 100").fetchall()
         crawl = db.execute("SELECT * FROM crawl_runs ORDER BY id DESC LIMIT 1").fetchone()
+        difficulties = db.execute("SELECT * FROM keyword_difficulty ORDER BY id DESC LIMIT 20").fetchall()
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
         "domains": domains,
@@ -1900,6 +1977,7 @@ async def dashboard(request: Request):
         "health_hist_n": health_hist,
         "crawl": crawl,
         "track_domain": TRACK_DOMAIN,
+        "difficulties": difficulties,
     })
 
 
@@ -1949,6 +2027,7 @@ async def lifespan(app_: FastAPI):
     scheduler.add_job(job_check_domains, IntervalTrigger(hours=6), id="domain_checks", replace_existing=True)
     scheduler.add_job(job_check_keywords, CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True)
     scheduler.add_job(cleanup_old_data, CronTrigger(hour=4, minute=30), id="cleanup", replace_existing=True)
+    scheduler.add_job(pull_bridge_sync, IntervalTrigger(minutes=BRIDGE_POLL_MINUTES), id="pull_bridge", replace_existing=True)
     scheduler.start()
     yield
     scheduler.shutdown()
@@ -2002,6 +2081,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
+            <form action="/self-update" method="POST" onsubmit="return confirm('Hent og installér nyeste version? Genstart run.sh bagefter.')"><button class="text-xs text-zinc-400 hover:text-emerald-400">⬆️ Opdatér</button></form>
             <a href="/health" class="text-xs text-emerald-400">Systemstatus</a>
             {% if auth_required %}<a href="/logout" class="text-xs text-zinc-500 hover:text-rose-400">Log ud</a>{% endif %}
         </div>
@@ -2348,7 +2428,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
     <section x-show="tab === 'keywords'" class="space-y-4" style="display: none;">
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <div class="flex items-center justify-between mb-3">
-                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Keyword-positioner (SerpAPI, dagligt kl. 06:00) — sporer: {{ 'steamgears.eu' }}</h2>
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Keyword-positioner (SerpAPI, dagligt kl. 06:00) — sporer: {{ track_domain }}</h2>
                 <form action="/keywords/check" method="POST"><button class="text-xs text-emerald-400">🔄 Tjek nu</button></form>
             </div>
             <form action="/keywords/add" method="POST" class="flex gap-2 mb-3">
@@ -2743,7 +2823,7 @@ fi
 source venv/bin/activate
 pip install --upgrade pip > /dev/null 2>&1
 pip install -r requirements.txt
-echo "⚡ Starter Command Center v7.1..."
+echo "⚡ Starter Command Center v7.5..."
 if [ "$DEV" = "1" ]; then
     uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 else
@@ -2793,7 +2873,7 @@ EOF_SERVICE
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.4 PRO
+# Command Center v7.5 PRO
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 
@@ -2821,6 +2901,13 @@ Eller med Docker: `cp .env.example .env && docker compose up -d --build`
 1. `cp .env.example .env` og udfyld noegler
 2. `./run.sh` → http://127.0.0.1:8000
 3. (VPS) saet `APP_TOKEN` i `.env` og kør bag reverse proxy, eller brug `deploy/command-center.service` + SSH-tunnel
+
+## v7.5 — performance & drift
+- **Pull-bro**: Juno committer JSON-filer til repoets bridge/pending/, CC henter selv hver time (GITHUB_TOKEN i .env) — ingen tunnel eller FTP noedvendig
+- **Selv-opdatering**: Opdater-knap i toppen henter nyeste install.sh og koerer den
+- **SQLite**: WAL-mode, busy_timeout, 8 indekser, daglig oprydning kl. 04:30
+- **HTTP**: connection-pooling og gzip-komprimering
+- **UI**: sticky nav, preconnect, spinner, hover/focus-puds, mobile-forbedringer
 
 ## v7.4 PRO tilfoejelser
 - **Crawl-diff** (Screaming Frog-stil): sammenlign to crawls — nye/fjernede sider, aendret indhold (hash), score-fald >10
@@ -2856,7 +2943,7 @@ fi
 source venv/bin/activate
 pip install --upgrade pip > /dev/null 2>&1
 pip install -r requirements.txt
-echo "⚡ Starter Command Center v7.1..."
+echo "⚡ Starter Command Center v7.5..."
 if [ "$DEV" = "1" ]; then
     uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 else

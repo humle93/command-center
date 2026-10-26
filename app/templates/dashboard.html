@@ -40,6 +40,7 @@
             <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
+            <form action="/self-update" method="POST" onsubmit="return confirm('Hent og installér nyeste version? Genstart run.sh bagefter.')"><button class="text-xs text-zinc-400 hover:text-emerald-400">⬆️ Opdatér</button></form>
             <a href="/health" class="text-xs text-emerald-400">Systemstatus</a>
             {% if auth_required %}<a href="/logout" class="text-xs text-zinc-500 hover:text-rose-400">Log ud</a>{% endif %}
         </div>
@@ -386,7 +387,7 @@
     <section x-show="tab === 'keywords'" class="space-y-4" style="display: none;">
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <div class="flex items-center justify-between mb-3">
-                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Keyword-positioner (SerpAPI, dagligt kl. 06:00) — sporer: {{ 'steamgears.eu' }}</h2>
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Keyword-positioner (SerpAPI, dagligt kl. 06:00) — sporer: {{ track_domain }}</h2>
                 <form action="/keywords/check" method="POST"><button class="text-xs text-emerald-400">🔄 Tjek nu</button></form>
             </div>
             <form action="/keywords/add" method="POST" class="flex gap-2 mb-3">

@@ -24,6 +24,7 @@ import secrets
 import csv
 import io
 import time
+import re
 import hashlib
 import json as jsonlib
 import subprocess
@@ -274,6 +275,16 @@ def init_db():
             found_at TEXT,
             UNIQUE(email, source_url)
         );
+        CREATE TABLE IF NOT EXISTS backlink_prospects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            keyword TEXT NOT NULL,
+            site TEXT,
+            url TEXT,
+            type TEXT,
+            email TEXT,
+            draft TEXT,
+            created_at TEXT
+        );
         CREATE TABLE IF NOT EXISTS visibility (
             day TEXT PRIMARY KEY,
             score REAL
@@ -334,7 +345,7 @@ def create_indexes():
 create_indexes()
 
 
-MODULES = ["domains", "keywords", "ai", "monitors", "social", "links", "bridge", "spy", "wp_push", "telegram"]
+MODULES = ["domains", "keywords", "ai", "monitors", "social", "links", "bridge", "spy", "wp_push", "telegram", "growth"]
 
 
 def module_on(name: str) -> bool:
@@ -1138,14 +1149,7 @@ async def push_article(id: int = Form(...)):
     if not art:
         return RedirectResponse("/", status_code=303)
     try:
-        resp = requests.post(
-            f"{WP_URL.rstrip('/')}/wp-json/wp/v2/posts",
-            auth=(WP_USER, WP_APP_PASSWORD),
-            json={"title": art["title"], "content": art["content"], "status": "draft"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        wp_id = resp.json().get("id")
+        wp_id = wp_push_draft(art["title"], art["content"])
         link = f"{WP_URL.rstrip('/')}/wp-admin/post.php?post={wp_id}&action=edit"
         with get_db() as db:
             db.execute("UPDATE articles SET status='Sendt til WP (kladde)', wp_link=? WHERE id=?", (link, id))
@@ -1159,6 +1163,156 @@ async def push_article(id: int = Form(...)):
 async def delete_article(id: int = Form(...)):
     with get_db() as db:
         db.execute("DELETE FROM articles WHERE id=?", (id,))
+    return RedirectResponse("/", status_code=303)
+
+
+# ---------- Growth Pack (v7.7): autopilot + backlink-prospector ----------
+def wp_push_draft(title: str, content: str):
+    resp = requests.post(
+        f"{WP_URL.rstrip('/')}/wp-json/wp/v2/posts",
+        auth=(WP_USER, WP_APP_PASSWORD),
+        json={"title": title, "content": content, "status": "draft"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json().get("id")
+
+
+def autopilot_sync():
+    """Growth-autopilot: vaelg aeldste ubrugte keyword-idee -> AI-artikel -> (valgfrit) WP-kladde."""
+    if not AIMLAPI_KEY:
+        with get_db() as db:
+            add_alarm(db, "growth", "Autopilot sprang over: AIMLAPI_KEY mangler", "advarsel")
+        return "no-ai"
+    with get_db() as db:
+        row = db.execute(
+            "SELECT id, idea FROM keyword_ideas WHERE idea IS NOT NULL AND idea != '' "
+            "AND idea NOT IN (SELECT keyword FROM articles) ORDER BY id ASC LIMIT 1"
+        ).fetchone()
+    if not row:
+        return "no-ideas"
+    idea = row["idea"].strip()
+    try:
+        content = generate_article_ai(idea)
+    except Exception as e:
+        with get_db() as db:
+            add_alarm(db, "growth", f"Autopilot-generering fejlede for '{idea}': {str(e)[:150]}", "advarsel")
+        return "ai-fail"
+    title = f"Guide: {idea}"
+    with get_db() as db:
+        cur = db.execute(
+            "INSERT INTO articles (title, keyword, content, source, created_at) VALUES (?,?,?,?,?)",
+            (title, idea, content, "Autopilot", now_iso()),
+        )
+        art_id = cur.lastrowid
+        db.execute("DELETE FROM keyword_ideas WHERE id=?", (row["id"],))
+    if WP_URL and WP_USER and WP_APP_PASSWORD and module_on("wp_push"):
+        try:
+            wp_id = wp_push_draft(title, content)
+            link = f"{WP_URL.rstrip('/')}/wp-admin/post.php?post={wp_id}&action=edit"
+            with get_db() as db:
+                db.execute("UPDATE articles SET status='Sendt til WP (kladde)', wp_link=? WHERE id=?", (link, art_id))
+        except Exception as e:
+            with get_db() as db:
+                add_alarm(db, "growth", f"Autopilot WP-push fejlede for #{art_id}: {str(e)[:150]}", "advarsel")
+    return f"ok:{art_id}"
+
+
+async def run_autopilot():
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(executor, autopilot_sync)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/articles/autopilot")
+async def autopilot_manual():
+    """Manuel koersel af autopilot (knappen i Artikler-fanen)."""
+    return await run_autopilot()
+
+
+async def job_growth_autopilot():
+    if not module_on("growth"):
+        return
+    await run_autopilot()
+
+
+def classify_site(url: str):
+    u = (url or "").lower()
+    if any(x in u for x in ("/blog/", ".blogspot", "medium.com", "substack.com")):
+        return "blog"
+    if any(x in u for x in ("directory", "liste", "resources", "tools")):
+        return "liste"
+    if any(x in u for x in ("forum", "reddit.com", "quora.com")):
+        return "forum"
+    return "artikel"
+
+
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+
+def prospect_sync(keyword: str):
+    if not SERPAPI_KEY:
+        with get_db() as db:
+            add_alarm(db, "growth", "Backlink-prospector: SERPAPI_KEY mangler", "advarsel")
+        return
+    r = requests.get(
+        "https://serpapi.com/search",
+        params={"engine": "google", "q": keyword, "num": 10, "api_key": SERPAPI_KEY},
+        timeout=20,
+    )
+    results = (r.json().get("organic_results") or [])[:10]
+    for res in results:
+        url = res.get("link") or ""
+        if not url or urlparse(url).netloc in (TRACK_DOMAIN, "www." + TRACK_DOMAIN):
+            continue
+        site = urlparse(url).netloc
+        stype = classify_site(url)
+        email, draft = None, None
+        try:
+            resp = safe_request(url, timeout=6)
+            found = EMAIL_RE.findall(resp.text or "")
+            email = next((e for e in found if not any(x in e.lower() for x in (".png", ".jpg", ".webp", ".svg", "example.com", "sentry"))), None)
+        except Exception:
+            pass
+        if AIMLAPI_KEY and email:
+            try:
+                prompt = (
+                    f"Write a short (max 120 words) friendly outreach email in English to {email} "
+                    f"who runs {site}. Suggest a steampunk cosplay guide or resource relevant to "
+                    f"their page about '{keyword}' as a reason to add a link to our site {TRACK_DOMAIN}. "
+                    f"Output only the email body."
+                )
+                resp2 = requests.post(
+                    "https://api.aimlapi.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {AIMLAPI_KEY}", "Content-Type": "application/json"},
+                    json={"model": AI_MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": 3000},
+                    timeout=60,
+                )
+                draft = resp2.json()["choices"][0]["message"]["content"]
+            except Exception:
+                draft = None
+        if not draft:
+            draft = (f"Hej! Vi har lavet en guide om '{keyword}' paa {TRACK_DOMAIN}, som dine laesere "
+                     f"maaske kan bruge. Maa vi linke den ind? (Skabelon-draft - saet AIMLAPI_KEY for AI-drafts)")
+        with get_db() as db:
+            db.execute(
+                "INSERT INTO backlink_prospects (keyword, site, url, type, email, draft, created_at) VALUES (?,?,?,?,?,?,?)",
+                (keyword, site, url, stype, email, draft, now_iso()),
+            )
+
+
+@app.post("/backlinks/prospect")
+async def backlink_prospect(keyword: str = Form(...)):
+    keyword = keyword.strip()
+    if keyword:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(executor, prospect_sync, keyword)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/backlinks/delete")
+async def backlink_delete(id: int = Form(...)):
+    with get_db() as db:
+        db.execute("DELETE FROM backlink_prospects WHERE id=?", (id,))
     return RedirectResponse("/", status_code=303)
 
 
@@ -1996,6 +2150,7 @@ async def dashboard(request: Request):
         "ideas": ideas,
         "gaps": gaps,
         "outreach_rows": outreach_rows,
+        "backlink_rows": db.execute("SELECT * FROM backlink_prospects ORDER BY id DESC LIMIT 30").fetchall(),
         "ai_vis": ai_vis,
         "links_sug": links_sug,
         "health_hist_n": health_hist,
@@ -2065,6 +2220,7 @@ async def job_check_keywords():
 async def lifespan(app_: FastAPI):
     scheduler.add_job(job_check_domains, IntervalTrigger(hours=6), id="domain_checks", replace_existing=True)
     scheduler.add_job(job_check_keywords, CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True)
+    scheduler.add_job(job_growth_autopilot, CronTrigger(hour=5, minute=15), id="growth_autopilot", replace_existing=True)
     scheduler.add_job(cleanup_old_data, CronTrigger(hour=4, minute=30), id="cleanup", replace_existing=True)
     scheduler.add_job(pull_bridge_sync, IntervalTrigger(minutes=BRIDGE_POLL_MINUTES), id="pull_bridge", replace_existing=True)
     scheduler.start()

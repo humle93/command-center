@@ -353,6 +353,10 @@
                 <input type="text" name="keyword" placeholder="Emne / søgeord..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Generér</button>
             </form>
+            <form action="/articles/autopilot" method="POST" class="mt-2">
+                <button class="text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-1.5 rounded-lg">🌱 Autopilot: vælg idé → AI-artikel → WP-kladde</button>
+                <span class="text-[10px] text-zinc-500 ml-2">kører også automatisk hver dag kl. 05:15 (modulet Growth)</span>
+            </form>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Kladder</h2>
@@ -389,6 +393,38 @@
                 {% else %}
                 <p class="text-xs text-zinc-500">Ingen artikler oprettet endnu.</p>
                 {% endfor %}
+            </div>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">🔗 Backlink-prospector</h2>
+            <p class="text-xs text-zinc-500 mb-3">Søg keyword → top 10 i Google → type + kontakt-mail + AI-outreach-draft. Kræver SERPAPI_KEY (AIMLAPI_KEY for AI-drafts).</p>
+            <form action="/backlinks/prospect" method="POST" class="flex gap-2 mb-4">
+                <input type="text" name="keyword" placeholder="Keyword at finde links til..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Find muligheder</button>
+            </form>
+            <div class="overflow-x-auto">
+                <table class="w-full text-xs">
+                    <thead class="text-zinc-500 border-b border-zinc-800">
+                        <tr><th class="text-left py-2 pr-3">Keyword</th><th class="text-left py-2 pr-3">Site</th><th class="text-left py-2 pr-3">Type</th><th class="text-left py-2 pr-3">E-mail</th><th class="text-left py-2 pr-3">Draft</th><th></th></tr>
+                    </thead>
+                    <tbody>
+                        {% for b in backlink_rows %}
+                        <tr class="border-b border-zinc-800/60">
+                            <td class="py-2 pr-3 text-zinc-300">{{ b.keyword }}</td>
+                            <td class="py-2 pr-3"><a href="{{ b.url }}" target="_blank" class="text-emerald-400">{{ b.site }}</a></td>
+                            <td class="py-2 pr-3 text-zinc-400">{{ b.type }}</td>
+                            <td class="py-2 pr-3 text-zinc-300">{{ b.email or '—' }}</td>
+                            <td class="py-2 pr-3 max-w-md"><details><summary class="cursor-pointer text-zinc-400">Vis draft</summary><p class="mt-2 text-zinc-400 whitespace-pre-line">{{ b.draft }}</p></details></td>
+                            <td class="py-2 pr-3">
+                                <form action="/backlinks/delete" method="POST"><input type="hidden" name="id" value="{{ b.id }}"><button class="text-zinc-500 hover:text-rose-400">✕</button></form>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                        {% if not backlink_rows %}
+                        <tr><td colspan="6" class="py-3 text-zinc-500">Ingen backlink-muligheder endnu.</td></tr>
+                        {% endif %}
+                    </tbody>
+                </table>
             </div>
         </div>
     </section>
@@ -661,7 +697,7 @@
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">Moduler</h2>
             <p class="text-xs text-zinc-500 mb-4">Slå funktioner til/fra. Slukkede moduler kører ikke automatisk og viser ikke knapper i API-kald.</p>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {% set module_labels = {"domains": "🌐 Domæne-tjek", "keywords": "🎯 Keyword-tjek", "ai": "🤖 AI (artikler/rewrite)", "monitors": "🩺 Monitors", "social": "📱 Social-kø", "links": "🔗 Linktjek", "bridge": "🌉 Pull-bro", "spy": "🕷️ Spy/konkurrenter", "wp_push": "📝 WordPress-push", "telegram": "📬 Telegram"} %}
+                {% set module_labels = {"domains": "🌐 Domæne-tjek", "keywords": "🎯 Keyword-tjek", "ai": "🤖 AI (artikler/rewrite)", "monitors": "🩺 Monitors", "social": "📱 Social-kø", "links": "🔗 Linktjek", "bridge": "🌉 Pull-bro", "spy": "🕷️ Spy/konkurrenter", "wp_push": "📝 WordPress-push", "telegram": "📬 Telegram", "growth": "🌱 Growth-autopilot"} %}
                 {% for m, label in module_labels.items() %}
                 <div class="flex items-center justify-between bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2">
                     <span class="text-xs text-zinc-300">{{ label }}</span>

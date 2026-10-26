@@ -325,6 +325,10 @@ def init_db():
             day TEXT PRIMARY KEY,
             score REAL
         );
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
         CREATE TABLE IF NOT EXISTS keyword_difficulty (
             keyword TEXT PRIMARY KEY,
             difficulty INTEGER,
@@ -375,6 +379,23 @@ def create_indexes():
 
 
 create_indexes()
+
+
+MODULES = ["domains", "keywords", "ai", "monitors", "social", "links", "bridge", "spy", "wp_push", "telegram"]
+
+
+def module_on(name: str) -> bool:
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT value FROM settings WHERE key=?", ("module_" + name,)).fetchone()
+        return row is None or row["value"] == "on"
+    except Exception:
+        return True
+
+
+def set_module(name: str, state: str):
+    with get_db() as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", ("module_" + name, state))
 
 
 def cleanup_old_data():
@@ -751,15 +772,62 @@ def psi_fetch(url: str):
         return None
 
 
+def deep_extras(url: str):
+    """Dyb-niveau: status paa eksterne links + billeder uden alt-tekst."""
+    items = []
+    try:
+        r = safe_request(url, timeout=12)
+        soup = BeautifulSoup(r.text, "html.parser")
+        base = url
+        ext_links = []
+        seen = set()
+        for a_ in soup.find_all("a", href=True):
+            href = urllib.parse.urljoin(base, a_["href"].split("#")[0])
+            d = urlparse(href).netloc
+            if d and d != urlparse(base).netloc and href not in seen:
+                seen.add(href)
+                ext_links.append(href)
+            if len(ext_links) >= 8:
+                break
+        broken = 0
+        for link in ext_links:
+            try:
+                lr = safe_request(link, timeout=8)
+                if lr.status_code >= 400:
+                    broken += 1
+            except Exception:
+                broken += 1
+        items.append({"ok": broken == 0, "text": f"Eksterne links: {len(ext_links)} tjekket, {broken} brodne"})
+        no_alt = [im for im in soup.find_all("img") if not (im.get("alt") or "").strip()]
+        items.append({"ok": len(no_alt) == 0, "text": f"Billeder uden alt-tekst: {len(no_alt)}"})
+    except Exception as e:
+        items.append({"ok": False, "text": "Dyb-scan fejlede: " + str(e)[:100]})
+    return items
+
+
 @app.post("/seo/audit")
 async def run_seo_audit(request: Request):
     form = await request.form()
     url = form.get("url", "")
     keyword = form.get("keyword", "")
     use_psi = form.get("psi", "") == "1"
+    level = form.get("level", "standard")
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(executor, analyze_page, url, keyword)
     result["url"] = url
+    result["level"] = level
+    if level == "quick":
+        # Hurtig: kun kerne-tal, ingen dybe kontroller
+        fails = [c["name"] for c in result.get("raw", []) if not c["ok"]][:5]
+        result = {"url": url, "score": result.get("score", 0), "title": result.get("title", ""),
+                  "meta": result.get("meta", ""), "h1": result.get("h1", ""), "words": result.get("words", 0),
+                  "level": "quick", "quick_issues": fails}
+        return JSONResponse(result)
+    if level == "deep":
+        deep = await loop.run_in_executor(executor, deep_extras, url)
+        result["items"] = list(result.get("items", [])) + deep
+        if not use_psi and PSI_API_KEY:
+            use_psi = True  # dyb scan koerer automatisk Core Web Vitals
     if use_psi:
         loop2 = asyncio.get_event_loop()
         psi = await loop2.run_in_executor(executor, psi_fetch, url)
@@ -899,9 +967,12 @@ async def crawl_delete():
 
 
 @app.post("/seo/crawl")
-async def start_crawl(url: str = Form(...), max_pages: int = Form(30)):
+async def start_crawl(url: str = Form(...), max_pages: int = Form(30), level: str = Form("standard")):
     if CRAWL_STATE["running"]:
         return RedirectResponse("/", status_code=303)
+    preset = {"quick": 10, "standard": 30, "deep": 60}.get(level, None)
+    if preset:
+        max_pages = preset
     max_pages = max(5, min(int(max_pages or 30), 100))
     loop = asyncio.get_event_loop()
     loop.run_in_executor(executor, site_crawl_sync, url, max_pages)
@@ -1354,7 +1425,7 @@ async def bridge_drift(request: Request):
 
 # ---------- Pull-bro: CC henter selv fra GitHub (ingen tunnel noedvendig) ----------
 def pull_bridge_sync():
-    if not GITHUB_TOKEN:
+    if not GITHUB_TOKEN or not module_on("bridge"):
         return
     try:
         headers = {"Authorization": "Bearer " + GITHUB_TOKEN, "Accept": "application/vnd.github+json"}
@@ -1978,7 +2049,18 @@ async def dashboard(request: Request):
         "crawl": crawl,
         "track_domain": TRACK_DOMAIN,
         "difficulties": difficulties,
+        "modules": {m: module_on(m) for m in MODULES},
     })
+
+
+@app.post("/settings/module")
+async def settings_module(request: Request):
+    form = await request.form()
+    name = str(form.get("name", ""))
+    state = "on" if str(form.get("state", "on")) == "on" else "off"
+    if name in MODULES:
+        set_module(name, state)
+    return RedirectResponse("/", status_code=303)
 
 
 @app.post("/notes/add")
@@ -2011,11 +2093,15 @@ async def health():
 
 # ---------- Scheduler ----------
 async def job_check_domains():
+    if not module_on("domains"):
+        return
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(executor, check_all_domains_sync)
 
 
 async def job_check_keywords():
+    if not module_on("keywords"):
+        return
     if not SERPAPI_KEY:
         return
     loop = asyncio.get_event_loop()
@@ -2077,7 +2163,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.5 PRO</span></h1>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.6 PRO</span></h1>
             <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
@@ -2099,6 +2185,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
         <button @click="tab='ai'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='ai' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🤖 AI Tools</button>
         <button @click="tab='monitors'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='monitors' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🩺 Monitors</button>
         <button @click="tab='pro'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='pro' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">💼 Pro</button>
+        <button @click="tab='moduler'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='moduler' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">⚙️ Moduler</button>
         <button @click="tab='alarms'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='alarms' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🚨 Alarmer{% if alarms %} ({{ alarms|length }}){% endif %}</button>
         <button @click="tab='notes'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='notes' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">📝 Noter</button>
     </div>
@@ -2183,11 +2270,16 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             <form @submit.prevent="
                 seoLoading = true; seoResult = null;
                 fetch('/seo/audit', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-                    body: 'url=' + encodeURIComponent($el.querySelector('input[name=url]').value) + '&keyword=' + encodeURIComponent($el.querySelector('input[name=keyword]').value || '') + '&psi=' + ($el.querySelector('input[name=psi]')?.checked ? '1' : '0') })
+                    body: 'url=' + encodeURIComponent($el.querySelector('input[name=url]').value) + '&keyword=' + encodeURIComponent($el.querySelector('input[name=keyword]').value || '') + '&level=' + encodeURIComponent($el.querySelector('select[name=level]').value) + '&psi=' + ($el.querySelector('input[name=psi]')?.checked ? '1' : '0') })
                 .then(r => r.json()).then(data => { seoResult = data; seoLoading = false; })"
                 class="flex flex-col md:flex-row gap-2">
                 <input type="text" name="url" placeholder="https://steamgears.eu/guide..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
                 <input type="text" name="keyword" placeholder="Focus keyword (valgfrit)" class="md:w-52 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <select name="level" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                    <option value="quick">⚡ Hurtig</option>
+                    <option value="standard" selected>🔧 Standard</option>
+                    <option value="deep">🚀 Dyb</option>
+                </select>
                 <label class="flex items-center gap-1 text-xs text-zinc-400 whitespace-nowrap"><input type="checkbox" name="psi"> Core Web Vitals</label>
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Analysér</button>
             </form>
@@ -2198,7 +2290,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5" x-show="seoResult" style="display: none;">
             <div class="flex items-center justify-between mb-4">
                 <h2 class="text-xs uppercase tracking-wider text-zinc-400">Resultat</h2>
-                <div class="text-sm font-bold px-3 py-1 rounded-xl border" :class="seoResult?.score >= 80 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : seoResult?.score >= 50 ? 'bg-amber-500/10 text-amber-400 border-amber-500/30' : 'bg-rose-500/10 text-rose-400 border-rose-500/30'" x-text="seoResult?.score + ' / 100'"></div>
+                <div class="text-sm font-bold px-3 py-1 rounded-xl border" :class="seoResult?.score >= 80 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : seoResult?.score >= 50 ? 'bg-amber-500/10 text-amber-400 border-amber-500/30' : 'bg-rose-500/10 text-rose-400 border-rose-500/30'" x-text="seoResult?.score + ' / 100' + (seoResult?.level === 'deep' ? ' · 🚀' : seoResult?.level === 'quick' ? ' · ⚡' : '')"></div>
             </div>
             <div class="mb-3">
                 <button @click="loadRewrite()" class="text-xs bg-purple-500/10 text-purple-400 border border-purple-500/30 px-3 py-1.5 rounded-lg">✨ AI-rewrite titel/meta</button>
@@ -2218,7 +2310,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                 CLS <span class="text-zinc-300" x-text="seoResult?.psi?.cls"></span>
             </div>
             <ul class="space-y-2 text-xs">
-                <template x-for="item in seoResult?.items">
+                <template x-for="item in (seoResult?.items || (seoResult?.quick_issues || []).map(t => ({ok: false, text: t})))">
                     <li class="flex items-center gap-2">
                         <span x-text="item.ok ? '✅' : '❌'"></span>
                         <span :class="item.ok ? 'text-zinc-300' : 'text-rose-400'" x-text="item.text"></span>
@@ -2231,7 +2323,11 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Site-crawl (flerside-scan)</h2>
             <form action="/seo/crawl" method="POST" class="flex gap-2">
                 <input type="text" name="url" placeholder="https://steamgears.eu" required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
-                <input type="number" name="max_pages" value="30" min="5" max="100" class="w-24 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <select name="level" class="w-32 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                    <option value="quick">⚡ Hurtig (10)</option>
+                    <option value="standard" selected>🔧 Standard (30)</option>
+                    <option value="deep">🚀 Dyb (60)</option>
+                </select>
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Crawl</button>
             </form>
             <div class="flex gap-2 mt-2">
@@ -2683,6 +2779,33 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Pris-overvågning</h2>
             <p class="text-xs text-zinc-400">Tilføj en monitor med typen <span class="text-emerald-400">pris</span> under 🩺 Monitors — så alarmeres der (Telegram + alarmer) når konkurrenter ændrer pris. Bruges fx på AliExpress-/konkurrent-produktsider med JSON-LD eller product:price-meta.</p>
+        </div>
+    </section>
+
+    <!-- MODULER -->
+    <section x-show="tab === 'moduler'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">Moduler</h2>
+            <p class="text-xs text-zinc-500 mb-4">Slå funktioner til/fra. Slukkede moduler kører ikke automatisk og viser ikke knapper i API-kald.</p>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {% set module_labels = {"domains": "🌐 Domæne-tjek", "keywords": "🎯 Keyword-tjek", "ai": "🤖 AI (artikler/rewrite)", "monitors": "🩺 Monitors", "social": "📱 Social-kø", "links": "🔗 Linktjek", "bridge": "🌉 Pull-bro", "spy": "🕷️ Spy/konkurrenter", "wp_push": "📝 WordPress-push", "telegram": "📬 Telegram"} %}
+                {% for m, label in module_labels.items() %}
+                <div class="flex items-center justify-between bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2">
+                    <span class="text-xs text-zinc-300">{{ label }}</span>
+                    {% if modules[m] %}
+                    <form action="/settings/module" method="POST">
+                        <input type="hidden" name="name" value="{{ m }}"><input type="hidden" name="state" value="off">
+                        <button class="text-[11px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-3 py-1 rounded-lg">✅ Til — sluk</button>
+                    </form>
+                    {% else %}
+                    <form action="/settings/module" method="POST">
+                        <input type="hidden" name="name" value="{{ m }}"><input type="hidden" name="state" value="on">
+                        <button class="text-[11px] bg-zinc-800 text-zinc-400 border border-zinc-700 px-3 py-1 rounded-lg">⛔ Slukket — tænd</button>
+                    </form>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
         </div>
     </section>
 

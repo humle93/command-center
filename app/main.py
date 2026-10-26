@@ -278,6 +278,10 @@ def init_db():
             day TEXT PRIMARY KEY,
             score REAL
         );
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
         CREATE TABLE IF NOT EXISTS keyword_difficulty (
             keyword TEXT PRIMARY KEY,
             difficulty INTEGER,
@@ -328,6 +332,23 @@ def create_indexes():
 
 
 create_indexes()
+
+
+MODULES = ["domains", "keywords", "ai", "monitors", "social", "links", "bridge", "spy", "wp_push", "telegram"]
+
+
+def module_on(name: str) -> bool:
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT value FROM settings WHERE key=?", ("module_" + name,)).fetchone()
+        return row is None or row["value"] == "on"
+    except Exception:
+        return True
+
+
+def set_module(name: str, state: str):
+    with get_db() as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", ("module_" + name, state))
 
 
 def cleanup_old_data():
@@ -704,15 +725,62 @@ def psi_fetch(url: str):
         return None
 
 
+def deep_extras(url: str):
+    """Dyb-niveau: status paa eksterne links + billeder uden alt-tekst."""
+    items = []
+    try:
+        r = safe_request(url, timeout=12)
+        soup = BeautifulSoup(r.text, "html.parser")
+        base = url
+        ext_links = []
+        seen = set()
+        for a_ in soup.find_all("a", href=True):
+            href = urllib.parse.urljoin(base, a_["href"].split("#")[0])
+            d = urlparse(href).netloc
+            if d and d != urlparse(base).netloc and href not in seen:
+                seen.add(href)
+                ext_links.append(href)
+            if len(ext_links) >= 8:
+                break
+        broken = 0
+        for link in ext_links:
+            try:
+                lr = safe_request(link, timeout=8)
+                if lr.status_code >= 400:
+                    broken += 1
+            except Exception:
+                broken += 1
+        items.append({"ok": broken == 0, "text": f"Eksterne links: {len(ext_links)} tjekket, {broken} brodne"})
+        no_alt = [im for im in soup.find_all("img") if not (im.get("alt") or "").strip()]
+        items.append({"ok": len(no_alt) == 0, "text": f"Billeder uden alt-tekst: {len(no_alt)}"})
+    except Exception as e:
+        items.append({"ok": False, "text": "Dyb-scan fejlede: " + str(e)[:100]})
+    return items
+
+
 @app.post("/seo/audit")
 async def run_seo_audit(request: Request):
     form = await request.form()
     url = form.get("url", "")
     keyword = form.get("keyword", "")
     use_psi = form.get("psi", "") == "1"
+    level = form.get("level", "standard")
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(executor, analyze_page, url, keyword)
     result["url"] = url
+    result["level"] = level
+    if level == "quick":
+        # Hurtig: kun kerne-tal, ingen dybe kontroller
+        fails = [c["name"] for c in result.get("raw", []) if not c["ok"]][:5]
+        result = {"url": url, "score": result.get("score", 0), "title": result.get("title", ""),
+                  "meta": result.get("meta", ""), "h1": result.get("h1", ""), "words": result.get("words", 0),
+                  "level": "quick", "quick_issues": fails}
+        return JSONResponse(result)
+    if level == "deep":
+        deep = await loop.run_in_executor(executor, deep_extras, url)
+        result["items"] = list(result.get("items", [])) + deep
+        if not use_psi and PSI_API_KEY:
+            use_psi = True  # dyb scan koerer automatisk Core Web Vitals
     if use_psi:
         loop2 = asyncio.get_event_loop()
         psi = await loop2.run_in_executor(executor, psi_fetch, url)
@@ -852,9 +920,12 @@ async def crawl_delete():
 
 
 @app.post("/seo/crawl")
-async def start_crawl(url: str = Form(...), max_pages: int = Form(30)):
+async def start_crawl(url: str = Form(...), max_pages: int = Form(30), level: str = Form("standard")):
     if CRAWL_STATE["running"]:
         return RedirectResponse("/", status_code=303)
+    preset = {"quick": 10, "standard": 30, "deep": 60}.get(level, None)
+    if preset:
+        max_pages = preset
     max_pages = max(5, min(int(max_pages or 30), 100))
     loop = asyncio.get_event_loop()
     loop.run_in_executor(executor, site_crawl_sync, url, max_pages)
@@ -1307,7 +1378,7 @@ async def bridge_drift(request: Request):
 
 # ---------- Pull-bro: CC henter selv fra GitHub (ingen tunnel noedvendig) ----------
 def pull_bridge_sync():
-    if not GITHUB_TOKEN:
+    if not GITHUB_TOKEN or not module_on("bridge"):
         return
     try:
         headers = {"Authorization": "Bearer " + GITHUB_TOKEN, "Accept": "application/vnd.github+json"}
@@ -1931,7 +2002,18 @@ async def dashboard(request: Request):
         "crawl": crawl,
         "track_domain": TRACK_DOMAIN,
         "difficulties": difficulties,
+        "modules": {m: module_on(m) for m in MODULES},
     })
+
+
+@app.post("/settings/module")
+async def settings_module(request: Request):
+    form = await request.form()
+    name = str(form.get("name", ""))
+    state = "on" if str(form.get("state", "on")) == "on" else "off"
+    if name in MODULES:
+        set_module(name, state)
+    return RedirectResponse("/", status_code=303)
 
 
 @app.post("/notes/add")
@@ -1964,11 +2046,15 @@ async def health():
 
 # ---------- Scheduler ----------
 async def job_check_domains():
+    if not module_on("domains"):
+        return
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(executor, check_all_domains_sync)
 
 
 async def job_check_keywords():
+    if not module_on("keywords"):
+        return
     if not SERPAPI_KEY:
         return
     loop = asyncio.get_event_loop()

@@ -31,6 +31,7 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 # --- Konfiguration via miljoevariabler / .env ---
 APP_TOKEN = os.environ.get("APP_TOKEN", "").strip()          # login-token (tom = ingen auth, lokal tilstand)
+JUNO_TOKEN = os.environ.get("JUNO_TOKEN", "").strip()        # Juno-adgang: kun /api/* (bridge + data) — ingen UI/login
 AIMLAPI_KEY = os.environ.get("AIMLAPI_KEY", "").strip()      # AI-artikelgenerator (gemini via aimlapi)
 AI_MODEL = os.environ.get("AI_MODEL", "google/gemini-3-8-flash")
 WP_URL = os.environ.get("WP_URL", "").strip()                # fx https://steamgears.eu
@@ -307,14 +308,24 @@ def is_authed(request: Request) -> bool:
     return request.cookies.get("cc_token") == APP_TOKEN or request.headers.get("x-cc-token") == APP_TOKEN
 
 
+def is_juno(request: Request) -> bool:
+    """Juno-adgang: separat token, gyldig KUN for /api/*-endpoints (laese-data + bridge-push)."""
+    return bool(JUNO_TOKEN) and request.headers.get("x-cc-token") == JUNO_TOKEN
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
     public = ("/login", "/health", "/static")
     if APP_TOKEN and not any(path.startswith(p) for p in public) and not is_authed(request):
-        if path.startswith("/api/"):
+        if path.startswith("/api/") and is_juno(request):
+            juno_forbidden = ("/api/bridge", "/api/duplicates", "/api/visibility", "/api/health-history")
+            if request.method != "GET" and any(path.startswith(fp) for fp in juno_forbidden) and not (path == "/api/bridge/gsc" or path == "/api/bridge/drift"):
+                return JSONResponse({"error": "juno-token: kun GET eller bridge-push"}, status_code=403)  # Juno-token har adgang til API-endpoints (inkl. bridge-push)
+        elif path.startswith("/api/"):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
-        return RedirectResponse("/login", status_code=303)
+        else:
+            return RedirectResponse("/login", status_code=303)
     return await call_next(request)
 
 

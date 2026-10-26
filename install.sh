@@ -20,6 +20,7 @@ cat << 'EOF_ENVDOT' > "$PROJECT_DIR/.env.example"
 # Command Center v7.1 - kopier til .env og udfyld
 # Login-token for hele dashboardet (OBBLIGATORISK pa VPS!)
 APP_TOKEN=
+JUNO_TOKEN=                              # Junos egen noegle til automatisk API-push (laeg den fra copy-siden her)
 # AI-artikler: din aimlapi-noegle
 AIMLAPI_KEY=
 AI_MODEL=google/gemini-3-8-flash
@@ -73,6 +74,7 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 # --- Konfiguration via miljoevariabler / .env ---
 APP_TOKEN = os.environ.get("APP_TOKEN", "").strip()          # login-token (tom = ingen auth, lokal tilstand)
+JUNO_TOKEN = os.environ.get("JUNO_TOKEN", "").strip()        # Juno-adgang: kun /api/* (bridge + data) — ingen UI/login
 AIMLAPI_KEY = os.environ.get("AIMLAPI_KEY", "").strip()      # AI-artikelgenerator (gemini via aimlapi)
 AI_MODEL = os.environ.get("AI_MODEL", "google/gemini-3-8-flash")
 WP_URL = os.environ.get("WP_URL", "").strip()                # fx https://steamgears.eu
@@ -349,14 +351,24 @@ def is_authed(request: Request) -> bool:
     return request.cookies.get("cc_token") == APP_TOKEN or request.headers.get("x-cc-token") == APP_TOKEN
 
 
+def is_juno(request: Request) -> bool:
+    """Juno-adgang: separat token, gyldig KUN for /api/*-endpoints (laese-data + bridge-push)."""
+    return bool(JUNO_TOKEN) and request.headers.get("x-cc-token") == JUNO_TOKEN
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
     public = ("/login", "/health", "/static")
     if APP_TOKEN and not any(path.startswith(p) for p in public) and not is_authed(request):
-        if path.startswith("/api/"):
+        if path.startswith("/api/") and is_juno(request):
+            juno_forbidden = ("/api/bridge", "/api/duplicates", "/api/visibility", "/api/health-history")
+            if request.method != "GET" and any(path.startswith(fp) for fp in juno_forbidden) and not (path == "/api/bridge/gsc" or path == "/api/bridge/drift"):
+                return JSONResponse({"error": "juno-token: kun GET eller bridge-push"}, status_code=403)  # Juno-token har adgang til API-endpoints (inkl. bridge-push)
+        elif path.startswith("/api/"):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
-        return RedirectResponse("/login", status_code=303)
+        else:
+            return RedirectResponse("/login", status_code=303)
     return await call_next(request)
 
 
@@ -2715,7 +2727,7 @@ EOF_SERVICE
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.3 PRO
+# Command Center v7.4 PRO
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 
@@ -2743,6 +2755,13 @@ Eller med Docker: `cp .env.example .env && docker compose up -d --build`
 1. `cp .env.example .env` og udfyld noegler
 2. `./run.sh` → http://127.0.0.1:8000
 3. (VPS) saet `APP_TOKEN` i `.env` og kør bag reverse proxy, eller brug `deploy/command-center.service` + SSH-tunnel
+
+## v7.4 PRO tilfoejelser
+- **Crawl-diff** (Screaming Frog-stil): sammenlign to crawls — nye/fjernede sider, aendret indhold (hash), score-fald >10
+- **Redirect-audit**: kæder (2+ hop), redirect-loops og usikre http-redirects fra crawleren
+- **Sitemap-generator**: download sitemap.xml bygget fra seneste crawl (/api/sitemap.xml)
+- **Keyword-svaerhedsgrad** (Ahrefs-kopi): heuristic over top 10 — autoritetsdomaener, unikke domaener, annoncer → 0-100 score
+- **AI titel/meta-rewrite**: Gemini foreslar 3 titler + 3 meta descriptions direkte fra deep audit (klik for at kopiere)
 
 ## PRO-funktioner (betalt-varktoej-kloner)
 - **Content Gap** (Semrush-kopi): top 10 SERP hentes via SerpAPI, gennemsnit af ord/H2 beregnes, og dine artikel-kladder scores mod markedet (Content Score)

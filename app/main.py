@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Plai
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi import HTTPException
+from fastapi.middleware.gzip import GZipMiddleware
 from contextlib import contextmanager, asynccontextmanager
 from urllib.parse import urlparse
 from datetime import datetime, timezone, timedelta, date
@@ -79,8 +80,11 @@ TRACK_DOMAIN = os.environ.get("TRACK_DOMAIN", "steamgears.eu").strip()
 @contextmanager
 def get_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=15000")
     try:
         yield conn
         conn.commit()
@@ -301,6 +305,35 @@ def migrate_db():
 
 migrate_db()
 
+
+def create_indexes():
+    with get_db() as db:
+        for stmt in [
+            "CREATE INDEX IF NOT EXISTS idx_seopages_run ON seopages(run_id)",
+            "CREATE INDEX IF NOT EXISTS idx_gsc_daily_day ON gsc_daily(day)",
+            "CREATE INDEX IF NOT EXISTS idx_gsc_q ON gsc_queries(query)",
+            "CREATE INDEX IF NOT EXISTS idx_alarms_open ON alarms(resolved, id)",
+            "CREATE INDEX IF NOT EXISTS idx_hist_domain ON check_history(domain_id, id)",
+            "CREATE INDEX IF NOT EXISTS idx_health_time ON health_history(checked_at)",
+            "CREATE INDEX IF NOT EXISTS idx_crawl_time ON crawl_runs(started_at)",
+            "CREATE INDEX IF NOT EXISTS kw_ideas_kw ON keyword_ideas(keyword)",
+        ]:
+            db.execute(stmt)
+        db.execute("ANALYZE")
+
+
+create_indexes()
+
+
+def cleanup_old_data():
+    """Daglig oprydning: gamle maalinger rulles af, DB holdes sund."""
+    with get_db() as db:
+        db.execute("DELETE FROM check_history WHERE checked_at < datetime('now', '-90 days')")
+        db.execute("DELETE FROM alarms WHERE resolved=1 AND created_at < datetime('now', '-30 days')")
+        db.execute("DELETE FROM health_history WHERE checked_at < datetime('now', '-180 days')")
+        db.execute("DELETE FROM keyword_ideas WHERE created_at < datetime('now', '-180 days')")
+
+
 # ---------- Auth ----------
 def is_authed(request: Request) -> bool:
     if not APP_TOKEN:
@@ -365,12 +398,18 @@ def normalize_url(url: str) -> str:
     return url.rstrip("/")
 
 
+HTTP = requests.Session()
+_adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=20)
+HTTP.mount("https://", _adapter)
+HTTP.mount("http://", _adapter)
+
+
 def safe_request(url: str, timeout: int = 6):
-    return requests.get(
+    return HTTP.get(
         url,
         timeout=timeout,
         allow_redirects=True,
-        headers={"User-Agent": "Mozilla/5.0 CommandCenter/7.0"},
+        headers={"User-Agent": "Mozilla/5.0 CommandCenter/7.4"},
     )
 
 
@@ -1817,6 +1856,7 @@ async def dashboard(request: Request):
         "links_sug": links_sug,
         "health_hist_n": health_hist,
         "crawl": crawl,
+        "track_domain": TRACK_DOMAIN,
     })
 
 
@@ -1865,9 +1905,11 @@ async def job_check_keywords():
 async def lifespan(app_: FastAPI):
     scheduler.add_job(job_check_domains, IntervalTrigger(hours=6), id="domain_checks", replace_existing=True)
     scheduler.add_job(job_check_keywords, CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True)
+    scheduler.add_job(cleanup_old_data, CronTrigger(hour=4, minute=30), id="cleanup", replace_existing=True)
     scheduler.start()
     yield
     scheduler.shutdown()
 
 
+app.add_middleware(GZipMiddleware, minimum_size=500)
 app.router.lifespan_context = lifespan

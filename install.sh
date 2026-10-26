@@ -46,6 +46,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Plai
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi import HTTPException
+from fastapi.middleware.gzip import GZipMiddleware
 from contextlib import contextmanager, asynccontextmanager
 from urllib.parse import urlparse
 from datetime import datetime, timezone, timedelta, date
@@ -122,8 +123,11 @@ TRACK_DOMAIN = os.environ.get("TRACK_DOMAIN", "steamgears.eu").strip()
 @contextmanager
 def get_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=15000")
     try:
         yield conn
         conn.commit()
@@ -344,6 +348,35 @@ def migrate_db():
 
 migrate_db()
 
+
+def create_indexes():
+    with get_db() as db:
+        for stmt in [
+            "CREATE INDEX IF NOT EXISTS idx_seopages_run ON seopages(run_id)",
+            "CREATE INDEX IF NOT EXISTS idx_gsc_daily_day ON gsc_daily(day)",
+            "CREATE INDEX IF NOT EXISTS idx_gsc_q ON gsc_queries(query)",
+            "CREATE INDEX IF NOT EXISTS idx_alarms_open ON alarms(resolved, id)",
+            "CREATE INDEX IF NOT EXISTS idx_hist_domain ON check_history(domain_id, id)",
+            "CREATE INDEX IF NOT EXISTS idx_health_time ON health_history(checked_at)",
+            "CREATE INDEX IF NOT EXISTS idx_crawl_time ON crawl_runs(started_at)",
+            "CREATE INDEX IF NOT EXISTS kw_ideas_kw ON keyword_ideas(keyword)",
+        ]:
+            db.execute(stmt)
+        db.execute("ANALYZE")
+
+
+create_indexes()
+
+
+def cleanup_old_data():
+    """Daglig oprydning: gamle maalinger rulles af, DB holdes sund."""
+    with get_db() as db:
+        db.execute("DELETE FROM check_history WHERE checked_at < datetime('now', '-90 days')")
+        db.execute("DELETE FROM alarms WHERE resolved=1 AND created_at < datetime('now', '-30 days')")
+        db.execute("DELETE FROM health_history WHERE checked_at < datetime('now', '-180 days')")
+        db.execute("DELETE FROM keyword_ideas WHERE created_at < datetime('now', '-180 days')")
+
+
 # ---------- Auth ----------
 def is_authed(request: Request) -> bool:
     if not APP_TOKEN:
@@ -408,12 +441,18 @@ def normalize_url(url: str) -> str:
     return url.rstrip("/")
 
 
+HTTP = requests.Session()
+_adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=20)
+HTTP.mount("https://", _adapter)
+HTTP.mount("http://", _adapter)
+
+
 def safe_request(url: str, timeout: int = 6):
-    return requests.get(
+    return HTTP.get(
         url,
         timeout=timeout,
         allow_redirects=True,
-        headers={"User-Agent": "Mozilla/5.0 CommandCenter/7.0"},
+        headers={"User-Agent": "Mozilla/5.0 CommandCenter/7.4"},
     )
 
 
@@ -1860,6 +1899,7 @@ async def dashboard(request: Request):
         "links_sug": links_sug,
         "health_hist_n": health_hist,
         "crawl": crawl,
+        "track_domain": TRACK_DOMAIN,
     })
 
 
@@ -1908,11 +1948,13 @@ async def job_check_keywords():
 async def lifespan(app_: FastAPI):
     scheduler.add_job(job_check_domains, IntervalTrigger(hours=6), id="domain_checks", replace_existing=True)
     scheduler.add_job(job_check_keywords, CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True)
+    scheduler.add_job(cleanup_old_data, CronTrigger(hour=4, minute=30), id="cleanup", replace_existing=True)
     scheduler.start()
     yield
     scheduler.shutdown()
 
 
+app.add_middleware(GZipMiddleware, minimum_size=500)
 app.router.lifespan_context = lifespan
 EOF_MAIN
 
@@ -1927,13 +1969,37 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
     <script src="https://cdn.tailwindcss.com"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <link rel="preconnect" href="https://cdn.tailwindcss.com" crossorigin>
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+    <meta name="theme-color" content="#09090b">
+    <style>
+      html { scroll-behavior: smooth; }
+      body { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+      ::-webkit-scrollbar { width: 9px; height: 9px; }
+      ::-webkit-scrollbar-track { background: #09090b; }
+      ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 8px; }
+      ::-webkit-scrollbar-thumb:hover { background: #52525b; }
+      nav, header { backdrop-filter: blur(12px); }
+      tbody tr { transition: background-color .12s ease; }
+      tbody tr:hover { background: rgba(39,39,42,.45); }
+      button, a, input { transition: all .15s ease; }
+      input:focus-visible, button:focus-visible { outline: 2px solid #34d399; outline-offset: 1px; }
+      .spinner { width: 16px; height: 16px; border: 2px solid #3f3f46; border-top-color: #34d399; border-radius: 50%; display: inline-block; animation: ccspin .7s linear infinite; vertical-align: -3px; }
+      @keyframes ccspin { to { transform: rotate(360deg); } }
+      .bg-zinc-900:hover { border-color: #3f3f46; }
+      @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+      @media (max-width: 640px) {
+        nav::-webkit-scrollbar { display: none; }
+        th, td { padding-top: .45rem; padding-bottom: .45rem; }
+      }
+    </style>
 </head>
 <body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.4 PRO</span></h1>
-            <p class="text-xs text-zinc-400">WordPress, SEO, indhold & overvågning</p>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.5 PRO</span></h1>
+            <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
             <a href="/health" class="text-xs text-emerald-400">Systemstatus</a>
@@ -1941,7 +2007,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
         </div>
     </div>
 </header>
-<nav class="border-b border-zinc-800 bg-zinc-900/30 px-4 py-2">
+<nav class="sticky top-0 z-50 border-b border-zinc-800 bg-zinc-900/70 px-4 py-2 shadow-lg shadow-black/20">
     <div class="max-w-7xl mx-auto flex gap-2 overflow-x-auto">
         <button @click="tab='cockpit'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='cockpit' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🎛️ Cockpit</button>
         <button @click="tab='seo'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='seo' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🔍 SEO Scanner</button>
@@ -2047,7 +2113,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             </form>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5" x-show="seoLoading" style="display: none;">
-            <p class="text-xs text-zinc-400">Analyserer side (20+ kontroller)...</p>
+            <p class="text-xs text-zinc-400"><span class="spinner mr-2"></span>Analyserer side (20+ kontroller)…</p>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5" x-show="seoResult" style="display: none;">
             <div class="flex items-center justify-between mb-4">

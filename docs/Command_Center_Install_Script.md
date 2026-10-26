@@ -1348,6 +1348,13 @@ exec ./run.sh
 
 ---
 
+## Rollback: hvis det gik i baglaas (v7.9)
+1. Stop appen: `systemctl --user stop command-center` (eller Ctrl+C i forgrund)
+2. Gendan database: `cp ~/command-center/app/backups/cc-pre-update-*.db ~/command-center/app/data/center.db` (vaeg seneste; daglige backups hedder `cc-daglig-*`)
+3. Gendan kode: hent forrige version fra GitHub (commit-historik) og koer `install.sh` igen
+4. Verificer: `bash scripts/smoke_test.sh` — skal vise OK paa /health og /login
+5. Opstarts-selvtesten koerer automatisk ved hver start og laver kritisk alarm ved DB-fejl, manglende noegler eller manglende ruter
+
 ## v7.7-ændringer + stabilitet (install.sh)
 - Nye heredocs: growth-autopilot (autopilot_sync + cron 05:15 med module_on("growth")-guard), backlink-prospector (tabel backlink_prospects + classify_site + EMAIL_RE), MODULES-modulsystem (11 moduler, 3 niveauer), guidet nav + workflow-guide i Cockpit, serp_competitor_context (fakta-prompt til AI-artikler), s9-autoideas (Google-autocomplete via suggestqueries.google.com)
 - Stabilitet: init-fejl kan ikke længere crashe opstart (retry + videre-kørsel), scheduler-fejl stopper ikke appen, cron-løkker er guardet pr. element

@@ -2,8 +2,8 @@
 set -e
 PROJECT_DIR="$HOME/command-center"
 
-echo "⚡ Command Center v7.1 - installerer i $PROJECT_DIR..."
-mkdir -p "$PROJECT_DIR/app/templates" "$PROJECT_DIR/app/data" "$PROJECT_DIR/app/static" "$PROJECT_DIR/deploy"
+echo "⚡ Command Center v7.9 - installerer i $PROJECT_DIR..."
+mkdir -p "$PROJECT_DIR/app/templates" "$PROJECT_DIR/app/data" "$PROJECT_DIR/app/static" "$PROJECT_DIR/deploy" "$PROJECT_DIR/scripts"
 echo "📄 requirements.txt..."
 cat << 'EOF_REQ' > "$PROJECT_DIR/requirements.txt"
 fastapi==0.115.6
@@ -75,6 +75,7 @@ import re
 import hashlib
 import json as jsonlib
 import subprocess
+import sys
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data", "center.db")
@@ -447,6 +448,7 @@ def is_juno(request: Request) -> bool:
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
+    request.state.insecure = (request.headers.get("x-forwarded-proto", "https") == "http" and (request.client.host if request.client else "") not in ("127.0.0.1", "::1"))
     public = ("/login", "/health", "/static")
     if APP_TOKEN and not any(path.startswith(p) for p in public) and not is_authed(request):
         if path.startswith("/api/") and is_juno(request):
@@ -467,12 +469,23 @@ async def login_page(request: Request):
 
 @app.post("/login")
 async def login(request: Request):
+    ip = request.client.host if request.client else "ukendt"
+    now = time.time()
+    fails, locked_until = _LOGIN_FAILS.get(ip, (0, 0.0))
+    if locked_until > now:
+        return templates.TemplateResponse("login.html", {"request": request, "error": "For mange fejlede login - proev igen om " + str(int(locked_until - now)) + " sek."}, status_code=429)
     form = await request.form()
     token = (form.get("token") or "").strip()
     if APP_TOKEN and secrets.compare_digest(token, APP_TOKEN):
         resp = RedirectResponse("/", status_code=303)
         resp.set_cookie("cc_token", token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30)
+        _LOGIN_FAILS.pop(ip, None)
         return resp
+    fails += 1
+    if fails >= 5:
+        _LOGIN_FAILS[ip] = (0, now + 600)  # 5 fejl = 10 min laas
+    else:
+        _LOGIN_FAILS[ip] = (fails, locked_until)
     return templates.TemplateResponse("login.html", {"request": request, "error": "Forkert token"}, status_code=401)
 
 
@@ -481,6 +494,9 @@ async def logout():
     resp = RedirectResponse("/login", status_code=303)
     resp.delete_cookie("cc_token")
     return resp
+
+
+_LOGIN_FAILS: dict = {}  # v7.9: IP -> (antal fejl, laas-til)
 
 
 # ---------- Hjaelpere ----------
@@ -1767,8 +1783,77 @@ def pull_bridge_sync():
         pass
 
 
+# ---------- v7.9 Stabilitet: DB-backup + opstarts-selvtest ----------
+def backup_db_sync(tag: str = "daglig"):
+    try:
+        bdir = os.path.join(BASE_DIR, "backups")
+        os.makedirs(bdir, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d-%H%M")
+        dest = os.path.join(bdir, "cc-" + tag + "-" + ts + ".db")
+        src = sqlite3.connect(DB_PATH)
+        dst = sqlite3.connect(dest)
+        with dst:
+            src.backup(dst)
+        dst.close()
+        src.close()
+        backups = sorted(f for f in os.listdir(bdir) if f.startswith("cc-" + tag + "-") and f.endswith(".db"))
+        for old in backups[:-14]:
+            try:
+                os.remove(os.path.join(bdir, old))
+            except OSError:
+                pass
+        with get_db() as db:
+            db.execute("INSERT INTO settings(key, value) VALUES('last_db_backup', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (jsonlib.dumps(now_iso()),))
+        return dest
+    except Exception as e:
+        try:
+            with get_db() as db:
+                add_alarm(db, "backup", "DB-backup fejlede: " + str(e)[:120], "advarsel")
+        except Exception:
+            pass
+        return None
+
+
+def startup_selftest_sync():
+    fejl = []
+    ruter = len(app.routes)
+    try:
+        with get_db() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS _selftest(x TEXT)")
+            db.execute("INSERT INTO _selftest(x) VALUES('ok')")
+            db.execute("DELETE FROM _selftest")
+    except Exception as e:
+        fejl.append("DB-skrivetest: " + str(e)[:80])
+    if APP_TOKEN and not AIMLAPI_KEY:
+        fejl.append("AIMLAPI_KEY mangler - AI-artikler vil fejle")
+    if ruter < 40:
+        fejl.append("Kun " + str(ruter) + " ruter registreret (forventet 50+)")
+    try:
+        with get_db() as db:
+            if fejl:
+                add_alarm(db, "selftest", "Selvtest ved opstart FEJLEDE: " + " | ".join(fejl)[:300], "kritisk")
+                status = {"ok": False, "at": now_iso(), "fejl": fejl}
+            else:
+                status = {"ok": True, "at": now_iso(), "ruter": ruter}
+            db.execute("INSERT INTO settings(key, value) VALUES('last_selftest', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (jsonlib.dumps(status),))
+    except Exception as e:
+        print("[cc] selvtest kunne ikke gemme resultat:", repr(e), flush=True)
+    print("[cc] opstarts-selvtest:", "OK (" + str(ruter) + " ruter)" if not fejl else "FEJL: " + "; ".join(fejl), flush=True)
+
+
+async def job_backup_db():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(executor, backup_db_sync)
+
+
 def self_update_sync():
     try:
+        if sys.platform.startswith("win"):
+            # v7.9: self-update bruger bash-installeren (Linux/macOS). Paa Windows: opdater manuelt.
+            with get_db() as db:
+                add_alarm(db, "self-update", "Self-update er ikke understoettet paa Windows endnu - opdater manuelt via git pull eller ny install.sh", "advarsel")
+            return False
+        backup_db_sync(tag="pre-update")  # rollback-punkt foer nye filer skrives
         headers = {"Authorization": "Bearer " + GITHUB_TOKEN, "Accept": "application/vnd.github.raw"}
         r = HTTP.get(f"https://api.github.com/repos/{GITHUB_REPO}/contents/install.sh", headers=headers, timeout=30)
         r.raise_for_status()
@@ -2371,6 +2456,7 @@ async def dashboard(request: Request):
         "active_strategy": (db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone() or [None])[0] or DEFAULT_STRATEGY,
         "strategy_autopilot": get_active_strategy()["autopilot"],
         "strategy_autopilot_label": get_active_strategy()["label"],
+        "insecure": getattr(request.state, "insecure", False),
         "strategy_check": (lambda r: (jsonlib.loads(r) if r else None))(db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone() and db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone()["value"]),
     })
 
@@ -2510,7 +2596,12 @@ async def lifespan(app_: FastAPI):
         scheduler.add_job(job_growth_autopilot, CronTrigger(hour=5, minute=15), id="growth_autopilot", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(cleanup_old_data, CronTrigger(hour=4, minute=30), id="cleanup", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(pull_bridge_sync, IntervalTrigger(minutes=BRIDGE_POLL_MINUTES), id="pull_bridge", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_backup_db, CronTrigger(hour=4, minute=40), id="db_backup", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.start()
+        try:
+            executor.submit(startup_selftest_sync)  # v7.9: selvtest ved hver opstart (efter self-update/install)
+        except Exception:
+            pass
     except Exception as e:
         print("[cc] scheduler kunne ikke starte (app koerer videre uden cron):", repr(e), flush=True)
     yield
@@ -2557,11 +2648,12 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
       }
     </style>
 </head>
+{% if insecure %}<div class="bg-yellow-600 text-black text-xs text-center py-1.5 px-4 font-semibold">&Uacute;t&uacute;n HTTPS &mdash; token sendes ukrypteret. S&aelig;t nginx + TLS op foran CC (se Install-dokumentationen).</div>{% endif %}
 <body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.8 PRO</span></h1>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.9 PRO</span></h1>
             <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
@@ -3464,7 +3556,7 @@ EOF_SERVICE
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.8 PRO
+# Command Center v7.9 PRO
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 
@@ -3473,7 +3565,9 @@ Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Y
 - 🔍 **SEO Scanner** — deep audit af enkelt side (20+ vægtede kontroller inkl. focus keyword, lesbarhed, mixed content, schema, OG/Twitter) + **site-crawl** med score per side og robots.txt/sitemap-tjek
 - ✍️ **Artikler** — AI-generering (Gemini via aimlapi) eller skabelon, **push direkte til WordPress som udkast**, **fakta-prompt med SerpAPI-konkurrentanalyse** (top 5 resultater ind i prompten — artiklen skal slå dem), autopilot (idé → artikel → WP-kladde, ny idé via Google-autocomplete når puljen er tom)
 - 🎯 **SEO-strategi-vælger** — dropdown (AdSense-indkomst / Affiliate / Backlink-vækst): styler AI-artikler (stil + længde) og autopiloten (artikel vs. prospecting), med automatisk pre-flight-tjek af nøgler, moduler, cron og DB efter hvert valg (grøn/rød-checkliste)
-- 🌱 **Growth Pack** — autopilot-nøgleord-side (05:15 dagligt), **backlink-prospector** (SerpAPI top 10 → sitetype + kontakt-e-mail + AI-outreach-draft), visibility-index\n- 🧩 **Moduler** — slå funktioner fra/til i 3 niveauer (kerne/udvidet/fuld); alt visuelles følger modulet
+- 🛡️ **v7.9 Stabilitet** — daglig DB-backup (04:40, seneste 14 gemmes) + automatisk backup foer hver self-update; opstarts-selvtest (DB-skrivetest, noegler, rute-taelling → kritisk alarm ved fejl); login rate-limit (5 fejl = 10 min laas pr. IP); HTTPS-advarsel i UI; scripts/smoke_test.sh; run.bat (Windows-startscript, klar til fremtid - self-update er Linux-only)
+- 🌱 **Growth Pack** — autopilot-nøgleord-side (05:15 dagligt), **backlink-prospector** (SerpAPI top 10 → sitetype + kontakt-e-mail + AI-outreach-draft), visibility-index
+- 🧩 **Moduler** — slå funktioner fra/til i 3 niveauer (kerne/udvidet/fuld); alt visuelles følger modulet
 - 🎯 **Keywords** — Google-positioner via SerpAPI, tjekket automatisk daglig kl. 06:00
 - 🕷️ **SERP & Spy** — konkurrent-opdagelse + crawl af titel/H1/beskrivelse
 - 🔗 **Links** — ekstern linktjek med brodte-links-rapport
@@ -3523,6 +3617,42 @@ Eller med Docker: `cp .env.example .env && docker compose up -d --build`
 - Default binding er 127.0.0.1 — saet aldrig `0.0.0.0` uden reverse proxy + auth
 EOF_README
 
+echo "📄 scripts/smoke_test.sh..."
+cat << 'EOF_SMOKE' > "$PROJECT_DIR/scripts/smoke_test.sh"
+#!/bin/bash
+# Command Center smoke-test (v7.9) - koer efter install eller self-update.
+# Brug: bash scripts/smoke_test.sh
+PORT="${CC_PORT:-8000}"
+ok=1
+for p in /health /login; do
+  code=$(curl -s -o /dev/null --max-time 5 -w "%{http_code}" "http://127.0.0.1:$PORT$p" 2>/dev/null) || code=000
+  case "$code" in
+    200) echo "OK   $p -> 200" ;;
+    *) echo "FAIL $p -> $code"; ok=0 ;;
+  esac
+done
+if [ "$ok" = "1" ]; then
+  echo "✅ Smoke-test OK"
+else
+  echo "❌ Smoke-test FEJLEDE - tjek logs: journalctl -u command-center ellers tail -50 ~/command-center/nohup.out"
+fi
+exit $ok
+EOF_SMOKE
+
+echo "📄 run.bat..."
+cat << 'EOF_WINBAT' > "$PROJECT_DIR/run.bat"
+@echo off
+REM Command Center - Windows startscript (v7.9). Ligger .env ved siden af og koer filen.
+cd /d "%~dp0"
+if exist .env for /f "usebackq eol=# tokens=1,* delims==" %%a in (".env") do set "%%a=%%b"
+if not exist venv python -m venv venv
+call venv\Scripts\activate.bat
+python -m pip install --upgrade pip > nul 2>&1
+python -m pip install -r requirements.txt
+echo Starter Command Center v7.9 (Windows - lokal brug, self-update er Linux-only)...
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+EOF_WINBAT
+
 if [ -f "$PROJECT_DIR/.env" ]; then echo "✅ .env findes allerede - bruger den"; else cp "$PROJECT_DIR/.env.example" "$PROJECT_DIR/.env"; echo "⚠ Opret .env (se .env.example) inden foerste start"; fi
 cat << 'EOF_RUN' > "$PROJECT_DIR/run.sh"
 #!/bin/bash
@@ -3544,5 +3674,6 @@ else
 fi
 EOF_RUN
 chmod +x "$PROJECT_DIR/run.sh"
-echo "✨ Installation klar! Sæt noegler i $PROJECT_DIR/.env og kør: cd ~/command-center && ./run.sh"
+if curl -s -o /dev/null --max-time 3 http://127.0.0.1:8000/health 2>/dev/null; then echo "🔎 App koerer allerede - koerer smoke-test:"; bash "$PROJECT_DIR/scripts/smoke_test.sh" || true; fi
+echo "✨ Installation klar! Sæt noegler i $PROJECT_DIR/.env og kør: cd ~/command-center && ./run.sh (smoke-test bagefter: bash scripts/smoke_test.sh)"
 

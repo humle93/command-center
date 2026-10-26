@@ -28,6 +28,7 @@ import re
 import hashlib
 import json as jsonlib
 import subprocess
+import sys
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data", "center.db")
@@ -400,6 +401,7 @@ def is_juno(request: Request) -> bool:
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
+    request.state.insecure = (request.headers.get("x-forwarded-proto", "https") == "http" and (request.client.host if request.client else "") not in ("127.0.0.1", "::1"))
     public = ("/login", "/health", "/static")
     if APP_TOKEN and not any(path.startswith(p) for p in public) and not is_authed(request):
         if path.startswith("/api/") and is_juno(request):
@@ -420,12 +422,23 @@ async def login_page(request: Request):
 
 @app.post("/login")
 async def login(request: Request):
+    ip = request.client.host if request.client else "ukendt"
+    now = time.time()
+    fails, locked_until = _LOGIN_FAILS.get(ip, (0, 0.0))
+    if locked_until > now:
+        return templates.TemplateResponse("login.html", {"request": request, "error": "For mange fejlede login - proev igen om " + str(int(locked_until - now)) + " sek."}, status_code=429)
     form = await request.form()
     token = (form.get("token") or "").strip()
     if APP_TOKEN and secrets.compare_digest(token, APP_TOKEN):
         resp = RedirectResponse("/", status_code=303)
         resp.set_cookie("cc_token", token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30)
+        _LOGIN_FAILS.pop(ip, None)
         return resp
+    fails += 1
+    if fails >= 5:
+        _LOGIN_FAILS[ip] = (0, now + 600)  # 5 fejl = 10 min laas
+    else:
+        _LOGIN_FAILS[ip] = (fails, locked_until)
     return templates.TemplateResponse("login.html", {"request": request, "error": "Forkert token"}, status_code=401)
 
 
@@ -434,6 +447,9 @@ async def logout():
     resp = RedirectResponse("/login", status_code=303)
     resp.delete_cookie("cc_token")
     return resp
+
+
+_LOGIN_FAILS: dict = {}  # v7.9: IP -> (antal fejl, laas-til)
 
 
 # ---------- Hjaelpere ----------
@@ -1720,8 +1736,77 @@ def pull_bridge_sync():
         pass
 
 
+# ---------- v7.9 Stabilitet: DB-backup + opstarts-selvtest ----------
+def backup_db_sync(tag: str = "daglig"):
+    try:
+        bdir = os.path.join(BASE_DIR, "backups")
+        os.makedirs(bdir, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d-%H%M")
+        dest = os.path.join(bdir, "cc-" + tag + "-" + ts + ".db")
+        src = sqlite3.connect(DB_PATH)
+        dst = sqlite3.connect(dest)
+        with dst:
+            src.backup(dst)
+        dst.close()
+        src.close()
+        backups = sorted(f for f in os.listdir(bdir) if f.startswith("cc-" + tag + "-") and f.endswith(".db"))
+        for old in backups[:-14]:
+            try:
+                os.remove(os.path.join(bdir, old))
+            except OSError:
+                pass
+        with get_db() as db:
+            db.execute("INSERT INTO settings(key, value) VALUES('last_db_backup', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (jsonlib.dumps(now_iso()),))
+        return dest
+    except Exception as e:
+        try:
+            with get_db() as db:
+                add_alarm(db, "backup", "DB-backup fejlede: " + str(e)[:120], "advarsel")
+        except Exception:
+            pass
+        return None
+
+
+def startup_selftest_sync():
+    fejl = []
+    ruter = len(app.routes)
+    try:
+        with get_db() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS _selftest(x TEXT)")
+            db.execute("INSERT INTO _selftest(x) VALUES('ok')")
+            db.execute("DELETE FROM _selftest")
+    except Exception as e:
+        fejl.append("DB-skrivetest: " + str(e)[:80])
+    if APP_TOKEN and not AIMLAPI_KEY:
+        fejl.append("AIMLAPI_KEY mangler - AI-artikler vil fejle")
+    if ruter < 40:
+        fejl.append("Kun " + str(ruter) + " ruter registreret (forventet 50+)")
+    try:
+        with get_db() as db:
+            if fejl:
+                add_alarm(db, "selftest", "Selvtest ved opstart FEJLEDE: " + " | ".join(fejl)[:300], "kritisk")
+                status = {"ok": False, "at": now_iso(), "fejl": fejl}
+            else:
+                status = {"ok": True, "at": now_iso(), "ruter": ruter}
+            db.execute("INSERT INTO settings(key, value) VALUES('last_selftest', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (jsonlib.dumps(status),))
+    except Exception as e:
+        print("[cc] selvtest kunne ikke gemme resultat:", repr(e), flush=True)
+    print("[cc] opstarts-selvtest:", "OK (" + str(ruter) + " ruter)" if not fejl else "FEJL: " + "; ".join(fejl), flush=True)
+
+
+async def job_backup_db():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(executor, backup_db_sync)
+
+
 def self_update_sync():
     try:
+        if sys.platform.startswith("win"):
+            # v7.9: self-update bruger bash-installeren (Linux/macOS). Paa Windows: opdater manuelt.
+            with get_db() as db:
+                add_alarm(db, "self-update", "Self-update er ikke understoettet paa Windows endnu - opdater manuelt via git pull eller ny install.sh", "advarsel")
+            return False
+        backup_db_sync(tag="pre-update")  # rollback-punkt foer nye filer skrives
         headers = {"Authorization": "Bearer " + GITHUB_TOKEN, "Accept": "application/vnd.github.raw"}
         r = HTTP.get(f"https://api.github.com/repos/{GITHUB_REPO}/contents/install.sh", headers=headers, timeout=30)
         r.raise_for_status()
@@ -2324,6 +2409,7 @@ async def dashboard(request: Request):
         "active_strategy": (db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone() or [None])[0] or DEFAULT_STRATEGY,
         "strategy_autopilot": get_active_strategy()["autopilot"],
         "strategy_autopilot_label": get_active_strategy()["label"],
+        "insecure": getattr(request.state, "insecure", False),
         "strategy_check": (lambda r: (jsonlib.loads(r) if r else None))(db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone() and db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone()["value"]),
     })
 
@@ -2463,7 +2549,12 @@ async def lifespan(app_: FastAPI):
         scheduler.add_job(job_growth_autopilot, CronTrigger(hour=5, minute=15), id="growth_autopilot", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(cleanup_old_data, CronTrigger(hour=4, minute=30), id="cleanup", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(pull_bridge_sync, IntervalTrigger(minutes=BRIDGE_POLL_MINUTES), id="pull_bridge", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_backup_db, CronTrigger(hour=4, minute=40), id="db_backup", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.start()
+        try:
+            executor.submit(startup_selftest_sync)  # v7.9: selvtest ved hver opstart (efter self-update/install)
+        except Exception:
+            pass
     except Exception as e:
         print("[cc] scheduler kunne ikke starte (app koerer videre uden cron):", repr(e), flush=True)
     yield

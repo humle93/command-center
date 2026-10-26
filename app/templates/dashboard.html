@@ -32,11 +32,12 @@
       }
     </style>
 </head>
+{% if insecure %}<div class="bg-yellow-600 text-black text-xs text-center py-1.5 px-4 font-semibold">&Uacute;t&uacute;n HTTPS &mdash; token sendes ukrypteret. S&aelig;t nginx + TLS op foran CC (se Install-dokumentationen).</div>{% endif %}
 <body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.8 PRO</span></h1>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.9 PRO</span></h1>
             <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">

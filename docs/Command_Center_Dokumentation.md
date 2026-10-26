@@ -56,4 +56,5 @@ Command Center er bygget som en selv-installerende arkitektur, der automatiserer
 - Modulsystem: 11 moduler i 3 niveauer (kerne/udvidet/fuld) — UI og cron følger modulet
 - Fakta-baserede AI-artikler: top 5 SERP-konkurrenter hentes ind i prompten (serp_competitor_context); artiklen skal dække content gap og indeholde rene fakta, ingen fyld
 - Ny Bruger- og Systemmanual med screenshots: docs/Command_Center_Bruger_og_Systemmanual.md + docs/img/
+- v7.9 Stabilitet: DB-backup-cron (04:40, 14 kopier i app/backups/) + pre-update-backup; opstarts-selvtest (settings.last_selftest + alarm ved fejl); login rate-limit (5 fejl = 10 min laas); HTTPS-advarsel i UI; scripts/smoke_test.sh efter install; run.bat til fremtidig Windows-brug (self-update er Linux-only)
 - v7.8: SEO-strategi-vaælger (AdSense/Affiliate/Backlink-vækst) i Indhold-fanen — styrer AI-artikler + autopilot; automatisk pre-flight-tjek (noegler, moduler, cron, DB-skrivetest) med groen/roed-checkliste og alarm ved kritiske mangler

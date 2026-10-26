@@ -1137,12 +1137,58 @@ TEMPLATE_ARTICLE = """
 """
 
 
+def serp_competitor_context(keyword: str, n: int = 5):
+    """Hent top-SERP-resultater som konkurrent-kontekst til artikelgenerering."""
+    if not SERPAPI_KEY:
+        return ""
+    try:
+        r = requests.get(
+            "https://serpapi.com/search",
+            params={"engine": "google", "q": keyword, "num": 10, "api_key": SERPAPI_KEY},
+            timeout=30,
+        )
+        r.raise_for_status()
+        org = r.json().get("organic_results") or []
+        lines = []
+        for it in org[:n]:
+            t = (it.get("title") or "").strip()
+            sn = (it.get("snippet") or "").strip()
+            if t:
+                lines.append(f"- {t}: {sn}" if sn else f"- {t}")
+        if not lines:
+            return ""
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 def generate_article_ai(keyword: str):
+    competitors = serp_competitor_context(keyword)
+    if competitors:
+        comp_block = (
+            "TOP 5 KONKURRENTER PA GOOGLE FOR DETA KEYWORD (titel + snippet):\n"
+            f"{competitors}\n\n"
+            "DIN OPGAVE: Skriv en artikel der er MAERKBART BEDRE end disse resultater. "
+            "Dæk alt hvad konkurrenterne dækker (content gap), og tilføj mere: konkrete "
+            "materialer, prisestimater, trin-for-trin, praktiske detaljer. "
+            "Byg KUN pa faktuelle, verifikbare oplysninger - ingen opdigtede tal, "
+            "ingen tom fyldstof-saetninger ('in today's world', 'look no further' osv. "
+            "er forbudt). Hver saetning skal give laeseren ny, brugbar info."
+        )
+    else:
+        comp_block = (
+            "KVALITETSKRAV: Byg KUN pa faktuelle, verifikbare oplysninger om emnet - "
+            "ingen opdigtede tal eller statistik. Ingen tom fyldstof-saetninger. "
+            "Hver saetning skal give laeseren konkret, brugbar info (materialer, "
+            "prisniveauer, trin, fejl man skal undga). Mål: bedre end de nuværende "
+            "topresultater pa Google for dette keyword."
+        )
     prompt = (
         f"Write an SEO-optimized blog article draft in English about '{keyword}' for a steampunk "
         f"cosplay & merchandise webshop. Output raw HTML (h2/h3/p/ul/ol only, no <html> wrapper). "
         f"Include: engaging intro, 3-4 H2 sections, a bullet list, an FAQ section with 3 questions, "
-        f"and a short conclusion. Around 600-900 words. No images. Natural, helpful tone."
+        f"and a short conclusion. Around 600-900 words. No images. Natural, helpful tone.\n\n"
+        f"{comp_block}"
     )
     resp = requests.post(
         "https://api.aimlapi.com/v1/chat/completions",
@@ -1237,7 +1283,38 @@ def autopilot_sync():
             "AND idea NOT IN (SELECT keyword FROM articles) ORDER BY id ASC LIMIT 1"
         ).fetchone()
     if not row:
-        return "no-ideas"
+        # Idea-puljen er tom: sow nye via Google-autocomplete fra eksisterende keywords
+        try:
+            with get_db() as db:
+                seeds = [r["keyword"] for r in db.execute("SELECT DISTINCT keyword FROM keywords LIMIT 5").fetchall()]
+            if not seeds:
+                seeds = ["steampunk costume", "steampunk goggles"]
+            import urllib.parse as _up
+            newideas = []
+            for seed in seeds[:3]:
+                rr = requests.get(
+                    "https://suggestqueries.google.com/complete/search",
+                    params={"client": "firefox", "q": seed, "hl": "en"},
+                    timeout=10,
+                )
+                for sug in (rr.json()[1] or [])[:5]:
+                    if sug.lower() != seed.lower():
+                        newideas.append(sug)
+            with get_db() as db:
+                for ni in dict.fromkeys(newideas):
+                    db.execute("INSERT OR IGNORE INTO keyword_ideas (keyword, idea, source, created_at) VALUES (?,?,?,?)",
+                               (ni.split()[0] if ni else "", ni, "autopilot", now_iso()))
+            with get_db() as db:
+                row = db.execute(
+                    "SELECT id, idea FROM keyword_ideas WHERE idea IS NOT NULL AND idea != '' "
+                    "AND idea NOT IN (SELECT keyword FROM articles) ORDER BY id ASC LIMIT 1"
+                ).fetchone()
+        except Exception as e:
+            with get_db() as db:
+                add_alarm(db, "growth", f"Autopilot kunne ikke hente nye ideer: {str(e)[:120]}", "advarsel")
+            return "no-ideas"
+        if not row:
+            return "no-ideas"
     idea = row["idea"].strip()
     try:
         content = generate_article_ai(idea)
@@ -2319,7 +2396,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.6 PRO</span></h1>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.7 PRO</span></h1>
             <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
@@ -2331,17 +2408,18 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 </header>
 <nav class="sticky top-0 z-50 border-b border-zinc-800 bg-zinc-900/70 px-4 py-2 shadow-lg shadow-black/20">
     <div class="max-w-7xl mx-auto flex gap-2 overflow-x-auto">
-        <button @click="tab='cockpit'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='cockpit' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🎛️ Cockpit</button>
-        <button @click="tab='seo'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='seo' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🔍 SEO Scanner</button>
-        <button @click="tab='spy'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='spy' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🕷️ SERP & Spy</button>
-        <button @click="tab='articles'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='articles' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">✍️ Artikler</button>
-        <button @click="tab='keywords'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='keywords' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🎯 Keywords</button>
-        <button @click="tab='links'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='links' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🔗 Links</button>
-        <button @click="tab='social'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='social' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">📱 Social</button>
+        <button @click="tab='cockpit'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='cockpit' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🧭 1. Cockpit</button>
+        <button @click="tab='seo'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='seo' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🔍 2. SEO & Audit</button>
+        <button @click="tab='keywords'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='keywords' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🎯 3. Keywords</button>
+        <button @click="tab='articles'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='articles' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">✍️ 4. Indhold</button>
+        <button @click="tab='links'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='links' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🔗 5. Links</button>
+        <button @click="tab='spy'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='spy' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🕷️ 6. Spy</button>
+        <button @click="tab='social'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='social' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">📱 7. Social</button>
+        <button @click="tab='monitors'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='monitors' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🩺 8. Monitors</button>
         <button @click="tab='ai'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='ai' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🤖 AI Tools</button>
-        <button @click="tab='monitors'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='monitors' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🩺 Monitors</button>
         <button @click="tab='pro'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='pro' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">💼 Pro</button>
         <button @click="tab='moduler'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='moduler' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">⚙️ Moduler</button>
+        
         <button @click="tab='alarms'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='alarms' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🚨 Alarmer{% if alarms %} ({{ alarms|length }}){% endif %}</button>
         <button @click="tab='notes'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='notes' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">📝 Noter</button>
     </div>
@@ -2356,6 +2434,16 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 
     <!-- COCKPIT -->
     <section x-show="tab === 'cockpit'" class="space-y-4">
+        <div class="bg-emerald-500/5 border border-emerald-500/20 rounded-2xl p-4">
+            <h2 class="text-xs uppercase tracking-wider text-emerald-300 mb-2">🧭 Sådan bruger du Command Center (workflow)</h2>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
+                <button @click="tab='seo'" class="bg-zinc-950 border border-zinc-800 rounded-xl p-2 text-left hover:border-emerald-500/40"><b class="text-emerald-400">2. SEO & Audit</b><br><span class="text-zinc-500">Kør audit + crawl</span></button>
+                <button @click="tab='keywords'" class="bg-zinc-950 border border-zinc-800 rounded-xl p-2 text-left hover:border-emerald-500/40"><b class="text-emerald-400">3. Keywords</b><br><span class="text-zinc-500">Positioner + difficulty</span></button>
+                <button @click="tab='articles'" class="bg-zinc-950 border border-zinc-800 rounded-xl p-2 text-left hover:border-emerald-500/40"><b class="text-emerald-400">4. Indhold</b><br><span class="text-zinc-500">AI-artikler + autopilot</span></button>
+                <button @click="tab='links'" class="bg-zinc-950 border border-zinc-800 rounded-xl p-2 text-left hover:border-emerald-500/40"><b class="text-emerald-400">5. Links</b><br><span class="text-zinc-500">Interne + backlinks</span></button>
+            </div>
+            <p class="text-[10px] text-zinc-600 mt-2">Trin 1 (Cockpit) er denne side: overvågning + alarmer. Trin 6-8 (Spy/Social/Monitors) er løbende vækst. AI Tools/Pro/Moduler er værktøj.</p>
+        </div>
         {% if alarms %}
         <div class="bg-rose-500/10 border border-rose-500/30 rounded-2xl p-4">
             <div class="flex items-center justify-between mb-2">
@@ -2409,7 +2497,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                 {% for d in drift_rows[:3] %}
                 <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs">
                     <div class="text-zinc-500">{{ d.checked_at[:16] }}</div>
-                    <div class="mt-1">🛒 Ordrer: <span class="font-bold">{{ d.orders }}</span> · ${(d.revenue or 0)|round(2)}</div>
+                    <div class="mt-1">🛒 Ordrer: <span class="font-bold">{{ d.orders }}</span> · {{ 'DKK %.2f'|format(d.revenue or 0) }}</div>
                     <div>Woo: <span class="{{ 'text-emerald-400' if d.woo_status == 'ok' else 'text-rose-400' }}">{{ d.woo_status }}</span> · Checkout: <span class="{{ 'text-emerald-400' if d.checkout_status == 'ok' else 'text-rose-400' }}">{{ d.checkout_status }}</span></div>
                     {% if d.notes %}<div class="text-zinc-500 mt-1">{{ d.notes }}</div>{% endif %}
                 </div>
@@ -2741,7 +2829,6 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                 {% endfor %}
             </div>
         </div>
-    </section>
 
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Keyword-ideer (Ubersuggest-kopi — Google/DDG autocomplete)</h2>
@@ -3188,14 +3275,15 @@ EOF_SERVICE
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.5 PRO
+# Command Center v7.7 PRO
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 
 ## Funktioner
 - 🎛️ **Cockpit** — domæneovervågning (uptime, svartid, SSL), daglig drift-kort (Woo/checkout via Juno-bro)
 - 🔍 **SEO Scanner** — deep audit af enkelt side (20+ vægtede kontroller inkl. focus keyword, lesbarhed, mixed content, schema, OG/Twitter) + **site-crawl** med score per side og robots.txt/sitemap-tjek
-- ✍️ **Artikler** — AI-generering (Gemini via aimlapi) eller skabelon, **push direkte til WordPress som udkast**
+- ✍️ **Artikler** — AI-generering (Gemini via aimlapi) eller skabelon, **push direkte til WordPress som udkast**, **fakta-prompt med SerpAPI-konkurrentanalyse** (top 5 resultater ind i prompten — artiklen skal slå dem), autopilot (idé → artikel → WP-kladde, ny idé via Google-autocomplete når puljen er tom)
+- 🌱 **Growth Pack** — autopilot-nøgleord-side (05:15 dagligt), **backlink-prospector** (SerpAPI top 10 → sitetype + kontakt-e-mail + AI-outreach-draft), visibility-index\n- 🧩 **Moduler** — slå funktioner fra/til i 3 niveauer (kerne/udvidet/fuld); alt visuelles følger modulet
 - 🎯 **Keywords** — Google-positioner via SerpAPI, tjekket automatisk daglig kl. 06:00
 - 🕷️ **SERP & Spy** — konkurrent-opdagelse + crawl af titel/H1/beskrivelse
 - 🔗 **Links** — ekstern linktjek med brodte-links-rapport

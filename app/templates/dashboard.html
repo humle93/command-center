@@ -36,7 +36,7 @@
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.6 PRO</span></h1>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.7 PRO</span></h1>
             <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
@@ -48,17 +48,18 @@
 </header>
 <nav class="sticky top-0 z-50 border-b border-zinc-800 bg-zinc-900/70 px-4 py-2 shadow-lg shadow-black/20">
     <div class="max-w-7xl mx-auto flex gap-2 overflow-x-auto">
-        <button @click="tab='cockpit'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='cockpit' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🎛️ Cockpit</button>
-        <button @click="tab='seo'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='seo' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🔍 SEO Scanner</button>
-        <button @click="tab='spy'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='spy' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🕷️ SERP & Spy</button>
-        <button @click="tab='articles'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='articles' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">✍️ Artikler</button>
-        <button @click="tab='keywords'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='keywords' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🎯 Keywords</button>
-        <button @click="tab='links'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='links' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🔗 Links</button>
-        <button @click="tab='social'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='social' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">📱 Social</button>
+        <button @click="tab='cockpit'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='cockpit' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🧭 1. Cockpit</button>
+        <button @click="tab='seo'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='seo' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🔍 2. SEO & Audit</button>
+        <button @click="tab='keywords'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='keywords' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🎯 3. Keywords</button>
+        <button @click="tab='articles'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='articles' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">✍️ 4. Indhold</button>
+        <button @click="tab='links'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='links' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🔗 5. Links</button>
+        <button @click="tab='spy'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='spy' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🕷️ 6. Spy</button>
+        <button @click="tab='social'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='social' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">📱 7. Social</button>
+        <button @click="tab='monitors'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='monitors' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🩺 8. Monitors</button>
         <button @click="tab='ai'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='ai' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🤖 AI Tools</button>
-        <button @click="tab='monitors'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='monitors' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🩺 Monitors</button>
         <button @click="tab='pro'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='pro' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">💼 Pro</button>
         <button @click="tab='moduler'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='moduler' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">⚙️ Moduler</button>
+        
         <button @click="tab='alarms'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='alarms' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🚨 Alarmer{% if alarms %} ({{ alarms|length }}){% endif %}</button>
         <button @click="tab='notes'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='notes' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">📝 Noter</button>
     </div>
@@ -73,6 +74,16 @@
 
     <!-- COCKPIT -->
     <section x-show="tab === 'cockpit'" class="space-y-4">
+        <div class="bg-emerald-500/5 border border-emerald-500/20 rounded-2xl p-4">
+            <h2 class="text-xs uppercase tracking-wider text-emerald-300 mb-2">🧭 Sådan bruger du Command Center (workflow)</h2>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
+                <button @click="tab='seo'" class="bg-zinc-950 border border-zinc-800 rounded-xl p-2 text-left hover:border-emerald-500/40"><b class="text-emerald-400">2. SEO & Audit</b><br><span class="text-zinc-500">Kør audit + crawl</span></button>
+                <button @click="tab='keywords'" class="bg-zinc-950 border border-zinc-800 rounded-xl p-2 text-left hover:border-emerald-500/40"><b class="text-emerald-400">3. Keywords</b><br><span class="text-zinc-500">Positioner + difficulty</span></button>
+                <button @click="tab='articles'" class="bg-zinc-950 border border-zinc-800 rounded-xl p-2 text-left hover:border-emerald-500/40"><b class="text-emerald-400">4. Indhold</b><br><span class="text-zinc-500">AI-artikler + autopilot</span></button>
+                <button @click="tab='links'" class="bg-zinc-950 border border-zinc-800 rounded-xl p-2 text-left hover:border-emerald-500/40"><b class="text-emerald-400">5. Links</b><br><span class="text-zinc-500">Interne + backlinks</span></button>
+            </div>
+            <p class="text-[10px] text-zinc-600 mt-2">Trin 1 (Cockpit) er denne side: overvågning + alarmer. Trin 6-8 (Spy/Social/Monitors) er løbende vækst. AI Tools/Pro/Moduler er værktøj.</p>
+        </div>
         {% if alarms %}
         <div class="bg-rose-500/10 border border-rose-500/30 rounded-2xl p-4">
             <div class="flex items-center justify-between mb-2">
@@ -126,7 +137,7 @@
                 {% for d in drift_rows[:3] %}
                 <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs">
                     <div class="text-zinc-500">{{ d.checked_at[:16] }}</div>
-                    <div class="mt-1">🛒 Ordrer: <span class="font-bold">{{ d.orders }}</span> · ${(d.revenue or 0)|round(2)}</div>
+                    <div class="mt-1">🛒 Ordrer: <span class="font-bold">{{ d.orders }}</span> · {{ 'DKK %.2f'|format(d.revenue or 0) }}</div>
                     <div>Woo: <span class="{{ 'text-emerald-400' if d.woo_status == 'ok' else 'text-rose-400' }}">{{ d.woo_status }}</span> · Checkout: <span class="{{ 'text-emerald-400' if d.checkout_status == 'ok' else 'text-rose-400' }}">{{ d.checkout_status }}</span></div>
                     {% if d.notes %}<div class="text-zinc-500 mt-1">{{ d.notes }}</div>{% endif %}
                 </div>
@@ -458,7 +469,6 @@
                 {% endfor %}
             </div>
         </div>
-    </section>
 
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Keyword-ideer (Ubersuggest-kopi — Google/DDG autocomplete)</h2>

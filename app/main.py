@@ -1090,12 +1090,58 @@ TEMPLATE_ARTICLE = """
 """
 
 
+def serp_competitor_context(keyword: str, n: int = 5):
+    """Hent top-SERP-resultater som konkurrent-kontekst til artikelgenerering."""
+    if not SERPAPI_KEY:
+        return ""
+    try:
+        r = requests.get(
+            "https://serpapi.com/search",
+            params={"engine": "google", "q": keyword, "num": 10, "api_key": SERPAPI_KEY},
+            timeout=30,
+        )
+        r.raise_for_status()
+        org = r.json().get("organic_results") or []
+        lines = []
+        for it in org[:n]:
+            t = (it.get("title") or "").strip()
+            sn = (it.get("snippet") or "").strip()
+            if t:
+                lines.append(f"- {t}: {sn}" if sn else f"- {t}")
+        if not lines:
+            return ""
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 def generate_article_ai(keyword: str):
+    competitors = serp_competitor_context(keyword)
+    if competitors:
+        comp_block = (
+            "TOP 5 KONKURRENTER PA GOOGLE FOR DETA KEYWORD (titel + snippet):\n"
+            f"{competitors}\n\n"
+            "DIN OPGAVE: Skriv en artikel der er MAERKBART BEDRE end disse resultater. "
+            "Dæk alt hvad konkurrenterne dækker (content gap), og tilføj mere: konkrete "
+            "materialer, prisestimater, trin-for-trin, praktiske detaljer. "
+            "Byg KUN pa faktuelle, verifikbare oplysninger - ingen opdigtede tal, "
+            "ingen tom fyldstof-saetninger ('in today's world', 'look no further' osv. "
+            "er forbudt). Hver saetning skal give laeseren ny, brugbar info."
+        )
+    else:
+        comp_block = (
+            "KVALITETSKRAV: Byg KUN pa faktuelle, verifikbare oplysninger om emnet - "
+            "ingen opdigtede tal eller statistik. Ingen tom fyldstof-saetninger. "
+            "Hver saetning skal give laeseren konkret, brugbar info (materialer, "
+            "prisniveauer, trin, fejl man skal undga). Mål: bedre end de nuværende "
+            "topresultater pa Google for dette keyword."
+        )
     prompt = (
         f"Write an SEO-optimized blog article draft in English about '{keyword}' for a steampunk "
         f"cosplay & merchandise webshop. Output raw HTML (h2/h3/p/ul/ol only, no <html> wrapper). "
         f"Include: engaging intro, 3-4 H2 sections, a bullet list, an FAQ section with 3 questions, "
-        f"and a short conclusion. Around 600-900 words. No images. Natural, helpful tone."
+        f"and a short conclusion. Around 600-900 words. No images. Natural, helpful tone.\n\n"
+        f"{comp_block}"
     )
     resp = requests.post(
         "https://api.aimlapi.com/v1/chat/completions",
@@ -1190,7 +1236,38 @@ def autopilot_sync():
             "AND idea NOT IN (SELECT keyword FROM articles) ORDER BY id ASC LIMIT 1"
         ).fetchone()
     if not row:
-        return "no-ideas"
+        # Idea-puljen er tom: sow nye via Google-autocomplete fra eksisterende keywords
+        try:
+            with get_db() as db:
+                seeds = [r["keyword"] for r in db.execute("SELECT DISTINCT keyword FROM keywords LIMIT 5").fetchall()]
+            if not seeds:
+                seeds = ["steampunk costume", "steampunk goggles"]
+            import urllib.parse as _up
+            newideas = []
+            for seed in seeds[:3]:
+                rr = requests.get(
+                    "https://suggestqueries.google.com/complete/search",
+                    params={"client": "firefox", "q": seed, "hl": "en"},
+                    timeout=10,
+                )
+                for sug in (rr.json()[1] or [])[:5]:
+                    if sug.lower() != seed.lower():
+                        newideas.append(sug)
+            with get_db() as db:
+                for ni in dict.fromkeys(newideas):
+                    db.execute("INSERT OR IGNORE INTO keyword_ideas (keyword, idea, source, created_at) VALUES (?,?,?,?)",
+                               (ni.split()[0] if ni else "", ni, "autopilot", now_iso()))
+            with get_db() as db:
+                row = db.execute(
+                    "SELECT id, idea FROM keyword_ideas WHERE idea IS NOT NULL AND idea != '' "
+                    "AND idea NOT IN (SELECT keyword FROM articles) ORDER BY id ASC LIMIT 1"
+                ).fetchone()
+        except Exception as e:
+            with get_db() as db:
+                add_alarm(db, "growth", f"Autopilot kunne ikke hente nye ideer: {str(e)[:120]}", "advarsel")
+            return "no-ideas"
+        if not row:
+            return "no-ideas"
     idea = row["idea"].strip()
     try:
         content = generate_article_ai(idea)

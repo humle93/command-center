@@ -541,6 +541,48 @@
     <!-- SOCIAL -->
     <section x-show="tab === 'social'" class="space-y-4" style="display: none;">
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">⚙️ Steamgears Autopilot (WordPress)</h2>
+                {% if sgap_ready and modules['autopilot'] %}
+                <form action="/autopilot/sync" method="POST"><button class="text-xs text-emerald-400">↻ Opdater nu</button></form>
+                {% endif %}
+            </div>
+            {% if not sgap_ready %}
+            <p class="text-xs text-zinc-500">Saet WP_URL, WP_USER (administrator) og WP_APP_PASSWORD i .env for at forbinde til autopilot-pluginnet.</p>
+            {% elif not modules['autopilot'] %}
+            <p class="text-xs text-zinc-500">Modulet "Autopilot-bro" er slukket under Moduler.</p>
+            {% elif not sgap %}
+            <p class="text-xs text-zinc-500">Ingen data endnu - tryk "Opdater nu" (henter automatisk hver 30. min).</p>
+            {% elif not sgap.ok %}
+            <p class="text-xs text-rose-400">{{ sgap.error }}</p>
+            <p class="text-[10px] text-zinc-500 mt-1">Tjekket {{ sgap.checked_at }}</p>
+            {% else %}
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-2 mb-3 text-center">
+                {% for label, key in [("I koe", "queued"), ("Sendes", "sending"), ("Udgivet", "published"), ("Fejlet", "failed")] %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-2">
+                    <div class="text-lg font-bold {% if key == 'failed' and sgap.queue.get(key, 0) %}text-rose-400{% else %}text-emerald-400{% endif %}">{{ sgap.queue.get(key, 0) }}</div>
+                    <div class="text-[10px] text-zinc-500">{{ label }}</div>
+                </div>
+                {% endfor %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-2">
+                    <div class="text-lg font-bold {% if sgap.pending_drafts %}text-amber-400{% else %}text-emerald-400{% endif %}">{{ sgap.pending_drafts }}</div>
+                    <div class="text-[10px] text-zinc-500">Kladder venter</div>
+                </div>
+            </div>
+            <table class="w-full text-xs">
+                <thead><tr class="text-zinc-500 text-left"><th class="py-1">Kanal (30 dage)</th><th>Udgivet</th><th>Klik</th><th>Ordrer</th><th>Omsaetning</th></tr></thead>
+                <tbody>
+                {% for c in sgap.channels %}
+                <tr class="border-t border-zinc-800"><td class="py-1">{{ c.channel }}</td><td>{{ c.publish }}</td><td>{{ c.click }}</td><td>{{ c.order }}</td><td>{{ c.revenue }}</td></tr>
+                {% else %}
+                <tr><td colspan="5" class="py-1 text-zinc-500">Ingen aktivitet de sidste 30 dage.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+            <p class="text-[10px] text-zinc-500 mt-2">Tjekket {{ sgap.checked_at }} · Godkend kladder i WordPress: Steamgears → AI Drafts</p>
+            {% endif %}
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Tilføj socialt opslag</h2>
             <form action="/social/add" method="POST" class="space-y-3">
                 <input type="text" name="platform" placeholder="Platform (f.eks. Pinterest, LinkedIn, X)" required class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
@@ -559,11 +601,20 @@
                     <div class="space-y-1">
                         <span class="inline-block bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded text-[10px]">{{ post.platform }}</span>
                         <p class="text-zinc-300 whitespace-pre-wrap">{{ post.message }}</p>
+                        <p class="text-[10px] text-zinc-500">{{ post.status }}</p>
                     </div>
-                    <form action="/social/delete" method="POST">
-                        <input type="hidden" name="id" value="{{ post.id }}">
-                        <button class="text-zinc-500 hover:text-rose-400">✕</button>
-                    </form>
+                    <div class="flex items-center gap-2">
+                        {% if sgap_ready and modules['autopilot'] %}
+                        <form action="/social/to-autopilot" method="POST">
+                            <input type="hidden" name="id" value="{{ post.id }}">
+                            <button class="text-[11px] text-emerald-400 hover:text-emerald-300" title="Send som kladde til Steamgears Autopilot">→ Autopilot</button>
+                        </form>
+                        {% endif %}
+                        <form action="/social/delete" method="POST">
+                            <input type="hidden" name="id" value="{{ post.id }}">
+                            <button class="text-zinc-500 hover:text-rose-400">✕</button>
+                        </form>
+                    </div>
                 </div>
                 {% else %}
                 <p class="text-xs text-zinc-500">Ingen opslag i køen.</p>
@@ -732,7 +783,7 @@
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">Moduler</h2>
             <p class="text-xs text-zinc-500 mb-4">Slå funktioner til/fra. Slukkede moduler kører ikke automatisk og viser ikke knapper i API-kald.</p>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {% set module_labels = {"domains": "🌐 Domæne-tjek", "keywords": "🎯 Keyword-tjek", "ai": "🤖 AI (artikler/rewrite)", "monitors": "🩺 Monitors", "social": "📱 Social-kø", "links": "🔗 Linktjek", "bridge": "🌉 Pull-bro", "spy": "🕷️ Spy/konkurrenter", "wp_push": "📝 WordPress-push", "telegram": "📬 Telegram", "growth": "🌱 Growth-autopilot"} %}
+                {% set module_labels = {"domains": "🌐 Domæne-tjek", "keywords": "🎯 Keyword-tjek", "ai": "🤖 AI (artikler/rewrite)", "monitors": "🩺 Monitors", "social": "📱 Social-kø", "links": "🔗 Linktjek", "bridge": "🌉 Pull-bro", "spy": "🕷️ Spy/konkurrenter", "wp_push": "📝 WordPress-push", "telegram": "📬 Telegram", "growth": "🌱 Growth-autopilot", "autopilot": "⚙️ Autopilot-bro (WordPress)"} %}
                 {% for m, label in module_labels.items() %}
                 <div class="flex items-center justify-between bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2">
                     <span class="text-xs text-zinc-300">{{ label }}</span>

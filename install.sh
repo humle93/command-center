@@ -25,7 +25,7 @@ JUNO_TOKEN=                              # Junos egen noegle til automatisk API-
 # AI-artikler: din aimlapi-noegle
 AIMLAPI_KEY=
 AI_MODEL=google/gemini-3-8-flash
-# WordPress-push (Application Password: WP Admin > Users > Profile)
+# WordPress-push + Steamgears Autopilot-bro (Application Password for en ADMINISTRATOR: WP Admin > Users > Profile)
 WP_URL=https://steamgears.eu
 WP_USER=
 WP_APP_PASSWORD=
@@ -411,7 +411,7 @@ def create_indexes():
 _safe(create_indexes)
 
 
-MODULES = ["domains", "keywords", "ai", "monitors", "social", "links", "bridge", "spy", "wp_push", "telegram", "growth"]
+MODULES = ["domains", "keywords", "ai", "monitors", "social", "links", "bridge", "spy", "wp_push", "telegram", "growth", "autopilot"]
 
 
 def module_on(name: str) -> bool:
@@ -1624,6 +1624,132 @@ async def export_social_csv():
     )
 
 
+# ---------- Steamgears Autopilot-bro (WordPress-pluginnet steamgears-autopilot >= 7.5) ----------
+# CC kalder pluginnets REST-API (/wp-json/sgap/v1) med samme WP_USER/WP_APP_PASSWORD som WordPress-push.
+# Retningen er altid CC -> site: sitet kan ikke naa CC, der kun lytter paa 127.0.0.1.
+SGAP_CHANNELS = {"facebook", "instagram", "pinterest", "linkedin", "twitter", "threads", "bluesky", "mastodon", "telegram", "google"}
+SGAP_ALIASES = {"x": "twitter", "fb": "facebook", "ig": "instagram", "gmb": "google", "google business": "google"}
+
+
+def sgap_ready() -> bool:
+    return bool(WP_URL and WP_USER and WP_APP_PASSWORD) and module_on("autopilot")
+
+
+def sgap_api(method: str, path: str, **kwargs):
+    """Kald pluginnets REST-API. Kaster requests.HTTPError ved fejl-svar."""
+    resp = HTTP.request(
+        method,
+        f"{WP_URL.rstrip('/')}/wp-json/sgap/v1{path}",
+        auth=(WP_USER, WP_APP_PASSWORD),
+        timeout=20,
+        **kwargs,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def sgap_channel(platform: str) -> str:
+    key = (platform or "").strip().lower()
+    key = SGAP_ALIASES.get(key, key)
+    return key if key in SGAP_CHANNELS else ""
+
+
+def sgap_error_text(exc: Exception) -> str:
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status in (401, 403):
+        return f"WordPress afviste login ({status}): WP_USER skal vaere administrator med et gyldigt Application Password"
+    if status == 404:
+        return "Autopilot-API'et findes ikke (404): er Steamgears Autopilot 7.5+ installeret og aktiveret?"
+    return f"Autopilot-pluginnet svarer ikke: {exc}"
+
+
+def sgap_snapshot() -> dict:
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key='sgap_snapshot'").fetchone()
+    try:
+        return jsonlib.loads(row["value"]) if row and row["value"] else {}
+    except Exception:
+        return {}
+
+
+def sgap_sync() -> dict:
+    """Henter status fra pluginnet, gemmer et snapshot og alarmerer ved nye fejl eller nye kladder."""
+    if not sgap_ready():
+        return {}
+    previous = sgap_snapshot()
+    snap = {"checked_at": now_iso(), "ok": False, "error": "", "queue": {}, "channels": [], "pending_drafts": 0}
+    try:
+        stats = sgap_api("GET", "/stats", params={"days": 30})
+        drafts = sgap_api("GET", "/drafts", params={"status": "pending", "limit": 100})
+        snap["ok"] = True
+        snap["queue"] = {r["status"]: int(r["count"]) for r in stats.get("queue", [])}
+        channels = {}
+        for r in stats.get("events", []):
+            c = channels.setdefault(r["channel"], {"channel": r["channel"], "publish": 0, "click": 0, "order": 0, "revenue": 0.0})
+            if r["event_type"] in ("publish", "click", "order"):
+                c[r["event_type"]] = int(r["count"])
+            if r["event_type"] == "order":
+                c["revenue"] = round(float(r["value"] or 0), 2)
+        snap["channels"] = sorted(channels.values(), key=lambda c: (-c["revenue"], -c["click"]))
+        snap["pending_drafts"] = len(drafts) if isinstance(drafts, list) else 0
+    except Exception as e:
+        snap["error"] = sgap_error_text(e)
+    with get_db() as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('sgap_snapshot', ?)", (jsonlib.dumps(snap),))
+        # Kun alarm naar noget AENDRER sig, saa Telegram ikke spammes hver halve time.
+        if snap["error"] and snap["error"] != previous.get("error"):
+            add_alarm(db, "autopilot", snap["error"], "advarsel")
+        if snap["ok"]:
+            failed, failed_before = snap["queue"].get("failed", 0), previous.get("queue", {}).get("failed", 0)
+            if failed > failed_before:
+                add_alarm(db, "autopilot", f"{failed - failed_before} opslag fejlede i Steamgears Autopilot (se Queue i WordPress)", "advarsel")
+            drafts_now, drafts_before = snap["pending_drafts"], previous.get("pending_drafts", 0)
+            if drafts_now > drafts_before:
+                add_alarm(db, "autopilot", f"{drafts_now} AI-kladde(r) venter paa godkendelse i WordPress", "info")
+    return snap
+
+
+async def job_sgap_sync():
+    if not sgap_ready():
+        return
+    await asyncio.get_event_loop().run_in_executor(executor, sgap_sync)
+
+
+@app.post("/autopilot/sync")
+async def autopilot_sync_now():
+    await asyncio.get_event_loop().run_in_executor(executor, sgap_sync)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/social/to-autopilot")
+async def social_to_autopilot(id: int = Form(...)):
+    """Send et opslag fra CC's sociale koe til pluginnet som AI-kladde (godkendes i WordPress)."""
+    with get_db() as db:
+        post = db.execute("SELECT platform, message FROM socialqueue WHERE id=?", (id,)).fetchone()
+    if not post:
+        return RedirectResponse("/", status_code=303)
+    channel = sgap_channel(post["platform"])
+    if not sgap_ready() or not channel:
+        why = "WP_URL/WP_USER/WP_APP_PASSWORD mangler eller modulet er slukket" if not sgap_ready() else f"platformen '{post['platform']}' kendes ikke af autopiloten"
+        with get_db() as db:
+            add_alarm(db, "autopilot", f"Kunne ikke sende opslag til autopiloten: {why}", "advarsel")
+        return RedirectResponse("/", status_code=303)
+    message = post["message"].strip()
+    title = message.split("\n", 1)[0][:90]
+
+    def send():
+        return sgap_api("POST", "/drafts", json={"channel": channel, "title": title, "body": message, "ai_model": "command-center"})
+
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(executor, send)
+        with get_db() as db:
+            db.execute("UPDATE socialqueue SET status=? WHERE id=?", (f"sendt til autopilot (kladde #{result.get('id')})", id))
+    except Exception as e:
+        with get_db() as db:
+            add_alarm(db, "autopilot", "Kunne ikke sende opslag: " + sgap_error_text(e), "advarsel")
+    return RedirectResponse("/", status_code=303)
+
+
 # ---------- Keywords (SerpAPI) ----------
 def check_keyword_sync(kw_row):
     kw = kw_row["keyword"]
@@ -2431,6 +2557,7 @@ async def dashboard(request: Request):
         backlink_rows = db.execute("SELECT * FROM backlink_prospects ORDER BY id DESC LIMIT 30").fetchall()
         strategy_row = db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone()
         check_row = db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone()
+        sgap_row = db.execute("SELECT value FROM settings WHERE key='sgap_snapshot'").fetchone()
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
         "domains": domains,
@@ -2461,6 +2588,8 @@ async def dashboard(request: Request):
         "crawl": crawl,
         "track_domain": TRACK_DOMAIN,
         "difficulties": difficulties,
+        "sgap": jsonlib.loads(sgap_row["value"]) if sgap_row and sgap_row["value"] else {},
+        "sgap_ready": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "modules": {m: module_on(m) for m in MODULES},
         "strategies": STRATEGIES,
         "active_strategy": (strategy_row["value"] if strategy_row else None) or DEFAULT_STRATEGY,
@@ -2607,6 +2736,7 @@ async def lifespan(app_: FastAPI):
         scheduler.add_job(cleanup_old_data, CronTrigger(hour=4, minute=30), id="cleanup", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(pull_bridge_sync, IntervalTrigger(minutes=BRIDGE_POLL_MINUTES), id="pull_bridge", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_backup_db, CronTrigger(hour=4, minute=40), id="db_backup", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_sgap_sync, IntervalTrigger(minutes=30), id="sgap_sync", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.start()
         try:
             executor.submit(startup_selftest_sync)  # v7.9: selvtest ved hver opstart (efter self-update/install)
@@ -3167,6 +3297,48 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
     <!-- SOCIAL -->
     <section x-show="tab === 'social'" class="space-y-4" style="display: none;">
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">⚙️ Steamgears Autopilot (WordPress)</h2>
+                {% if sgap_ready and modules['autopilot'] %}
+                <form action="/autopilot/sync" method="POST"><button class="text-xs text-emerald-400">↻ Opdater nu</button></form>
+                {% endif %}
+            </div>
+            {% if not sgap_ready %}
+            <p class="text-xs text-zinc-500">Saet WP_URL, WP_USER (administrator) og WP_APP_PASSWORD i .env for at forbinde til autopilot-pluginnet.</p>
+            {% elif not modules['autopilot'] %}
+            <p class="text-xs text-zinc-500">Modulet "Autopilot-bro" er slukket under Moduler.</p>
+            {% elif not sgap %}
+            <p class="text-xs text-zinc-500">Ingen data endnu - tryk "Opdater nu" (henter automatisk hver 30. min).</p>
+            {% elif not sgap.ok %}
+            <p class="text-xs text-rose-400">{{ sgap.error }}</p>
+            <p class="text-[10px] text-zinc-500 mt-1">Tjekket {{ sgap.checked_at }}</p>
+            {% else %}
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-2 mb-3 text-center">
+                {% for label, key in [("I koe", "queued"), ("Sendes", "sending"), ("Udgivet", "published"), ("Fejlet", "failed")] %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-2">
+                    <div class="text-lg font-bold {% if key == 'failed' and sgap.queue.get(key, 0) %}text-rose-400{% else %}text-emerald-400{% endif %}">{{ sgap.queue.get(key, 0) }}</div>
+                    <div class="text-[10px] text-zinc-500">{{ label }}</div>
+                </div>
+                {% endfor %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-2">
+                    <div class="text-lg font-bold {% if sgap.pending_drafts %}text-amber-400{% else %}text-emerald-400{% endif %}">{{ sgap.pending_drafts }}</div>
+                    <div class="text-[10px] text-zinc-500">Kladder venter</div>
+                </div>
+            </div>
+            <table class="w-full text-xs">
+                <thead><tr class="text-zinc-500 text-left"><th class="py-1">Kanal (30 dage)</th><th>Udgivet</th><th>Klik</th><th>Ordrer</th><th>Omsaetning</th></tr></thead>
+                <tbody>
+                {% for c in sgap.channels %}
+                <tr class="border-t border-zinc-800"><td class="py-1">{{ c.channel }}</td><td>{{ c.publish }}</td><td>{{ c.click }}</td><td>{{ c.order }}</td><td>{{ c.revenue }}</td></tr>
+                {% else %}
+                <tr><td colspan="5" class="py-1 text-zinc-500">Ingen aktivitet de sidste 30 dage.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+            <p class="text-[10px] text-zinc-500 mt-2">Tjekket {{ sgap.checked_at }} · Godkend kladder i WordPress: Steamgears → AI Drafts</p>
+            {% endif %}
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Tilføj socialt opslag</h2>
             <form action="/social/add" method="POST" class="space-y-3">
                 <input type="text" name="platform" placeholder="Platform (f.eks. Pinterest, LinkedIn, X)" required class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
@@ -3185,11 +3357,20 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                     <div class="space-y-1">
                         <span class="inline-block bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded text-[10px]">{{ post.platform }}</span>
                         <p class="text-zinc-300 whitespace-pre-wrap">{{ post.message }}</p>
+                        <p class="text-[10px] text-zinc-500">{{ post.status }}</p>
                     </div>
-                    <form action="/social/delete" method="POST">
-                        <input type="hidden" name="id" value="{{ post.id }}">
-                        <button class="text-zinc-500 hover:text-rose-400">✕</button>
-                    </form>
+                    <div class="flex items-center gap-2">
+                        {% if sgap_ready and modules['autopilot'] %}
+                        <form action="/social/to-autopilot" method="POST">
+                            <input type="hidden" name="id" value="{{ post.id }}">
+                            <button class="text-[11px] text-emerald-400 hover:text-emerald-300" title="Send som kladde til Steamgears Autopilot">→ Autopilot</button>
+                        </form>
+                        {% endif %}
+                        <form action="/social/delete" method="POST">
+                            <input type="hidden" name="id" value="{{ post.id }}">
+                            <button class="text-zinc-500 hover:text-rose-400">✕</button>
+                        </form>
+                    </div>
                 </div>
                 {% else %}
                 <p class="text-xs text-zinc-500">Ingen opslag i køen.</p>
@@ -3358,7 +3539,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">Moduler</h2>
             <p class="text-xs text-zinc-500 mb-4">Slå funktioner til/fra. Slukkede moduler kører ikke automatisk og viser ikke knapper i API-kald.</p>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {% set module_labels = {"domains": "🌐 Domæne-tjek", "keywords": "🎯 Keyword-tjek", "ai": "🤖 AI (artikler/rewrite)", "monitors": "🩺 Monitors", "social": "📱 Social-kø", "links": "🔗 Linktjek", "bridge": "🌉 Pull-bro", "spy": "🕷️ Spy/konkurrenter", "wp_push": "📝 WordPress-push", "telegram": "📬 Telegram", "growth": "🌱 Growth-autopilot"} %}
+                {% set module_labels = {"domains": "🌐 Domæne-tjek", "keywords": "🎯 Keyword-tjek", "ai": "🤖 AI (artikler/rewrite)", "monitors": "🩺 Monitors", "social": "📱 Social-kø", "links": "🔗 Linktjek", "bridge": "🌉 Pull-bro", "spy": "🕷️ Spy/konkurrenter", "wp_push": "📝 WordPress-push", "telegram": "📬 Telegram", "growth": "🌱 Growth-autopilot", "autopilot": "⚙️ Autopilot-bro (WordPress)"} %}
                 {% for m, label in module_labels.items() %}
                 <div class="flex items-center justify-between bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2">
                     <span class="text-xs text-zinc-300">{{ label }}</span>
@@ -3566,7 +3747,7 @@ EOF_SERVICE
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.9 PRO
+# Command Center v7.9.1 PRO
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 
@@ -3585,6 +3766,17 @@ Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Y
 - 🚨 **Alarmer** — SSL-udlob, nedetid, brodte links, fejlede scans; valgfrit Telegram-push
 - 📈 **Historik** — svartid-grafer pr. domæne (Chart.js)
 - 🌉 **Juno-broer** — `POST /api/bridge/gsc` og `/api/bridge/drift` (header `X-CC-Token`) sa Juno kan pushe GSC-tal og daglig drift
+
+## Steamgears Autopilot-bro (WordPress-plugin 7.5+)
+Command Center og WordPress-pluginnet **Steamgears Autopilot** snakker sammen via pluginnets REST-API
+(`/wp-json/sgap/v1`) med de samme `WP_URL` / `WP_USER` / `WP_APP_PASSWORD` som WordPress-push
+(`WP_USER` skal vaere administrator).
+- **Status hver 30. min** (fanen Social → "Steamgears Autopilot"): koe (i koe / sendes / udgivet / fejlet),
+  kladder der venter paa godkendelse, og udgivet/klik/ordrer/omsaetning pr. kanal de sidste 30 dage.
+- **Alarmer + Telegram** naar noget aendrer sig: nye fejlede opslag, nye kladder til godkendelse, eller pluginnet svarer ikke.
+- **"→ Autopilot"** paa hvert opslag i CC's sociale koe sender det som kladde til pluginnet (godkendes i WordPress
+  under Steamgears → AI Drafts, hvorefter pluginnet udgiver via Publer).
+- Slaa til/fra under Moduler ("Autopilot-bro"). Retningen er altid CC → site, saa CC kan blive paa 127.0.0.1.
 
 ## Installering
 ```bash
@@ -3646,7 +3838,7 @@ if [ "$ok" = "1" ]; then
 else
   echo "❌ Smoke-test FEJLEDE - tjek logs: journalctl -u command-center ellers tail -50 ~/command-center/nohup.out"
 fi
-exit $ok
+exit $((1 - ok))  # 0 = alt OK (shell-konvention)
 EOF_SMOKE
 
 echo "📄 run.bat..."

@@ -2,7 +2,7 @@
 set -e
 PROJECT_DIR="$HOME/command-center"
 
-echo "⚡ Command Center v7.9 - installerer i $PROJECT_DIR..."
+echo "⚡ Command Center v7.9.1 - installerer i $PROJECT_DIR..."
 mkdir -p "$PROJECT_DIR/app/templates" "$PROJECT_DIR/app/data" "$PROJECT_DIR/app/static" "$PROJECT_DIR/deploy" "$PROJECT_DIR/scripts"
 echo "📄 requirements.txt..."
 cat << 'EOF_REQ' > "$PROJECT_DIR/requirements.txt"
@@ -13,6 +13,7 @@ beautifulsoup4==4.12.3
 Jinja2==3.1.5
 APScheduler==3.10.4
 python-dotenv==1.0.1
+python-multipart==0.0.20
 EOF_REQ
 
 echo "📄 .env.example..."
@@ -100,7 +101,10 @@ SSL_WARN_DAYS = int(os.environ.get("SSL_WARN_DAYS", "30"))
 LINKCHECK_LIMIT = int(os.environ.get("LINKCHECK_LIMIT", "25"))
 PSI_API_KEY = os.environ.get("PSI_API_KEY", "").strip()   # Google PageSpeed API (gratis noegle)
 
-app = FastAPI(title="Command Center Engine", version="7.2")
+APP_VERSION = "7.9.1"
+app = FastAPI(title="Command Center Engine", version=APP_VERSION)
+# Git does not keep empty folders, so a fresh clone has no app/static: create it or startup fails.
+os.makedirs(STATIC_DIR, exist_ok=True)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 scheduler = AsyncIOScheduler(timezone="Europe/Copenhagen")
@@ -437,7 +441,9 @@ def cleanup_old_data():
 def is_authed(request: Request) -> bool:
     if not APP_TOKEN:
         return True
-    return request.cookies.get("cc_token") == APP_TOKEN or request.headers.get("x-cc-token") == APP_TOKEN
+    # Constant-time comparison so the token cannot be guessed from response timing.
+    supplied = request.cookies.get("cc_token") or request.headers.get("x-cc-token") or ""
+    return secrets.compare_digest(supplied, APP_TOKEN)
 
 
 def is_juno(request: Request) -> bool:
@@ -2420,7 +2426,11 @@ async def dashboard(request: Request):
         health_hist = db.execute("SELECT COUNT(*) AS n FROM health_history").fetchone()["n"]
         seo_pages = db.execute("SELECT * FROM seopages ORDER BY score ASC LIMIT 100").fetchall()
         crawl = db.execute("SELECT * FROM crawl_runs ORDER BY id DESC LIMIT 1").fetchone()
-        difficulties = db.execute("SELECT * FROM keyword_difficulty ORDER BY id DESC LIMIT 20").fetchall()
+        difficulties = db.execute("SELECT * FROM keyword_difficulty ORDER BY created_at DESC LIMIT 20").fetchall()
+        # Read here, while the connection is open (get_db closes it when the block ends).
+        backlink_rows = db.execute("SELECT * FROM backlink_prospects ORDER BY id DESC LIMIT 30").fetchall()
+        strategy_row = db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone()
+        check_row = db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone()
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
         "domains": domains,
@@ -2444,7 +2454,7 @@ async def dashboard(request: Request):
         "ideas": ideas,
         "gaps": gaps,
         "outreach_rows": outreach_rows,
-        "backlink_rows": db.execute("SELECT * FROM backlink_prospects ORDER BY id DESC LIMIT 30").fetchall(),
+        "backlink_rows": backlink_rows,
         "ai_vis": ai_vis,
         "links_sug": links_sug,
         "health_hist_n": health_hist,
@@ -2453,11 +2463,11 @@ async def dashboard(request: Request):
         "difficulties": difficulties,
         "modules": {m: module_on(m) for m in MODULES},
         "strategies": STRATEGIES,
-        "active_strategy": (db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone() or [None])[0] or DEFAULT_STRATEGY,
+        "active_strategy": (strategy_row["value"] if strategy_row else None) or DEFAULT_STRATEGY,
         "strategy_autopilot": get_active_strategy()["autopilot"],
         "strategy_autopilot_label": get_active_strategy()["label"],
         "insecure": getattr(request.state, "insecure", False),
-        "strategy_check": (lambda r: (jsonlib.loads(r) if r else None))(db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone() and db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone()["value"]),
+        "strategy_check": jsonlib.loads(check_row["value"]) if check_row and check_row["value"] else None,
     })
 
 
@@ -2562,7 +2572,7 @@ async def delete_note(id: int = Form(...)):
 async def health():
     return {
         "status": "ok",
-        "version": "7.3",
+        "version": APP_VERSION,
         "ai": bool(AIMLAPI_KEY),
         "wordpress": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "serpapi": bool(SERPAPI_KEY),
@@ -2653,7 +2663,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.9 PRO</span></h1>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.9.1 PRO</span></h1>
             <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
@@ -3506,7 +3516,7 @@ fi
 source venv/bin/activate
 pip install --upgrade pip > /dev/null 2>&1
 pip install -r requirements.txt
-echo "⚡ Starter Command Center v7.5..."
+echo "⚡ Starter Command Center v7.9.1..."
 if [ "$DEV" = "1" ]; then
     uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 else
@@ -3666,7 +3676,7 @@ fi
 source venv/bin/activate
 pip install --upgrade pip > /dev/null 2>&1
 pip install -r requirements.txt
-echo "⚡ Starter Command Center v7.5..."
+echo "⚡ Starter Command Center v7.9.1..."
 if [ "$DEV" = "1" ]; then
     uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 else

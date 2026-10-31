@@ -26,3 +26,5 @@ jobs:
           done
       - name: Boot, sweep pages, test the Autopilot bridge
         run: bash tests/ci_check.sh
+      - name: Quality gate, API budget, health
+        run: python3 tests/test_v8_features.py

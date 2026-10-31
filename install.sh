@@ -2,7 +2,7 @@
 set -e
 PROJECT_DIR="$HOME/command-center"
 
-echo "⚡ Command Center v7.9.1 - installerer i $PROJECT_DIR..."
+echo "⚡ Command Center v7.10 - installerer i $PROJECT_DIR..."
 mkdir -p "$PROJECT_DIR/app/templates" "$PROJECT_DIR/app/data" "$PROJECT_DIR/app/static" "$PROJECT_DIR/deploy" "$PROJECT_DIR/scripts"
 echo "📄 requirements.txt..."
 cat << 'EOF_REQ' > "$PROJECT_DIR/requirements.txt"
@@ -35,6 +35,11 @@ TELEGRAM_CHAT_ID=
 # Keyword-positioner via SerpAPI
 SERPAPI_KEY=
 TRACK_DOMAIN=steamgears.eu
+# API-budget pr. kalendermaaned (antal kald, 0 = intet loft). Stopper kald ved loftet + alarm ved 80 %/100 %
+SERPAPI_MONTHLY_LIMIT=1000
+AI_MONTHLY_LIMIT=3000
+# Kvalitetsgate: autopilot-artikler under dette ordantal (eller 80 % af SERP-gennemsnittet) sendes ikke til WP
+QUALITY_MIN_WORDS=400
 # Tuninge
 SSL_WARN_DAYS=30
 LINKCHECK_LIMIT=25
@@ -62,6 +67,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 import os
+import shutil
 import sqlite3
 import requests
 import ssl
@@ -101,7 +107,7 @@ SSL_WARN_DAYS = int(os.environ.get("SSL_WARN_DAYS", "30"))
 LINKCHECK_LIMIT = int(os.environ.get("LINKCHECK_LIMIT", "25"))
 PSI_API_KEY = os.environ.get("PSI_API_KEY", "").strip()   # Google PageSpeed API (gratis noegle)
 
-APP_VERSION = "7.9.1"
+APP_VERSION = "7.10.0"
 app = FastAPI(title="Command Center Engine", version=APP_VERSION)
 # Git does not keep empty folders, so a fresh clone has no app/static: create it or startup fails.
 os.makedirs(STATIC_DIR, exist_ok=True)
@@ -536,8 +542,65 @@ def normalize_url(url: str) -> str:
     return url.rstrip("/")
 
 
+# ---------- API-budget (v8-plan): maanedligt loft for betalte API'er ----------
+# Taeller hvert kald til SerpAPI og AI (aimlapi) pr. kalendermaaned og stopper dem ved loftet,
+# saa en loekke eller fejl aldrig kan braende kreditter af. 0 = intet loft.
+API_BUDGETS = {
+    "serpapi": ("serpapi.com", int(os.environ.get("SERPAPI_MONTHLY_LIMIT", "1000") or 0)),
+    "ai": ("aimlapi.com", int(os.environ.get("AI_MONTHLY_LIMIT", "3000") or 0)),
+}
+
+
+class BudgetExceeded(requests.RequestException):
+    """Kaldet blev ikke sendt: maanedens API-budget er brugt."""
+
+
+def budget_service(url: str) -> str:
+    host = (urlparse(url).hostname or "").lower()
+    for service, (domain, _limit) in API_BUDGETS.items():
+        if host == domain or host.endswith("." + domain):
+            return service
+    return ""
+
+
+def budget_usage() -> dict:
+    """{service: (brugt, loft)} for indevaerende maaned."""
+    month = datetime.now().strftime("%Y-%m")
+    with get_db() as db:
+        rows = {r["key"]: int(r["value"]) for r in db.execute(
+            "SELECT key, value FROM settings WHERE key LIKE ?", (f"budget_{month}_%",)
+        ).fetchall()}
+    return {s: (rows.get(f"budget_{month}_{s}", 0), limit) for s, (_d, limit) in API_BUDGETS.items()}
+
+
+def budget_spend(service: str):
+    """Taeller et kald; kaster BudgetExceeded hvis loftet er naaet. Alarmerer en gang ved 80 % og 100 %."""
+    limit = API_BUDGETS[service][1]
+    month = datetime.now().strftime("%Y-%m")
+    key = f"budget_{month}_{service}"
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        used = int(row["value"]) if row else 0
+        if limit and used >= limit:
+            raise BudgetExceeded(f"{service}: maanedens budget paa {limit} kald er brugt (saet {service.upper()}_MONTHLY_LIMIT i .env)")
+        used += 1
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(used)))
+        if limit and used == int(limit * 0.8):
+            add_alarm(db, "budget", f"{service}: 80 % af maanedens API-budget brugt ({used}/{limit})", "advarsel")
+        if limit and used == limit:
+            add_alarm(db, "budget", f"{service}: maanedens API-budget er brugt ({limit} kald) - kald stoppes til den 1.", "kritisk")
+
+
+class BudgetAdapter(requests.adapters.HTTPAdapter):
+    def send(self, request, **kwargs):
+        service = budget_service(request.url)
+        if service:
+            budget_spend(service)
+        return super().send(request, **kwargs)
+
+
 HTTP = requests.Session()
-_adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=20)
+_adapter = BudgetAdapter(pool_connections=10, pool_maxsize=20)
 HTTP.mount("https://", _adapter)
 HTTP.mount("http://", _adapter)
 
@@ -1353,6 +1416,10 @@ async def push_article(id: int = Form(...)):
         art = db.execute("SELECT * FROM articles WHERE id=?", (id,)).fetchone()
     if not art:
         return RedirectResponse("/", status_code=303)
+    gate = quality_check(art["content"], art["keyword"])
+    if not gate["passed"]:
+        with get_db() as db:
+            add_alarm(db, "kvalitet", f"Artikel #{id} sendt manuelt trods kvalitetsgate: " + "; ".join(gate["errors"]), "info")
     try:
         wp_id = wp_push_draft(art["title"], art["content"])
         link = f"{WP_URL.rstrip('/')}/wp-admin/post.php?post={wp_id}&action=edit"
@@ -1369,6 +1436,45 @@ async def delete_article(id: int = Form(...)):
     with get_db() as db:
         db.execute("DELETE FROM articles WHERE id=?", (id,))
     return RedirectResponse("/", status_code=303)
+
+
+# ---------- Artikel-kvalitetsgate (v8-plan) ----------
+QUALITY_MIN_WORDS = int(os.environ.get("QUALITY_MIN_WORDS", "400") or 0)
+
+
+def quality_check(content: str, keyword: str) -> dict:
+    """Deterministisk tjek foer en artikel maa blive WP-kladde.
+    Blokerer: for faa ord (min. QUALITY_MIN_WORDS, eller 80 % af SERP-gennemsnittet fra Content Gap),
+    fokus-keyword mangler, under 2 H2-overskrifter. Advarer: faerre end 2 interne links."""
+    soup = BeautifulSoup(content or "", "html.parser")
+    text = soup.get_text(" ", strip=True)
+    words = len(text.split())
+    min_words = QUALITY_MIN_WORDS
+    try:
+        with get_db() as db:
+            gap = db.execute("SELECT stats_json FROM content_gap WHERE keyword=? ORDER BY id DESC LIMIT 1", (keyword,)).fetchone()
+        avg = jsonlib.loads(gap["stats_json"]).get("summary", {}).get("avg_words", 0) if gap and gap["stats_json"] else 0
+        if avg:
+            min_words = max(min_words, int(avg * 0.8))
+    except Exception:
+        pass
+    h2 = len(soup.find_all("h2")) or len([l for l in (content or "").splitlines() if l.startswith("## ")])
+    internal = 0
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if href.startswith("/") or (TRACK_DOMAIN and TRACK_DOMAIN in href):
+            internal += 1
+    errors, warnings = [], []
+    if words < min_words:
+        errors.append(f"for kort: {words} ord (min. {min_words})")
+    if keyword and keyword.lower() not in text.lower():
+        errors.append(f"fokus-keyword '{keyword}' mangler")
+    if h2 < 2:
+        errors.append(f"kun {h2} H2-overskrift(er), min. 2")
+    if internal < 2:
+        warnings.append(f"kun {internal} interne link(s), anbefalet min. 2")
+    return {"passed": not errors, "words": words, "min_words": min_words, "h2": h2, "internal_links": internal,
+            "errors": errors, "warnings": warnings}
 
 
 # ---------- Growth Pack (v7.7): autopilot + backlink-prospector ----------
@@ -1452,6 +1558,12 @@ def autopilot_sync():
         )
         art_id = cur.lastrowid
         db.execute("DELETE FROM keyword_ideas WHERE id=?", (row["id"],))
+    gate = quality_check(content, idea)
+    if not gate["passed"]:
+        with get_db() as db:
+            db.execute("UPDATE articles SET status=? WHERE id=?", ("Stoppet af kvalitetsgate: " + "; ".join(gate["errors"]), art_id))
+            add_alarm(db, "kvalitet", f"Autopilot-artikel #{art_id} ('{idea}') blev ikke sendt til WP: " + "; ".join(gate["errors"]), "advarsel")
+        return f"quality-blocked:{art_id}"
     if WP_URL and WP_USER and WP_APP_PASSWORD and module_on("wp_push"):
         try:
             wp_id = wp_push_draft(title, content)
@@ -2720,8 +2832,28 @@ async def delete_note(id: int = Form(...)):
 
 @app.get("/health")
 async def health():
-    return {
-        "status": "ok",
+    """Selvtest (v8-plan): kan databasen skrive, og er der plads paa disken? 503 hvis kritisk."""
+    db_write = True
+    try:
+        with get_db() as db:
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('health_probe', ?)", (now_iso(),))
+    except Exception:
+        db_write = False
+    try:
+        du = shutil.disk_usage(os.path.dirname(DB_PATH))
+        disk_used_pct = round(du.used / du.total * 100, 1)
+    except Exception:
+        disk_used_pct = None
+    status = "ok"
+    if disk_used_pct is not None and disk_used_pct >= 80:
+        status = "advarsel"
+    if not db_write or (disk_used_pct is not None and disk_used_pct >= 90):
+        status = "kritisk"
+    body = {
+        "status": status,
+        "db_write": db_write,
+        "disk_used_pct": disk_used_pct,
+        "budget": {s: {"used": u, "limit": l} for s, (u, l) in budget_usage().items()},
         "version": APP_VERSION,
         "ai": bool(AIMLAPI_KEY),
         "wordpress": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
@@ -2729,6 +2861,7 @@ async def health():
         "telegram": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "auth": bool(APP_TOKEN),
     }
+    return JSONResponse(body, status_code=503 if status == "kritisk" else 200)
 
 
 # ---------- Scheduler ----------
@@ -2814,7 +2947,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.9.1 PRO</span></h1>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.10 PRO</span></h1>
             <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
@@ -3718,7 +3851,7 @@ fi
 source venv/bin/activate
 pip install --upgrade pip > /dev/null 2>&1
 pip install -r requirements.txt
-echo "⚡ Starter Command Center v7.9.1..."
+echo "⚡ Starter Command Center v7.10..."
 if [ "$DEV" = "1" ]; then
     uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 else
@@ -3768,7 +3901,7 @@ EOF_SERVICE
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.9.1 PRO
+# Command Center v7.10 PRO
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 
@@ -3787,6 +3920,11 @@ Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Y
 - 🚨 **Alarmer** — SSL-udlob, nedetid, brodte links, fejlede scans; valgfrit Telegram-push
 - 📈 **Historik** — svartid-grafer pr. domæne (Chart.js)
 - 🌉 **Juno-broer** — `POST /api/bridge/gsc` og `/api/bridge/drift` (header `X-CC-Token`) sa Juno kan pushe GSC-tal og daglig drift
+
+## v7.10 – fra v8-planen (Drive)
+- **Kvalitetsgate**: autopilot-artikler sendes kun til WordPress, hvis de har nok ord (min. `QUALITY_MIN_WORDS`, eller 80 % af SERP-gennemsnittet fra Content Gap), indeholder fokus-keywordet og har mindst 2 H2. Ellers status "Stoppet af kvalitetsgate" + alarm. Manuel push er tilladt, men giver en info-alarm. Faerre end 2 interne links giver kun en advarsel.
+- **API-budget**: hvert kald til SerpAPI og aimlapi taelles pr. maaned; ved `SERPAPI_MONTHLY_LIMIT` / `AI_MONTHLY_LIMIT` stoppes kaldene til den 1. Alarm (og Telegram) ved 80 % og 100 %.
+- **/health**: tester at databasen kan skrive og hvor fuld disken er (advarsel ≥ 80 %, kritisk ≥ 90 % → HTTP 503) og viser maanedens API-forbrug.
 
 ## Steamgears Autopilot-bro (WordPress-plugin 7.5+)
 Command Center og WordPress-pluginnet **Steamgears Autopilot** snakker sammen via pluginnets REST-API
@@ -3889,7 +4027,7 @@ fi
 source venv/bin/activate
 pip install --upgrade pip > /dev/null 2>&1
 pip install -r requirements.txt
-echo "⚡ Starter Command Center v7.9.1..."
+echo "⚡ Starter Command Center v7.10..."
 if [ "$DEV" = "1" ]; then
     uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 else

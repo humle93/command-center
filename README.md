@@ -1,4 +1,4 @@
-# Command Center v7.9.1 PRO
+# Command Center v7.10 PRO
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 
@@ -17,6 +17,11 @@ Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Y
 - 🚨 **Alarmer** — SSL-udlob, nedetid, brodte links, fejlede scans; valgfrit Telegram-push
 - 📈 **Historik** — svartid-grafer pr. domæne (Chart.js)
 - 🌉 **Juno-broer** — `POST /api/bridge/gsc` og `/api/bridge/drift` (header `X-CC-Token`) sa Juno kan pushe GSC-tal og daglig drift
+
+## v7.10 – fra v8-planen (Drive)
+- **Kvalitetsgate**: autopilot-artikler sendes kun til WordPress, hvis de har nok ord (min. `QUALITY_MIN_WORDS`, eller 80 % af SERP-gennemsnittet fra Content Gap), indeholder fokus-keywordet og har mindst 2 H2. Ellers status "Stoppet af kvalitetsgate" + alarm. Manuel push er tilladt, men giver en info-alarm. Faerre end 2 interne links giver kun en advarsel.
+- **API-budget**: hvert kald til SerpAPI og aimlapi taelles pr. maaned; ved `SERPAPI_MONTHLY_LIMIT` / `AI_MONTHLY_LIMIT` stoppes kaldene til den 1. Alarm (og Telegram) ved 80 % og 100 %.
+- **/health**: tester at databasen kan skrive og hvor fuld disken er (advarsel ≥ 80 %, kritisk ≥ 90 % → HTTP 503) og viser maanedens API-forbrug.
 
 ## Steamgears Autopilot-bro (WordPress-plugin 7.5+)
 Command Center og WordPress-pluginnet **Steamgears Autopilot** snakker sammen via pluginnets REST-API

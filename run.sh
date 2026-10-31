@@ -9,7 +9,7 @@ fi
 source venv/bin/activate
 pip install --upgrade pip > /dev/null 2>&1
 pip install -r requirements.txt
-echo "⚡ Starter Command Center v7.9.1..."
+echo "⚡ Starter Command Center v7.10..."
 if [ "$DEV" = "1" ]; then
     uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 else

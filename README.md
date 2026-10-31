@@ -1,4 +1,4 @@
-# Command Center v7.9 PRO
+# Command Center v7.9.1 PRO
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 
@@ -17,6 +17,17 @@ Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Y
 - 🚨 **Alarmer** — SSL-udlob, nedetid, brodte links, fejlede scans; valgfrit Telegram-push
 - 📈 **Historik** — svartid-grafer pr. domæne (Chart.js)
 - 🌉 **Juno-broer** — `POST /api/bridge/gsc` og `/api/bridge/drift` (header `X-CC-Token`) sa Juno kan pushe GSC-tal og daglig drift
+
+## Steamgears Autopilot-bro (WordPress-plugin 7.5+)
+Command Center og WordPress-pluginnet **Steamgears Autopilot** snakker sammen via pluginnets REST-API
+(`/wp-json/sgap/v1`) med de samme `WP_URL` / `WP_USER` / `WP_APP_PASSWORD` som WordPress-push
+(`WP_USER` skal vaere administrator).
+- **Status hver 30. min** (fanen Social → "Steamgears Autopilot"): koe (i koe / sendes / udgivet / fejlet),
+  kladder der venter paa godkendelse, og udgivet/klik/ordrer/omsaetning pr. kanal de sidste 30 dage.
+- **Alarmer + Telegram** naar noget aendrer sig: nye fejlede opslag, nye kladder til godkendelse, eller pluginnet svarer ikke.
+- **"→ Autopilot"** paa hvert opslag i CC's sociale koe sender det som kladde til pluginnet (godkendes i WordPress
+  under Steamgears → AI Drafts, hvorefter pluginnet udgiver via Publer).
+- Slaa til/fra under Moduler ("Autopilot-bro"). Retningen er altid CC → site, saa CC kan blive paa 127.0.0.1.
 
 ## Installering
 ```bash

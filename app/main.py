@@ -53,7 +53,10 @@ SSL_WARN_DAYS = int(os.environ.get("SSL_WARN_DAYS", "30"))
 LINKCHECK_LIMIT = int(os.environ.get("LINKCHECK_LIMIT", "25"))
 PSI_API_KEY = os.environ.get("PSI_API_KEY", "").strip()   # Google PageSpeed API (gratis noegle)
 
-app = FastAPI(title="Command Center Engine", version="7.2")
+APP_VERSION = "7.9.1"
+app = FastAPI(title="Command Center Engine", version=APP_VERSION)
+# Git does not keep empty folders, so a fresh clone has no app/static: create it or startup fails.
+os.makedirs(STATIC_DIR, exist_ok=True)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 scheduler = AsyncIOScheduler(timezone="Europe/Copenhagen")
@@ -84,14 +87,20 @@ SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "").strip()
 TRACK_DOMAIN = os.environ.get("TRACK_DOMAIN", "steamgears.eu").strip()
 
 
+_WAL_SET = False
+
+
 @contextmanager
 def get_db():
+    global _WAL_SET
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn = sqlite3.connect(DB_PATH, timeout=15)  # timeout = busy timeout (15 s)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    if not _WAL_SET:
+        # WAL is a property of the database file: setting it once per process is enough.
+        conn.execute("PRAGMA journal_mode=WAL")
+        _WAL_SET = True
     conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA busy_timeout=15000")
     try:
         yield conn
         conn.commit()
@@ -360,21 +369,33 @@ def create_indexes():
 _safe(create_indexes)
 
 
-MODULES = ["domains", "keywords", "ai", "monitors", "social", "links", "bridge", "spy", "wp_push", "telegram", "growth"]
+MODULES = ["domains", "keywords", "ai", "monitors", "social", "links", "bridge", "spy", "wp_push", "telegram", "growth", "autopilot"]
+
+
+_MODULE_CACHE = {"at": 0.0, "states": {}}
+
+
+def modules_state() -> dict:
+    """On/off for every module from one query, cached for 10 s (cleared by set_module)."""
+    if time.time() - _MODULE_CACHE["at"] > 10:
+        try:
+            with get_db() as db:
+                rows = db.execute("SELECT key, value FROM settings WHERE key LIKE 'module\\_%' ESCAPE '\\'").fetchall()
+            stored = {r["key"][len("module_"):]: r["value"] == "on" for r in rows}
+        except Exception:
+            stored = {}
+        _MODULE_CACHE.update(at=time.time(), states={m: stored.get(m, True) for m in MODULES})
+    return _MODULE_CACHE["states"]
 
 
 def module_on(name: str) -> bool:
-    try:
-        with get_db() as db:
-            row = db.execute("SELECT value FROM settings WHERE key=?", ("module_" + name,)).fetchone()
-        return row is None or row["value"] == "on"
-    except Exception:
-        return True
+    return modules_state().get(name, True)
 
 
 def set_module(name: str, state: str):
     with get_db() as db:
         db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", ("module_" + name, state))
+    _MODULE_CACHE["at"] = 0.0
 
 
 def cleanup_old_data():
@@ -390,7 +411,9 @@ def cleanup_old_data():
 def is_authed(request: Request) -> bool:
     if not APP_TOKEN:
         return True
-    return request.cookies.get("cc_token") == APP_TOKEN or request.headers.get("x-cc-token") == APP_TOKEN
+    # Constant-time comparison so the token cannot be guessed from response timing.
+    supplied = request.cookies.get("cc_token") or request.headers.get("x-cc-token") or ""
+    return secrets.compare_digest(supplied, APP_TOKEN)
 
 
 def is_juno(request: Request) -> bool:
@@ -496,7 +519,7 @@ def notify_telegram(text: str):
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
         return False
     try:
-        requests.post(
+        HTTP.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHAT_ID, "text": text},
             timeout=8,
@@ -752,7 +775,7 @@ def psi_fetch(url: str):
     if not PSI_API_KEY:
         return None
     try:
-        r = requests.get(
+        r = HTTP.get(
             "https://www.googleapis.com/pagespeedonline/v5/runPagespeed",
             params={"url": url, "key": PSI_API_KEY, "strategy": "mobile"},
             timeout=60,
@@ -1128,7 +1151,7 @@ def serp_competitor_context(keyword: str, n: int = 5):
     if not SERPAPI_KEY:
         return ""
     try:
-        r = requests.get(
+        r = HTTP.get(
             "https://serpapi.com/search",
             params={"engine": "google", "q": keyword, "num": 10, "api_key": SERPAPI_KEY},
             timeout=30,
@@ -1230,7 +1253,7 @@ def generate_article_ai(keyword: str, strategy: dict = None):
         f"STRATEGI ({st['label']}): {st['style']}\n\n"
         f"{comp_block}"
     )
-    resp = requests.post(
+    resp = HTTP.post(
         "https://api.aimlapi.com/v1/chat/completions",
         headers={"Authorization": f"Bearer {AIMLAPI_KEY}", "Content-Type": "application/json"},
         json={
@@ -1302,7 +1325,7 @@ async def delete_article(id: int = Form(...)):
 
 # ---------- Growth Pack (v7.7): autopilot + backlink-prospector ----------
 def wp_push_draft(title: str, content: str):
-    resp = requests.post(
+    resp = HTTP.post(
         f"{WP_URL.rstrip('/')}/wp-json/wp/v2/posts",
         auth=(WP_USER, WP_APP_PASSWORD),
         json={"title": title, "content": content, "status": "draft"},
@@ -1333,7 +1356,7 @@ def autopilot_sync():
             import urllib.parse as _up
             newideas = []
             for seed in seeds[:3]:
-                rr = requests.get(
+                rr = HTTP.get(
                     "https://suggestqueries.google.com/complete/search",
                     params={"client": "firefox", "q": seed, "hl": "en"},
                     timeout=10,
@@ -1429,7 +1452,7 @@ def prospect_sync(keyword: str):
         with get_db() as db:
             add_alarm(db, "growth", "Backlink-prospector: SERPAPI_KEY mangler", "advarsel")
         return
-    r = requests.get(
+    r = HTTP.get(
         "https://serpapi.com/search",
         params={"engine": "google", "q": keyword, "num": 10, "api_key": SERPAPI_KEY},
         timeout=20,
@@ -1456,7 +1479,7 @@ def prospect_sync(keyword: str):
                     f"their page about '{keyword}' as a reason to add a link to our site {TRACK_DOMAIN}. "
                     f"Output only the email body."
                 )
-                resp2 = requests.post(
+                resp2 = HTTP.post(
                     "https://api.aimlapi.com/v1/chat/completions",
                     headers={"Authorization": f"Bearer {AIMLAPI_KEY}", "Content-Type": "application/json"},
                     json={"model": AI_MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": 3000},
@@ -1571,13 +1594,139 @@ async def export_social_csv():
     )
 
 
+# ---------- Steamgears Autopilot-bro (WordPress-pluginnet steamgears-autopilot >= 7.5) ----------
+# CC kalder pluginnets REST-API (/wp-json/sgap/v1) med samme WP_USER/WP_APP_PASSWORD som WordPress-push.
+# Retningen er altid CC -> site: sitet kan ikke naa CC, der kun lytter paa 127.0.0.1.
+SGAP_CHANNELS = {"facebook", "instagram", "pinterest", "linkedin", "twitter", "threads", "bluesky", "mastodon", "telegram", "google"}
+SGAP_ALIASES = {"x": "twitter", "fb": "facebook", "ig": "instagram", "gmb": "google", "google business": "google"}
+
+
+def sgap_ready() -> bool:
+    return bool(WP_URL and WP_USER and WP_APP_PASSWORD) and module_on("autopilot")
+
+
+def sgap_api(method: str, path: str, **kwargs):
+    """Kald pluginnets REST-API. Kaster requests.HTTPError ved fejl-svar."""
+    resp = HTTP.request(
+        method,
+        f"{WP_URL.rstrip('/')}/wp-json/sgap/v1{path}",
+        auth=(WP_USER, WP_APP_PASSWORD),
+        timeout=20,
+        **kwargs,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def sgap_channel(platform: str) -> str:
+    key = (platform or "").strip().lower()
+    key = SGAP_ALIASES.get(key, key)
+    return key if key in SGAP_CHANNELS else ""
+
+
+def sgap_error_text(exc: Exception) -> str:
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status in (401, 403):
+        return f"WordPress afviste login ({status}): WP_USER skal vaere administrator med et gyldigt Application Password"
+    if status == 404:
+        return "Autopilot-API'et findes ikke (404): er Steamgears Autopilot 7.5+ installeret og aktiveret?"
+    return f"Autopilot-pluginnet svarer ikke: {exc}"
+
+
+def sgap_snapshot() -> dict:
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key='sgap_snapshot'").fetchone()
+    try:
+        return jsonlib.loads(row["value"]) if row and row["value"] else {}
+    except Exception:
+        return {}
+
+
+def sgap_sync() -> dict:
+    """Henter status fra pluginnet, gemmer et snapshot og alarmerer ved nye fejl eller nye kladder."""
+    if not sgap_ready():
+        return {}
+    previous = sgap_snapshot()
+    snap = {"checked_at": now_iso(), "ok": False, "error": "", "queue": {}, "channels": [], "pending_drafts": 0}
+    try:
+        stats = sgap_api("GET", "/stats", params={"days": 30})
+        drafts = sgap_api("GET", "/drafts", params={"status": "pending", "limit": 100})
+        snap["ok"] = True
+        snap["queue"] = {r["status"]: int(r["count"]) for r in stats.get("queue", [])}
+        channels = {}
+        for r in stats.get("events", []):
+            c = channels.setdefault(r["channel"], {"channel": r["channel"], "publish": 0, "click": 0, "order": 0, "revenue": 0.0})
+            if r["event_type"] in ("publish", "click", "order"):
+                c[r["event_type"]] = int(r["count"])
+            if r["event_type"] == "order":
+                c["revenue"] = round(float(r["value"] or 0), 2)
+        snap["channels"] = sorted(channels.values(), key=lambda c: (-c["revenue"], -c["click"]))
+        snap["pending_drafts"] = len(drafts) if isinstance(drafts, list) else 0
+    except Exception as e:
+        snap["error"] = sgap_error_text(e)
+    with get_db() as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('sgap_snapshot', ?)", (jsonlib.dumps(snap),))
+        # Kun alarm naar noget AENDRER sig, saa Telegram ikke spammes hver halve time.
+        if snap["error"] and snap["error"] != previous.get("error"):
+            add_alarm(db, "autopilot", snap["error"], "advarsel")
+        if snap["ok"]:
+            failed, failed_before = snap["queue"].get("failed", 0), previous.get("queue", {}).get("failed", 0)
+            if failed > failed_before:
+                add_alarm(db, "autopilot", f"{failed - failed_before} opslag fejlede i Steamgears Autopilot (se Queue i WordPress)", "advarsel")
+            drafts_now, drafts_before = snap["pending_drafts"], previous.get("pending_drafts", 0)
+            if drafts_now > drafts_before:
+                add_alarm(db, "autopilot", f"{drafts_now} AI-kladde(r) venter paa godkendelse i WordPress", "info")
+    return snap
+
+
+async def job_sgap_sync():
+    if not sgap_ready():
+        return
+    await asyncio.get_event_loop().run_in_executor(executor, sgap_sync)
+
+
+@app.post("/autopilot/sync")
+async def autopilot_sync_now():
+    await asyncio.get_event_loop().run_in_executor(executor, sgap_sync)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/social/to-autopilot")
+async def social_to_autopilot(id: int = Form(...)):
+    """Send et opslag fra CC's sociale koe til pluginnet som AI-kladde (godkendes i WordPress)."""
+    with get_db() as db:
+        post = db.execute("SELECT platform, message FROM socialqueue WHERE id=?", (id,)).fetchone()
+    if not post:
+        return RedirectResponse("/", status_code=303)
+    channel = sgap_channel(post["platform"])
+    if not sgap_ready() or not channel:
+        why = "WP_URL/WP_USER/WP_APP_PASSWORD mangler eller modulet er slukket" if not sgap_ready() else f"platformen '{post['platform']}' kendes ikke af autopiloten"
+        with get_db() as db:
+            add_alarm(db, "autopilot", f"Kunne ikke sende opslag til autopiloten: {why}", "advarsel")
+        return RedirectResponse("/", status_code=303)
+    message = post["message"].strip()
+    title = message.split("\n", 1)[0][:90]
+
+    def send():
+        return sgap_api("POST", "/drafts", json={"channel": channel, "title": title, "body": message, "ai_model": "command-center"})
+
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(executor, send)
+        with get_db() as db:
+            db.execute("UPDATE socialqueue SET status=? WHERE id=?", (f"sendt til autopilot (kladde #{result.get('id')})", id))
+    except Exception as e:
+        with get_db() as db:
+            add_alarm(db, "autopilot", "Kunne ikke sende opslag: " + sgap_error_text(e), "advarsel")
+    return RedirectResponse("/", status_code=303)
+
+
 # ---------- Keywords (SerpAPI) ----------
 def check_keyword_sync(kw_row):
     kw = kw_row["keyword"]
     if not SERPAPI_KEY:
         return {"position": None, "url": None, "error": "SERPAPI_KEY ikke sat i .env"}
     try:
-        resp = requests.get(
+        resp = HTTP.get(
             "https://serpapi.com/search",
             params={"engine": "google", "q": kw, "api_key": SERPAPI_KEY, "num": 50},
             timeout=20,
@@ -1858,7 +2007,7 @@ async def get_duplicates():
 
 # ---------- AI: interne links, meta/social, synlighed ----------
 def ai_chat(prompt: str, max_tokens: int = 1500):
-    resp = requests.post(
+    resp = HTTP.post(
         "https://api.aimlapi.com/v1/chat/completions",
         headers={"Authorization": f"Bearer {AIMLAPI_KEY}", "Content-Type": "application/json"},
         json={"model": AI_MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens},
@@ -2123,7 +2272,7 @@ async def health_history():
 def autocomplete_sources(keyword: str):
     ideas = []
     try:
-        r = requests.get(
+        r = HTTP.get(
             "https://suggestqueries.google.com/complete/search",
             params={"client": "firefox", "q": keyword, "hl": "en"},
             timeout=8,
@@ -2133,7 +2282,7 @@ def autocomplete_sources(keyword: str):
     except Exception:
         pass
     try:
-        r2 = requests.get("https://duckduckgo.com/ac/", params={"q": keyword, "type": "list"}, timeout=8)
+        r2 = HTTP.get("https://duckduckgo.com/ac/", params={"q": keyword, "type": "list"}, timeout=8)
         data = r2.json()
         for item in (data[1] if isinstance(data, list) and len(data) > 1 else []):
             if item not in [i for i, _ in ideas]:
@@ -2168,7 +2317,7 @@ def keyword_difficulty_sync(keyword: str):
     if not SERPAPI_KEY:
         return {"error": "SERPAPI_KEY ikke sat i .env"}
     try:
-        resp = requests.get(
+        resp = HTTP.get(
             "https://serpapi.com/search",
             params={"engine": "google", "q": keyword, "api_key": SERPAPI_KEY, "num": 10},
             timeout=25,
@@ -2225,7 +2374,7 @@ def serp_gap_sync(keyword: str):
     if not SERPAPI_KEY:
         return {"error": "SERPAPI_KEY ikke sat i .env"}
     try:
-        resp = requests.get(
+        resp = HTTP.get(
             "https://serpapi.com/search",
             params={"engine": "google", "q": keyword, "api_key": SERPAPI_KEY, "num": 10},
             timeout=25,
@@ -2354,7 +2503,7 @@ async def dashboard(request: Request):
         competitors = db.execute("SELECT * FROM competitors ORDER BY id DESC LIMIT 20").fetchall()
         articles = db.execute("SELECT * FROM articles ORDER BY id DESC LIMIT 10").fetchall()
         linkchecks = db.execute("SELECT * FROM linkcheck ORDER BY id DESC LIMIT 10").fetchall()
-        socialqueue = db.execute("SELECT * FROM socialqueue ORDER BY id DESC").fetchall()
+        socialqueue = db.execute("SELECT * FROM socialqueue ORDER BY id DESC LIMIT 100").fetchall()  # full list: /social/export.csv
         notes = db.execute("SELECT * FROM notes ORDER BY id DESC LIMIT 10").fetchall()
         keywords = db.execute("SELECT * FROM keywords ORDER BY position IS NULL, position").fetchall()
         alarms = db.execute("SELECT * FROM alarms WHERE resolved=0 ORDER BY id DESC LIMIT 20").fetchall()
@@ -2373,7 +2522,15 @@ async def dashboard(request: Request):
         health_hist = db.execute("SELECT COUNT(*) AS n FROM health_history").fetchone()["n"]
         seo_pages = db.execute("SELECT * FROM seopages ORDER BY score ASC LIMIT 100").fetchall()
         crawl = db.execute("SELECT * FROM crawl_runs ORDER BY id DESC LIMIT 1").fetchone()
-        difficulties = db.execute("SELECT * FROM keyword_difficulty ORDER BY id DESC LIMIT 20").fetchall()
+        difficulties = db.execute("SELECT * FROM keyword_difficulty ORDER BY created_at DESC LIMIT 20").fetchall()
+        # Read here, while the connection is open (get_db closes it when the block ends).
+        backlink_rows = db.execute("SELECT * FROM backlink_prospects ORDER BY id DESC LIMIT 30").fetchall()
+        strategy_row = db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone()
+        check_row = db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone()
+        sgap_row = db.execute("SELECT value FROM settings WHERE key='sgap_snapshot'").fetchone()
+    active_key = (strategy_row["value"] if strategy_row else None) or DEFAULT_STRATEGY
+    if active_key not in STRATEGIES:
+        active_key = DEFAULT_STRATEGY
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
         "domains": domains,
@@ -2397,20 +2554,22 @@ async def dashboard(request: Request):
         "ideas": ideas,
         "gaps": gaps,
         "outreach_rows": outreach_rows,
-        "backlink_rows": db.execute("SELECT * FROM backlink_prospects ORDER BY id DESC LIMIT 30").fetchall(),
+        "backlink_rows": backlink_rows,
         "ai_vis": ai_vis,
         "links_sug": links_sug,
         "health_hist_n": health_hist,
         "crawl": crawl,
         "track_domain": TRACK_DOMAIN,
         "difficulties": difficulties,
-        "modules": {m: module_on(m) for m in MODULES},
+        "sgap": jsonlib.loads(sgap_row["value"]) if sgap_row and sgap_row["value"] else {},
+        "sgap_ready": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
+        "modules": modules_state(),
         "strategies": STRATEGIES,
-        "active_strategy": (db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone() or [None])[0] or DEFAULT_STRATEGY,
-        "strategy_autopilot": get_active_strategy()["autopilot"],
-        "strategy_autopilot_label": get_active_strategy()["label"],
+        "active_strategy": active_key,
+        "strategy_autopilot": STRATEGIES[active_key]["autopilot"],
+        "strategy_autopilot_label": STRATEGIES[active_key]["label"],
         "insecure": getattr(request.state, "insecure", False),
-        "strategy_check": (lambda r: (jsonlib.loads(r) if r else None))(db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone() and db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone()["value"]),
+        "strategy_check": jsonlib.loads(check_row["value"]) if check_row and check_row["value"] else None,
     })
 
 
@@ -2515,7 +2674,7 @@ async def delete_note(id: int = Form(...)):
 async def health():
     return {
         "status": "ok",
-        "version": "7.3",
+        "version": APP_VERSION,
         "ai": bool(AIMLAPI_KEY),
         "wordpress": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "serpapi": bool(SERPAPI_KEY),
@@ -2550,6 +2709,7 @@ async def lifespan(app_: FastAPI):
         scheduler.add_job(cleanup_old_data, CronTrigger(hour=4, minute=30), id="cleanup", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(pull_bridge_sync, IntervalTrigger(minutes=BRIDGE_POLL_MINUTES), id="pull_bridge", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_backup_db, CronTrigger(hour=4, minute=40), id="db_backup", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_sgap_sync, IntervalTrigger(minutes=30), id="sgap_sync", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.start()
         try:
             executor.submit(startup_selftest_sync)  # v7.9: selvtest ved hver opstart (efter self-update/install)

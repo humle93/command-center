@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: install.sh carries the same files as the repo
+        run: |
+          set -e
+          for pair in "EOF_MAIN app/main.py" "EOF_HTML app/templates/dashboard.html" "EOF_LOGIN app/templates/login.html" "EOF_REQ requirements.txt" "EOF_SMOKE scripts/smoke_test.sh"; do
+            set -- $pair
+            awk "/<< '$1'/{f=1;next} /^$1\$/{f=0} f" install.sh | diff - "$2"
+          done
+      - name: Boot, sweep pages, test the Autopilot bridge
+        run: bash tests/ci_check.sh

@@ -15,4 +15,4 @@ if [ "$ok" = "1" ]; then
 else
   echo "❌ Smoke-test FEJLEDE - tjek logs: journalctl -u command-center ellers tail -50 ~/command-center/nohup.out"
 fi
-exit $ok
+exit $((1 - ok))  # 0 = alt OK (shell-konvention)

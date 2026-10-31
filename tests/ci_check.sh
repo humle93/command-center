@@ -38,6 +38,10 @@ curl -s -o /dev/null -H "$A" -X POST $U/autopilot/sync
 curl -s -o /dev/null -H "$A" -X POST $U/autopilot/sync
 check "bridge: missing plugin raises one alarm" "$(q "SELECT COUNT(*) FROM alarms WHERE message LIKE '%findes ikke (404)%'")" "1"
 
+curl -s -o /dev/null -H "$A" -X POST $U/settings/module -d name=autopilot -d state=off
+check "modules: switching off takes effect at once (cache cleared)" "$(curl -s -H "$A" $U/ | grep -c 'Autopilot-bro (WordPress)\" er slukket\|Modulet \"Autopilot-bro\" er slukket')" "1"
+curl -s -o /dev/null -H "$A" -X POST $U/settings/module -d name=autopilot -d state=on
+
 check "no Python tracebacks" "$(grep -c Traceback "$TMP/cc.log")" "0"
 [ "$FAIL" = 0 ] && echo "ALL PASS" || { echo "SOME FAILED"; tail -40 "$TMP/cc.log"; }
 exit $FAIL

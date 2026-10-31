@@ -135,14 +135,20 @@ SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "").strip()
 TRACK_DOMAIN = os.environ.get("TRACK_DOMAIN", "steamgears.eu").strip()
 
 
+_WAL_SET = False
+
+
 @contextmanager
 def get_db():
+    global _WAL_SET
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn = sqlite3.connect(DB_PATH, timeout=15)  # timeout = busy timeout (15 s)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    if not _WAL_SET:
+        # WAL is a property of the database file: setting it once per process is enough.
+        conn.execute("PRAGMA journal_mode=WAL")
+        _WAL_SET = True
     conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA busy_timeout=15000")
     try:
         yield conn
         conn.commit()
@@ -414,18 +420,30 @@ _safe(create_indexes)
 MODULES = ["domains", "keywords", "ai", "monitors", "social", "links", "bridge", "spy", "wp_push", "telegram", "growth", "autopilot"]
 
 
+_MODULE_CACHE = {"at": 0.0, "states": {}}
+
+
+def modules_state() -> dict:
+    """On/off for every module from one query, cached for 10 s (cleared by set_module)."""
+    if time.time() - _MODULE_CACHE["at"] > 10:
+        try:
+            with get_db() as db:
+                rows = db.execute("SELECT key, value FROM settings WHERE key LIKE 'module\\_%' ESCAPE '\\'").fetchall()
+            stored = {r["key"][len("module_"):]: r["value"] == "on" for r in rows}
+        except Exception:
+            stored = {}
+        _MODULE_CACHE.update(at=time.time(), states={m: stored.get(m, True) for m in MODULES})
+    return _MODULE_CACHE["states"]
+
+
 def module_on(name: str) -> bool:
-    try:
-        with get_db() as db:
-            row = db.execute("SELECT value FROM settings WHERE key=?", ("module_" + name,)).fetchone()
-        return row is None or row["value"] == "on"
-    except Exception:
-        return True
+    return modules_state().get(name, True)
 
 
 def set_module(name: str, state: str):
     with get_db() as db:
         db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", ("module_" + name, state))
+    _MODULE_CACHE["at"] = 0.0
 
 
 def cleanup_old_data():
@@ -549,7 +567,7 @@ def notify_telegram(text: str):
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
         return False
     try:
-        requests.post(
+        HTTP.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHAT_ID, "text": text},
             timeout=8,
@@ -805,7 +823,7 @@ def psi_fetch(url: str):
     if not PSI_API_KEY:
         return None
     try:
-        r = requests.get(
+        r = HTTP.get(
             "https://www.googleapis.com/pagespeedonline/v5/runPagespeed",
             params={"url": url, "key": PSI_API_KEY, "strategy": "mobile"},
             timeout=60,
@@ -1181,7 +1199,7 @@ def serp_competitor_context(keyword: str, n: int = 5):
     if not SERPAPI_KEY:
         return ""
     try:
-        r = requests.get(
+        r = HTTP.get(
             "https://serpapi.com/search",
             params={"engine": "google", "q": keyword, "num": 10, "api_key": SERPAPI_KEY},
             timeout=30,
@@ -1283,7 +1301,7 @@ def generate_article_ai(keyword: str, strategy: dict = None):
         f"STRATEGI ({st['label']}): {st['style']}\n\n"
         f"{comp_block}"
     )
-    resp = requests.post(
+    resp = HTTP.post(
         "https://api.aimlapi.com/v1/chat/completions",
         headers={"Authorization": f"Bearer {AIMLAPI_KEY}", "Content-Type": "application/json"},
         json={
@@ -1355,7 +1373,7 @@ async def delete_article(id: int = Form(...)):
 
 # ---------- Growth Pack (v7.7): autopilot + backlink-prospector ----------
 def wp_push_draft(title: str, content: str):
-    resp = requests.post(
+    resp = HTTP.post(
         f"{WP_URL.rstrip('/')}/wp-json/wp/v2/posts",
         auth=(WP_USER, WP_APP_PASSWORD),
         json={"title": title, "content": content, "status": "draft"},
@@ -1386,7 +1404,7 @@ def autopilot_sync():
             import urllib.parse as _up
             newideas = []
             for seed in seeds[:3]:
-                rr = requests.get(
+                rr = HTTP.get(
                     "https://suggestqueries.google.com/complete/search",
                     params={"client": "firefox", "q": seed, "hl": "en"},
                     timeout=10,
@@ -1482,7 +1500,7 @@ def prospect_sync(keyword: str):
         with get_db() as db:
             add_alarm(db, "growth", "Backlink-prospector: SERPAPI_KEY mangler", "advarsel")
         return
-    r = requests.get(
+    r = HTTP.get(
         "https://serpapi.com/search",
         params={"engine": "google", "q": keyword, "num": 10, "api_key": SERPAPI_KEY},
         timeout=20,
@@ -1509,7 +1527,7 @@ def prospect_sync(keyword: str):
                     f"their page about '{keyword}' as a reason to add a link to our site {TRACK_DOMAIN}. "
                     f"Output only the email body."
                 )
-                resp2 = requests.post(
+                resp2 = HTTP.post(
                     "https://api.aimlapi.com/v1/chat/completions",
                     headers={"Authorization": f"Bearer {AIMLAPI_KEY}", "Content-Type": "application/json"},
                     json={"model": AI_MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": 3000},
@@ -1756,7 +1774,7 @@ def check_keyword_sync(kw_row):
     if not SERPAPI_KEY:
         return {"position": None, "url": None, "error": "SERPAPI_KEY ikke sat i .env"}
     try:
-        resp = requests.get(
+        resp = HTTP.get(
             "https://serpapi.com/search",
             params={"engine": "google", "q": kw, "api_key": SERPAPI_KEY, "num": 50},
             timeout=20,
@@ -2037,7 +2055,7 @@ async def get_duplicates():
 
 # ---------- AI: interne links, meta/social, synlighed ----------
 def ai_chat(prompt: str, max_tokens: int = 1500):
-    resp = requests.post(
+    resp = HTTP.post(
         "https://api.aimlapi.com/v1/chat/completions",
         headers={"Authorization": f"Bearer {AIMLAPI_KEY}", "Content-Type": "application/json"},
         json={"model": AI_MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens},
@@ -2302,7 +2320,7 @@ async def health_history():
 def autocomplete_sources(keyword: str):
     ideas = []
     try:
-        r = requests.get(
+        r = HTTP.get(
             "https://suggestqueries.google.com/complete/search",
             params={"client": "firefox", "q": keyword, "hl": "en"},
             timeout=8,
@@ -2312,7 +2330,7 @@ def autocomplete_sources(keyword: str):
     except Exception:
         pass
     try:
-        r2 = requests.get("https://duckduckgo.com/ac/", params={"q": keyword, "type": "list"}, timeout=8)
+        r2 = HTTP.get("https://duckduckgo.com/ac/", params={"q": keyword, "type": "list"}, timeout=8)
         data = r2.json()
         for item in (data[1] if isinstance(data, list) and len(data) > 1 else []):
             if item not in [i for i, _ in ideas]:
@@ -2347,7 +2365,7 @@ def keyword_difficulty_sync(keyword: str):
     if not SERPAPI_KEY:
         return {"error": "SERPAPI_KEY ikke sat i .env"}
     try:
-        resp = requests.get(
+        resp = HTTP.get(
             "https://serpapi.com/search",
             params={"engine": "google", "q": keyword, "api_key": SERPAPI_KEY, "num": 10},
             timeout=25,
@@ -2404,7 +2422,7 @@ def serp_gap_sync(keyword: str):
     if not SERPAPI_KEY:
         return {"error": "SERPAPI_KEY ikke sat i .env"}
     try:
-        resp = requests.get(
+        resp = HTTP.get(
             "https://serpapi.com/search",
             params={"engine": "google", "q": keyword, "api_key": SERPAPI_KEY, "num": 10},
             timeout=25,
@@ -2533,7 +2551,7 @@ async def dashboard(request: Request):
         competitors = db.execute("SELECT * FROM competitors ORDER BY id DESC LIMIT 20").fetchall()
         articles = db.execute("SELECT * FROM articles ORDER BY id DESC LIMIT 10").fetchall()
         linkchecks = db.execute("SELECT * FROM linkcheck ORDER BY id DESC LIMIT 10").fetchall()
-        socialqueue = db.execute("SELECT * FROM socialqueue ORDER BY id DESC").fetchall()
+        socialqueue = db.execute("SELECT * FROM socialqueue ORDER BY id DESC LIMIT 100").fetchall()  # full list: /social/export.csv
         notes = db.execute("SELECT * FROM notes ORDER BY id DESC LIMIT 10").fetchall()
         keywords = db.execute("SELECT * FROM keywords ORDER BY position IS NULL, position").fetchall()
         alarms = db.execute("SELECT * FROM alarms WHERE resolved=0 ORDER BY id DESC LIMIT 20").fetchall()
@@ -2558,6 +2576,9 @@ async def dashboard(request: Request):
         strategy_row = db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone()
         check_row = db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone()
         sgap_row = db.execute("SELECT value FROM settings WHERE key='sgap_snapshot'").fetchone()
+    active_key = (strategy_row["value"] if strategy_row else None) or DEFAULT_STRATEGY
+    if active_key not in STRATEGIES:
+        active_key = DEFAULT_STRATEGY
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
         "domains": domains,
@@ -2590,11 +2611,11 @@ async def dashboard(request: Request):
         "difficulties": difficulties,
         "sgap": jsonlib.loads(sgap_row["value"]) if sgap_row and sgap_row["value"] else {},
         "sgap_ready": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
-        "modules": {m: module_on(m) for m in MODULES},
+        "modules": modules_state(),
         "strategies": STRATEGIES,
-        "active_strategy": (strategy_row["value"] if strategy_row else None) or DEFAULT_STRATEGY,
-        "strategy_autopilot": get_active_strategy()["autopilot"],
-        "strategy_autopilot_label": get_active_strategy()["label"],
+        "active_strategy": active_key,
+        "strategy_autopilot": STRATEGIES[active_key]["autopilot"],
+        "strategy_autopilot_label": STRATEGIES[active_key]["label"],
         "insecure": getattr(request.state, "insecure", False),
         "strategy_check": jsonlib.loads(check_row["value"]) if check_row and check_row["value"] else None,
     })

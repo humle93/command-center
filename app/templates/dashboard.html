@@ -33,17 +33,18 @@
     </style>
 </head>
 {% if insecure %}<div class="bg-yellow-600 text-black text-xs text-center py-1.5 px-4 font-semibold">&Uacute;t&uacute;n HTTPS &mdash; token sendes ukrypteret. S&aelig;t nginx + TLS op foran CC (se Install-dokumentationen).</div>{% endif %}
-<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
+<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null, histOpen: false, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.10 PRO</span></h1>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.11 PRO</span></h1>
             <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
-            <form action="/self-update" method="POST" onsubmit="return confirm('Hent og installér nyeste version? Genstart run.sh bagefter.')"><button class="text-xs text-zinc-400 hover:text-emerald-400">⬆️ Opdatér</button></form>
+            <form action="/update/apply" method="POST" onsubmit="return confirm('Hent og installér nyeste version fra GitHub? Der laves en DB-backup først, og appen skal genstartes bagefter.')"><button class="text-xs text-zinc-400 hover:text-emerald-400">⬆️ Opdatér</button></form>
             <a href="/health" class="text-xs text-emerald-400">Systemstatus</a>
-            {% if auth_required %}<a href="/logout" class="text-xs text-zinc-500 hover:text-rose-400">Log ud</a>{% endif %}
+            {% if current_user %}<span class="text-xs text-zinc-500">👤 {{ current_user.username }}</span>
+            <a href="/logout" class="text-xs text-zinc-500 hover:text-rose-400">Log ud</a>{% endif %}
         </div>
     </div>
 </header>
@@ -60,6 +61,7 @@
         <button @click="tab='ai'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='ai' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🤖 AI Tools</button>
         <button @click="tab='pro'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='pro' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">💼 Pro</button>
         <button @click="tab='moduler'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='moduler' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">⚙️ Moduler</button>
+        <button @click="tab='brugere'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='brugere' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">👤 Brugere</button>
         
         <button @click="tab='alarms'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='alarms' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🚨 Alarmer{% if alarms %} ({{ alarms|length }}){% endif %}</button>
         <button @click="tab='notes'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='notes' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">📝 Noter</button>
@@ -67,9 +69,9 @@
 </nav>
 <main class="max-w-7xl mx-auto p-4 space-y-4">
 
-    {% if not ai_enabled or not wp_enabled or not auth_required %}
+    {% if not ai_enabled or not wp_enabled %}
     <div class="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-3 text-xs text-amber-300">
-        Setup: AI {{ '✅' if ai_enabled else '❌ (AIMLAPI_KEY)' }} · WordPress {{ '✅' if wp_enabled else '❌ (WP_URL/WP_USER/WP_APP_PASSWORD)' }} · SerpAPI {{ '✅' if serpapi_enabled else '❌ (SERPAPI_KEY)' }} · Telegram {{ '✅' if telegram_enabled else '— (valgfrit)' }} · Login {{ '✅' if auth_required else '❌ (APP_TOKEN — sæt den, hvis dashboardet kører på en VPS!)' }} — se .env.example
+        Setup: AI {{ '✅' if ai_enabled else '❌ (AIMLAPI_KEY)' }} · WordPress {{ '✅' if wp_enabled else '❌ (WP_URL/WP_USER/WP_APP_PASSWORD)' }} · SerpAPI {{ '✅' if serpapi_enabled else '❌ (SERPAPI_KEY)' }} · Telegram {{ '✅' if telegram_enabled else '— (valgfrit)' }} — se .env.example
     </div>
     {% endif %}
 
@@ -96,6 +98,31 @@
         {% endif %}
 
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Opdatering fra GitHub <span class="text-zinc-600 normal-case">({{ update_repo }})</span></h2>
+                <div class="flex gap-2">
+                    <form action="/update/check" method="POST"><button class="text-xs bg-zinc-800 text-zinc-300 border border-zinc-700 px-3 py-1.5 rounded-lg">🔄 Tjek for nye commits</button></form>
+                    <form action="/update/apply" method="POST" class="flex items-center gap-2" onsubmit="return confirm('Hent og installér nyeste version fra GitHub? Der laves en DB-backup først, appen genstarter bagefter.')">
+                        <label class="flex items-center gap-1 text-[11px] text-zinc-400" title="Genstarter appen når filerne er skrevet (systemd-unit eller scripts/restart.sh)"><input type="checkbox" name="restart" value="1" checked> genstart</label>
+                        <button class="text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-3 py-1.5 rounded-lg">⬆️ Opdater</button>
+                    </form>
+                </div>
+            </div>
+            <p class="text-xs text-zinc-500">Installeret: <span class="text-zinc-300">{{ (current_commit or 'ukendt')[:7] }}</span>{% if update_state and update_state.latest %} · Nyeste på main: <span class="text-zinc-300">{{ update_state.latest[:7] }}</span>{% endif %}</p>
+            {% if not update_token %}
+            <p class="text-xs text-amber-400 mt-2">GITHUB_TOKEN mangler i .env — opdatering kræver adgang til det private repo.</p>
+            {% elif update_state %}
+                {% if update_state.error %}<p class="text-xs text-rose-400 mt-2">{{ update_state.error }}</p>
+                {% elif update_state.behind %}<p class="text-xs text-amber-300 mt-2">Ny version tilgængelig{% if update_state.date %} ({{ update_state.date[:16] }}){% endif %}: {{ update_state.message }}</p>
+                {% else %}<p class="text-xs text-emerald-400 mt-2">Du kører nyeste version.</p>{% endif %}
+                {% if update_state.files %}<p class="text-xs text-zinc-500 mt-1">Sidste opdatering skrev {{ update_state.files|length }} filer{% if update_state.requirements_changed %} (requirements geninstalleret){% endif %}.</p>{% endif %}
+                {% if update_state.restart %}{% if update_state.restart.scheduled %}<p class="text-xs text-sky-300 mt-1">Genstarter nu ({{ update_state.restart.mode }}) — genindlæs siden om et øjeblik.</p>{% else %}<p class="text-xs text-amber-300 mt-1">Ikke genstartet: {{ update_state.restart.reason }}</p>{% endif %}{% endif %}
+            {% else %}
+            <p class="text-xs text-zinc-500 mt-2">Tryk "Tjek for nye commits" for at sammenligne med GitHub (tjekker også automatisk kl. 05:00).</p>
+            {% endif %}
+        </div>
+
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Tilføj domæne</h2>
             <form action="/domains/add" method="POST" class="flex gap-2">
                 <input type="text" name="url" placeholder="ditsite.dk" required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
@@ -118,7 +145,7 @@
                         </div>
                     </div>
                     <div class="flex items-center gap-3">
-                        <button @click="tab='seo'; showHistory({{ domain.id }}, '{{ domain.url }}')" class="text-emerald-400 hover:underline">📈</button>
+                        <button @click="tab='seo'; showHistory({{ domain.id }}, $el.dataset.url)" data-url="{{ domain.url }}" class="text-emerald-400 hover:underline">📈</button>
                         <form action="/domains/delete" method="POST">
                             <input type="hidden" name="id" value="{{ domain.id }}">
                             <button class="text-zinc-500 hover:text-rose-400">✕</button>
@@ -156,7 +183,7 @@
                 seoLoading = true; seoResult = null;
                 fetch('/seo/audit', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'},
                     body: 'url=' + encodeURIComponent($el.querySelector('input[name=url]').value) + '&keyword=' + encodeURIComponent($el.querySelector('input[name=keyword]').value || '') + '&level=' + encodeURIComponent($el.querySelector('select[name=level]').value) + '&psi=' + ($el.querySelector('input[name=psi]')?.checked ? '1' : '0') })
-                .then(r => r.json()).then(data => { seoResult = data; seoLoading = false; })"
+                .then(r => r.json()).then(data => { seoResult = data; seoLoading = false; }).catch(() => { seoLoading = false; seoResult = { score: 0, items: [{ ok: false, text: 'Netværksfejl — prøv igen' }] }; })"
                 class="flex flex-col md:flex-row gap-2">
                 <input type="text" name="url" placeholder="https://steamgears.eu/guide..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
                 <input type="text" name="keyword" placeholder="Focus keyword (valgfrit)" class="md:w-52 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
@@ -320,7 +347,7 @@
             <p x-show="!dups" class="text-xs text-zinc-500">Kør et site-crawl først — kræver crawl-data.</p>
         </div>
 
-        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5" x-show="false" id="histcard">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5" x-show="histOpen" style="display: none;" id="histcard">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3" id="histtitle">Historik</h2>
             <canvas id="histchart" height="80"></canvas>
         </div>
@@ -342,7 +369,7 @@
                 {% for comp in competitors %}
                 <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs space-y-1">
                     <div class="flex justify-between items-center">
-                        <a href="{{ comp.url }}" target="_blank" class="font-medium text-emerald-400 hover:underline">{{ comp.name }}</a>
+                        {% if comp.url.startswith('http') %}<a href="{{ comp.url }}" target="_blank" rel="noopener" class="font-medium text-emerald-400 hover:underline">{{ comp.name }}</a>{% else %}<span class="font-medium text-zinc-300">{{ comp.name }}</span>{% endif %}
                         <form action="/competitors/delete" method="POST">
                             <input type="hidden" name="id" value="{{ comp.id }}">
                             <button class="text-zinc-500 hover:text-rose-400">✕</button>
@@ -424,6 +451,7 @@
                         </div>
                     </div>
                     {% if art.meta_title %}<div class="text-zinc-500 border-t border-zinc-800 pt-2">📌 <span class="text-zinc-300">{{ art.meta_title }}</span> — {{ art.meta_desc }}</div>{% endif %}
+                    {# art.content er allow-list-saniteret i dashboard-routen i main.py (ingen scripts/handlers) #}
                     <div class="text-zinc-400 max-h-48 overflow-y-auto border-t border-zinc-800 pt-2">{{ art.content | safe }}</div>
                 </div>
                 {% else %}
@@ -447,7 +475,7 @@
                         {% for b in backlink_rows %}
                         <tr class="border-b border-zinc-800/60">
                             <td class="py-2 pr-3 text-zinc-300">{{ b.keyword }}</td>
-                            <td class="py-2 pr-3"><a href="{{ b.url }}" target="_blank" class="text-emerald-400">{{ b.site }}</a></td>
+                            <td class="py-2 pr-3">{% if b.url.startswith('http') %}<a href="{{ b.url }}" target="_blank" rel="noopener" class="text-emerald-400">{{ b.site }}</a>{% else %}<span class="text-zinc-300">{{ b.site }}</span>{% endif %}</td>
                             <td class="py-2 pr-3 text-zinc-400">{{ b.type }}</td>
                             <td class="py-2 pr-3 text-zinc-300">{{ b.email or '—' }}</td>
                             <td class="py-2 pr-3 max-w-md"><details><summary class="cursor-pointer text-zinc-400">Vis draft</summary><p class="mt-2 text-zinc-400 whitespace-pre-line">{{ b.draft }}</p></details></td>
@@ -804,6 +832,47 @@
         </div>
     </section>
 
+    <!-- BRUGERE -->
+    <section x-show="tab === 'brugere'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Brugere ({{ users|length }})</h2>
+            <p class="text-xs text-zinc-500 mb-3">Adgang sker med brugernavn + adgangskode (PBKDF2-SHA256). Den foerste bruger blev oprettet ved foerste besoeg — opret gerne en ekstra, saa du ikke laaser dig ude.</p>
+            <div class="space-y-2">
+                {% for u in users %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs flex justify-between items-center">
+                    <div>
+                        <span class="font-medium">{{ u.username }}</span>
+                        {% if current_user and u.id == current_user.id %}<span class="text-[10px] text-emerald-400 ml-2">dig</span>{% endif %}
+                        <div class="text-zinc-500">Oprettet {{ u.created_at }}</div>
+                    </div>
+                    <form action="/users/delete" method="POST">
+                        <input type="hidden" name="id" value="{{ u.id }}">
+                        <button class="text-zinc-500 hover:text-rose-400">✕</button>
+                    </form>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Opret bruger</h2>
+            <form action="/users/add" method="POST" class="grid grid-cols-1 md:grid-cols-3 gap-2">
+                <input type="text" name="username" placeholder="Brugernavn" required pattern="[A-Za-z0-9._-]{3,32}" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <input type="password" name="password" placeholder="Adgangskode (min. 8 tegn)" required minlength="8" autocomplete="new-password" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Opret bruger</button>
+            </form>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Skift min adgangskode</h2>
+            <form action="/users/password" method="POST" class="grid grid-cols-1 md:grid-cols-4 gap-2">
+                <input type="password" name="current" placeholder="Nuværende" required autocomplete="current-password" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <input type="password" name="new" placeholder="Ny (min. 8 tegn)" required minlength="8" autocomplete="new-password" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <input type="password" name="confirm" placeholder="Gentag ny" required minlength="8" autocomplete="new-password" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Gem</button>
+            </form>
+            <p class="text-[10px] text-zinc-600 mt-2">Ved skift logges dine andre sessioner ud.</p>
+        </div>
+    </section>
+
     <!-- NOTER -->
     <section x-show="tab === 'notes'" class="space-y-4" style="display: none;">
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
@@ -837,8 +906,9 @@
 
 <script>
 function showHistory(domainId, url) {
-    document.getElementById('histcard').style.display = '';
-    document.getElementById('histtitle').textContent = 'Svartid-historik: ' + url;
+    const s = Alpine.$data(document.body);
+    s.histOpen = true;
+    document.getElementById('histtitle').textContent = 'Svartid-historik: ' + (url || '');
     fetch('/api/history/' + domainId).then(r => r.json()).then(data => {
         const ctx = document.getElementById('histchart');
         if (window.histChartInstance) window.histChartInstance.destroy();

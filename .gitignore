@@ -3,3 +3,7 @@ app/data/
 app/static/
 .env
 venv/
+
+# koerselstid (skrives af run.sh / scripts/restart.sh)
+nohup.out
+app/data/cc.pid

@@ -2,7 +2,7 @@
 set -e
 PROJECT_DIR="$HOME/command-center"
 
-echo "⚡ Command Center v7.10 - installerer i $PROJECT_DIR..."
+echo "⚡ Command Center v7.11 - installerer i $PROJECT_DIR..."
 mkdir -p "$PROJECT_DIR/app/templates" "$PROJECT_DIR/app/data" "$PROJECT_DIR/app/static" "$PROJECT_DIR/deploy" "$PROJECT_DIR/scripts"
 echo "📄 requirements.txt..."
 cat << 'EOF_REQ' > "$PROJECT_DIR/requirements.txt"
@@ -18,10 +18,23 @@ EOF_REQ
 
 echo "📄 .env.example..."
 cat << 'EOF_ENVDOT' > "$PROJECT_DIR/.env.example"
-# Command Center v7.1 - kopier til .env og udfyld
-# Login-token for hele dashboardet (OBBLIGATORISK pa VPS!)
-APP_TOKEN=
-JUNO_TOKEN=                              # Junos egen noegle til automatisk API-push (laeg den fra copy-siden her)
+# Command Center v7.11 - kopier til .env og udfyld
+# Login: der er ingen token. Foerste besoeg i browseren opretter din bruger (/setup),
+# derefter logger du ind med brugernavn + adgangskode. Brugere styres under fanen "Brugere".
+# Maskin-noegle til /api/* (bridge-push fra Juno). Valgfri - lad den vaere tom hvis ubrugt.
+JUNO_TOKEN=
+# Hvor run.sh lytter. 127.0.0.1 = kun denne maskine; 0.0.0.0 = ogsaa fra netvaerket (kraever TLS/proxy).
+CC_HOST=127.0.0.1
+CC_PORT=8000
+# Adressen du aabner i browseren bag nginx (bruges kun til at printe den rigtige adresse).
+# Ultra.cc: fx https://<bruger>.<server>.ultra.cc - tom = ingen nginx.
+CC_PUBLIC_URL=
+# Stoler paa X-Forwarded-* fra disse IP'er (nginx paa samme maskine = 127.0.0.1).
+CC_FORWARDED_ALLOW_IPS=127.0.0.1
+# Genstart automatisk efter en GitHub-opdatering (1 = ja, 0 = nej).
+UPDATE_AUTO_RESTART=1
+# Overstyr genstartskommandoen (fx din egen supervisor); tom = brug systemd-unit eller scripts/restart.sh.
+UPDATE_RESTART_CMD=
 # AI-artikler: din aimlapi-noegle
 AIMLAPI_KEY=
 AI_MODEL=google/gemini-3-8-flash
@@ -80,17 +93,51 @@ import io
 import time
 import re
 import hashlib
+import hmac
 import json as jsonlib
 import subprocess
 import sys
+import tarfile
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data", "center.db")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
+try:  # python-dotenv er i requirements, men appen skal ogsaa kunne starte uden
+    from dotenv import load_dotenv as _load_dotenv_file
+except Exception:
+    _load_dotenv_file = None
+
+
+def load_dotenv(path=None):
+    """Laes .env FOER konfigurationen nedenfor - rigtige miljoevariabler vinder.
+
+    Inline-kommentarer (`KEY=   # note`) fjernes ogsaa naar python-dotenv bruges, saa en
+    kommentar fra .env-skabelonen ikke ender som vaerdi (fx et JUNO_TOKEN bestaaende af tekst)."""
+    path = path or os.path.join(os.path.dirname(BASE_DIR), ".env")
+    if not os.path.exists(path):
+        return
+    entries = []
+    for line in open(path):
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        entries.append((key.strip(), val.strip(), val.split(" #")[0].strip()))
+    if _load_dotenv_file is not None:
+        _load_dotenv_file(path, override=False)
+    for key, raw, cleaned in entries:
+        current = os.environ.get(key)
+        if current is None:
+            os.environ[key] = cleaned            # ikke sat (fallback uden python-dotenv)
+        elif current.strip() == raw:
+            os.environ[key] = cleaned            # python-dotenv tog inline-kommentaren med
+
+
+load_dotenv()
+
 # --- Konfiguration via miljoevariabler / .env ---
-APP_TOKEN = os.environ.get("APP_TOKEN", "").strip()          # login-token (tom = ingen auth, lokal tilstand)
-JUNO_TOKEN = os.environ.get("JUNO_TOKEN", "").strip()
+JUNO_TOKEN = os.environ.get("JUNO_TOKEN", "").strip()        # maskin-noegle til /api/* (valgfri)
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()     # GitHub-token: pull-bro + selv-opdatering
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "humle93/command-center").strip()
 BRIDGE_POLL_MINUTES = int(os.environ.get("BRIDGE_POLL_MINUTES", "60"))  # hvor ofte CC henter bridge-filer
@@ -107,7 +154,7 @@ SSL_WARN_DAYS = int(os.environ.get("SSL_WARN_DAYS", "30"))
 LINKCHECK_LIMIT = int(os.environ.get("LINKCHECK_LIMIT", "25"))
 PSI_API_KEY = os.environ.get("PSI_API_KEY", "").strip()   # Google PageSpeed API (gratis noegle)
 
-APP_VERSION = "7.10.0"
+APP_VERSION = "7.11.0"
 app = FastAPI(title="Command Center Engine", version=APP_VERSION)
 # Git does not keep empty folders, so a fresh clone has no app/static: create it or startup fails.
 os.makedirs(STATIC_DIR, exist_ok=True)
@@ -116,29 +163,6 @@ templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 scheduler = AsyncIOScheduler(timezone="Europe/Copenhagen")
 executor = ThreadPoolExecutor(max_workers=8)
 
-
-def load_dotenv(path=None):
-    path = path or os.path.join(os.path.dirname(BASE_DIR), ".env")
-    if not os.path.exists(path):
-        return
-    for line in open(path):
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        os.environ.setdefault(key.strip(), val.strip())
-
-
-load_dotenv()
-APP_TOKEN = os.environ.get("APP_TOKEN", "").strip()
-AIMLAPI_KEY = os.environ.get("AIMLAPI_KEY", "").strip()
-WP_URL = os.environ.get("WP_URL", "").strip()
-WP_USER = os.environ.get("WP_USER", "").strip()
-WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "").strip()
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "").strip()
-TRACK_DOMAIN = os.environ.get("TRACK_DOMAIN", "steamgears.eu").strip()
 
 
 _WAL_SET = False
@@ -367,6 +391,19 @@ def init_db():
             top_domains TEXT,
             created_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            created_at TEXT,
+            last_seen TEXT,
+            expires_at TEXT
+        );
         """)
 
 
@@ -394,6 +431,7 @@ def migrate_db():
             "articles": ["meta_title", "meta_desc"],
             "seopages": ["content_hash", "redirects"],
             "crawl_runs": ["sitemap_broken", "sitemap_missing"],
+            "monitors": ["last_value"],
         }.items():
             existing = [r[1] for r in db.execute(f"PRAGMA table_info({table})").fetchall()]
             for c in want:
@@ -453,48 +491,198 @@ def set_module(name: str, state: str):
 
 
 def cleanup_old_data():
-    """Daglig oprydning: gamle maalinger rulles af, DB holdes sund."""
+    """Daglig oprydning: gamle maalinger rulles af, DB holdes sund.
+
+    Tidspunkter gemmes som lokal ISO-tid (now_iso), saa cutoff skal regnes i Python -
+    SQLite's datetime('now') er UTC og rammer derfor forkert."""
+    now = datetime.now()
+
+    def cutoff(days):
+        return (now - timedelta(days=days)).isoformat(timespec="seconds")
+
     with get_db() as db:
-        db.execute("DELETE FROM check_history WHERE checked_at < datetime('now', '-90 days')")
-        db.execute("DELETE FROM alarms WHERE resolved=1 AND created_at < datetime('now', '-30 days')")
-        db.execute("DELETE FROM health_history WHERE checked_at < datetime('now', '-180 days')")
-        db.execute("DELETE FROM keyword_ideas WHERE created_at < datetime('now', '-180 days')")
+        db.execute("DELETE FROM check_history WHERE checked_at < ?", (cutoff(90),))
+        db.execute("DELETE FROM alarms WHERE resolved=1 AND created_at < ?", (cutoff(30),))
+        db.execute("DELETE FROM health_history WHERE checked_at < ?", (cutoff(180),))
+        db.execute("DELETE FROM keyword_ideas WHERE created_at < ?", (cutoff(180),))
 
 
-# ---------- Auth ----------
+# ---------- Auth: brugere, sessioner og Juno-token ----------
+# Dashboardet har rigtige brugere: brugernavn + adgangskode (PBKDF2-SHA256 med salt pr. bruger).
+# Foerste besoeg opretter den foerste bruger via /setup - der er ingen delt token i .env.
+# JUNO_TOKEN findes stadig som maskin-noegle, men giver KUN adgang til /api/* (bridge-push fra Juno).
+SESSION_COOKIE = "cc_session"
+SESSION_MAX_AGE = 60 * 60 * 24 * 30        # 30 dage
+PBKDF2_ITERATIONS = 240_000
+MIN_PASSWORD_LEN = 8
+_USERNAME_RE = re.compile(r"[A-Za-z0-9._-]{3,32}")
+
+_LOGIN_FAILS: dict = {}  # IP -> (antal fejl, laas-til)
+_LOGIN_MAX_FAILS = 5
+_LOGIN_LOCK_SECONDS = 600
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", (password or "").encode(), salt, PBKDF2_ITERATIONS)
+    return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        algo, iterations, salt_hex, digest_hex = (stored or "").split("$")
+        if algo != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac("sha256", (password or "").encode(), bytes.fromhex(salt_hex), int(iterations))
+        return hmac.compare_digest(digest.hex(), digest_hex)
+    except Exception:
+        return False
+
+
+def _session_key(sid: str) -> str:
+    """Sessioner gemmes som sha256(id), saa en kopi af databasen ikke giver adgang."""
+    return hashlib.sha256((sid or "").encode()).hexdigest()
+
+
+def user_count() -> int:
+    try:
+        with get_db() as db:
+            return db.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+    except Exception:
+        return 0
+
+
+def create_user(username: str, password: str) -> int:
+    username = (username or "").strip()
+    if not _USERNAME_RE.fullmatch(username):
+        raise ValueError("Brugernavn: 3-32 tegn (a-z, 0-9, punktum, bindestreg, underscore)")
+    if len(password or "") < MIN_PASSWORD_LEN:
+        raise ValueError(f"Adgangskoden skal vaere mindst {MIN_PASSWORD_LEN} tegn")
+    with get_db() as db:
+        cur = db.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?,?,?)",
+                         (username, hash_password(password), now_iso()))
+        return cur.lastrowid
+
+
+def start_session(user_id: int) -> str:
+    sid = secrets.token_urlsafe(32)
+    expires = (datetime.now() + timedelta(seconds=SESSION_MAX_AGE)).isoformat(timespec="seconds")
+    with get_db() as db:
+        db.execute("DELETE FROM sessions WHERE expires_at < ?", (now_iso(),))
+        db.execute("INSERT INTO sessions (id, user_id, created_at, last_seen, expires_at) VALUES (?,?,?,?,?)",
+                   (_session_key(sid), user_id, now_iso(), now_iso(), expires))
+    return sid
+
+
+def end_session(sid: str):
+    if sid:
+        with get_db() as db:
+            db.execute("DELETE FROM sessions WHERE id=?", (_session_key(sid),))
+
+
+def session_redirect(request: Request, sid: str) -> RedirectResponse:
+    resp = RedirectResponse("/", status_code=303)
+    resp.set_cookie(SESSION_COOKIE, sid, httponly=True, samesite="lax",
+                    max_age=SESSION_MAX_AGE, secure=request.url.scheme == "https")
+    return resp
+
+
+def current_user(request: Request):
+    """Brugeren bag session-cookien (eller None)."""
+    sid = request.cookies.get(SESSION_COOKIE) or ""
+    if not sid:
+        return None
+    key = _session_key(sid)
+    try:
+        with get_db() as db:
+            row = db.execute(
+                "SELECT u.id, u.username, s.expires_at FROM sessions s "
+                "JOIN users u ON u.id = s.user_id WHERE s.id=?", (key,)
+            ).fetchone()
+            if not row:
+                return None
+            if (row["expires_at"] or "") < now_iso():
+                db.execute("DELETE FROM sessions WHERE id=?", (key,))
+                return None
+            db.execute("UPDATE sessions SET last_seen=? WHERE id=?", (now_iso(), key))
+            return {"id": row["id"], "username": row["username"]}
+    except Exception:
+        return None
+
+
 def is_authed(request: Request) -> bool:
-    if not APP_TOKEN:
-        return True
-    # Constant-time comparison so the token cannot be guessed from response timing.
-    supplied = request.cookies.get("cc_token") or request.headers.get("x-cc-token") or ""
-    return secrets.compare_digest(supplied, APP_TOKEN)
+    """Er kaldet lavet af en logget-ind bruger? (Juno-token haandteres af middlewaren.)"""
+    return bool(getattr(request.state, "user", None))
 
 
 def is_juno(request: Request) -> bool:
-    """Juno-adgang: separat token, gyldig KUN for /api/*-endpoints (laese-data + bridge-push)."""
-    return bool(JUNO_TOKEN) and request.headers.get("x-cc-token") == JUNO_TOKEN
+    """Juno-adgang: separat maskin-noegle, gyldig KUN for /api/*-endpoints."""
+    supplied = request.headers.get("x-cc-token") or ""
+    return bool(JUNO_TOKEN) and secrets.compare_digest(supplied, JUNO_TOKEN)
 
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
-    request.state.insecure = (request.headers.get("x-forwarded-proto", "https") == "http" and (request.client.host if request.client else "") not in ("127.0.0.1", "::1"))
-    public = ("/login", "/health", "/static")
-    if APP_TOKEN and not any(path.startswith(p) for p in public) and not is_authed(request):
-        if path.startswith("/api/") and is_juno(request):
+    host = request.client.host if request.client else ""
+    # scheme er allerede X-Forwarded-Proto-resolveret af uvicorn/starlette.
+    request.state.insecure = request.url.scheme == "http" and host not in ("127.0.0.1", "::1", "localhost")
+    request.state.user = current_user(request)
+    if any(path.startswith(p) for p in ("/login", "/setup", "/health", "/static")):
+        return await call_next(request)
+    if request.state.user:
+        return await call_next(request)
+    if path.startswith("/api/"):
+        if is_juno(request):
             juno_forbidden = ("/api/bridge", "/api/duplicates", "/api/visibility", "/api/health-history")
-            if request.method != "GET" and any(path.startswith(fp) for fp in juno_forbidden) and not (path == "/api/bridge/gsc" or path == "/api/bridge/drift"):
-                return JSONResponse({"error": "juno-token: kun GET eller bridge-push"}, status_code=403)  # Juno-token har adgang til API-endpoints (inkl. bridge-push)
-        elif path.startswith("/api/"):
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
-        else:
-            return RedirectResponse("/login", status_code=303)
-    return await call_next(request)
+            if request.method != "GET" and any(path.startswith(fp) for fp in juno_forbidden) \
+                    and path not in ("/api/bridge/gsc", "/api/bridge/drift"):
+                return JSONResponse({"error": "juno-token: kun GET eller bridge-push"}, status_code=403)
+            return await call_next(request)
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return RedirectResponse("/setup" if user_count() == 0 else "/login", status_code=303)
+
+
+@app.get("/setup", response_class=HTMLResponse)
+async def setup_page(request: Request):
+    if user_count() > 0:
+        return RedirectResponse("/login", status_code=303)
+    return templates.TemplateResponse("login.html", {"request": request, "mode": "setup", "error": "", "username": ""})
+
+
+@app.post("/setup")
+async def setup_user(request: Request):
+    """Foerste start: opret den foerste bruger (kun naar der ikke findes brugere)."""
+    if user_count() > 0:
+        return RedirectResponse("/login", status_code=303)
+    form = await request.form()
+    username = (form.get("username") or "").strip()
+    password = form.get("password") or ""
+    confirm = form.get("confirm") or ""
+    err = ""
+    user_id = None
+    if password != confirm:
+        err = "De to adgangskoder er ikke ens"
+    else:
+        try:
+            user_id = create_user(username, password)
+        except ValueError as e:
+            err = str(e)
+        except sqlite3.IntegrityError:
+            err = "Brugernavnet er allerede taget"
+    if not user_id:
+        return templates.TemplateResponse("login.html", {"request": request, "mode": "setup",
+                                                         "username": username, "error": err}, status_code=400)
+    with get_db() as db:
+        add_alarm(db, "brugere", f"Foerste bruger '{username}' oprettet", "info")
+    return session_redirect(request, start_session(user_id))
 
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request, "error": ""})
+    if user_count() == 0:
+        return RedirectResponse("/setup", status_code=303)
+    return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "error": "", "username": ""})
 
 
 @app.post("/login")
@@ -503,30 +691,80 @@ async def login(request: Request):
     now = time.time()
     fails, locked_until = _LOGIN_FAILS.get(ip, (0, 0.0))
     if locked_until > now:
-        return templates.TemplateResponse("login.html", {"request": request, "error": "For mange fejlede login - proev igen om " + str(int(locked_until - now)) + " sek."}, status_code=429)
+        return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "username": "",
+                                                         "error": "For mange fejlede logins - proev igen om " + str(int(locked_until - now)) + " sek."}, status_code=429)
     form = await request.form()
-    token = (form.get("token") or "").strip()
-    if APP_TOKEN and secrets.compare_digest(token, APP_TOKEN):
-        resp = RedirectResponse("/", status_code=303)
-        resp.set_cookie("cc_token", token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30)
+    username = (form.get("username") or "").strip()
+    password = form.get("password") or ""
+    with get_db() as db:
+        user = db.execute("SELECT id, username, password_hash FROM users WHERE username=?", (username,)).fetchone()
+    if user and verify_password(password, user["password_hash"]):
         _LOGIN_FAILS.pop(ip, None)
-        return resp
+        return session_redirect(request, start_session(user["id"]))
     fails += 1
-    if fails >= 5:
-        _LOGIN_FAILS[ip] = (0, now + 600)  # 5 fejl = 10 min laas
-    else:
-        _LOGIN_FAILS[ip] = (fails, locked_until)
-    return templates.TemplateResponse("login.html", {"request": request, "error": "Forkert token"}, status_code=401)
+    _LOGIN_FAILS[ip] = (0, now + _LOGIN_LOCK_SECONDS) if fails >= _LOGIN_MAX_FAILS else (fails, locked_until)
+    if len(_LOGIN_FAILS) > 2000:  # undgaa at listen vokser ubegraenset
+        _LOGIN_FAILS.clear()
+    return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "username": username,
+                                                     "error": "Forkert brugernavn eller adgangskode"}, status_code=401)
 
 
 @app.get("/logout")
-async def logout():
+async def logout(request: Request):
+    end_session(request.cookies.get(SESSION_COOKIE) or "")
     resp = RedirectResponse("/login", status_code=303)
-    resp.delete_cookie("cc_token")
+    resp.delete_cookie(SESSION_COOKIE)
     return resp
 
 
-_LOGIN_FAILS: dict = {}  # v7.9: IP -> (antal fejl, laas-til)
+@app.post("/users/add")
+async def users_add(username: str = Form(...), password: str = Form(...)):
+    try:
+        create_user(username, password)
+    except ValueError as e:
+        with get_db() as db:
+            add_alarm(db, "brugere", f"Kunne ikke oprette bruger '{username}': {str(e)[:120]}", "advarsel")
+    except sqlite3.IntegrityError:
+        with get_db() as db:
+            add_alarm(db, "brugere", f"Kunne ikke oprette bruger '{username}': navnet er optaget", "advarsel")
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/users/delete")
+async def users_delete(request: Request, id: int = Form(...)):
+    me = getattr(request.state, "user", None)
+    with get_db() as db:
+        total = db.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+        if total <= 1:
+            add_alarm(db, "brugere", "Den sidste bruger kan ikke slettes - opret en ny bruger foerst", "advarsel")
+            return RedirectResponse("/", status_code=303)
+        db.execute("DELETE FROM sessions WHERE user_id=?", (id,))
+        db.execute("DELETE FROM users WHERE id=?", (id,))
+    if me and me["id"] == id:
+        resp = RedirectResponse("/login", status_code=303)
+        resp.delete_cookie(SESSION_COOKIE)
+        return resp
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/users/password")
+async def users_password(request: Request, current: str = Form(...), new: str = Form(...), confirm: str = Form("")):
+    me = getattr(request.state, "user", None)
+    if not me:
+        return RedirectResponse("/login", status_code=303)
+    with get_db() as db:
+        row = db.execute("SELECT password_hash FROM users WHERE id=?", (me["id"],)).fetchone()
+        if not row or not verify_password(current, row["password_hash"]):
+            add_alarm(db, "brugere", f"Fejlet adgangskode-skift for '{me['username']}'", "info")
+            return RedirectResponse("/", status_code=303)
+        if new != confirm or len(new) < MIN_PASSWORD_LEN:
+            add_alarm(db, "brugere", f"Adgangskode-skift afvist for '{me['username']}': mindst {MIN_PASSWORD_LEN} tegn og ens i begge felter", "info")
+            return RedirectResponse("/", status_code=303)
+        db.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(new), me["id"]))
+        # Log de andre sessioner ud, behold denne.
+        db.execute("DELETE FROM sessions WHERE user_id=? AND id<>?",
+                   (me["id"], _session_key(request.cookies.get(SESSION_COOKIE) or "")))
+    return RedirectResponse("/", status_code=303)
 
 
 # ---------- Hjaelpere ----------
@@ -651,7 +889,7 @@ def check_domain_sync(url: str):
         ssl_days = None
         if url.startswith("https://"):
             try:
-                host = urlparse(url).netloc
+                host = urlparse(url).hostname or ""  # netloc kan indeholde port -> socket fejler
                 context = ssl.create_default_context()
                 with socket.create_connection((host, 443), timeout=4) as sock:
                     with context.wrap_socket(sock, server_hostname=host) as ssock:
@@ -702,7 +940,7 @@ def check_all_domains_sync():
 
 @app.post("/domains/check")
 async def check_all_domains():
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(executor, check_all_domains_sync)
     return RedirectResponse("/", status_code=303)
 
@@ -943,7 +1181,7 @@ async def run_seo_audit(request: Request):
     keyword = form.get("keyword", "")
     use_psi = form.get("psi", "") == "1"
     level = form.get("level", "standard")
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(executor, analyze_page, url, keyword)
     result["url"] = url
     result["level"] = level
@@ -960,7 +1198,7 @@ async def run_seo_audit(request: Request):
         if not use_psi and PSI_API_KEY:
             use_psi = True  # dyb scan koerer automatisk Core Web Vitals
     if use_psi:
-        loop2 = asyncio.get_event_loop()
+        loop2 = asyncio.get_running_loop()
         psi = await loop2.run_in_executor(executor, psi_fetch, url)
         if psi:
             result["psi"] = psi
@@ -975,9 +1213,15 @@ def site_crawl_sync(start_url: str, max_pages: int = 30):
     try:
         start_url = normalize_url(start_url)
         host = urlparse(start_url).netloc
+        # Behold det seneste crawl, saa crawl-diff kan sammenligne med det nye; ryd alt aeldre.
         with get_db() as db:
-            db.execute("DELETE FROM seopages")
-            db.execute("DELETE FROM crawl_runs")
+            keep = [r["id"] for r in db.execute("SELECT id FROM crawl_runs ORDER BY id DESC LIMIT 1").fetchall()]
+            if keep:
+                marks = ",".join("?" * len(keep))
+                db.execute(f"DELETE FROM seopages WHERE run_id NOT IN ({marks})", keep)
+                db.execute(f"DELETE FROM crawl_runs WHERE id NOT IN ({marks})", keep)
+            else:
+                db.execute("DELETE FROM seopages")
         # robots.txt + sitemap.xml
         robots_ok = sitemap_ok = False
         sitemap_count = 0
@@ -1015,8 +1259,8 @@ def site_crawl_sync(start_url: str, max_pages: int = 30):
                 t0 = datetime.now()
                 resp = safe_request(current, timeout=10)
                 ms = int((datetime.now() - t0).total_seconds() * 1000)
-                res = analyze_page(current, "", html=resp.text if resp.status_code == 200 else None,
-                                   status_code=resp.status_code, ms=ms)
+                # html videregives altid, saa analyze_page ikke henter siden igen ved 4xx/5xx.
+                res = analyze_page(current, "", html=resp.text or "", status_code=resp.status_code, ms=ms)
                 status = resp.status_code
             except Exception:
                 res = {"score": 0, "title": "", "meta": "", "h1": "", "words": 0, "raw": []}
@@ -1105,7 +1349,7 @@ async def start_crawl(url: str = Form(...), max_pages: int = Form(30), level: st
     if preset:
         max_pages = preset
     max_pages = max(5, min(int(max_pages or 30), 100))
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     loop.run_in_executor(executor, site_crawl_sync, url, max_pages)
     return RedirectResponse("/", status_code=303)
 
@@ -1157,7 +1401,10 @@ async def gen_sitemap():
 @app.get("/api/redirects")
 async def redirect_audit():
     with get_db() as db:
-        rows = db.execute("SELECT url, redirects, http_status FROM seopages WHERE redirects != ''").fetchall()
+        rows = db.execute(
+            "SELECT url, redirects, http_status FROM seopages WHERE redirects != '' "
+            "AND run_id=(SELECT id FROM crawl_runs ORDER BY id DESC LIMIT 1)"
+        ).fetchall()
     chains = []
     loops = []
     insecure = []
@@ -1215,7 +1462,7 @@ async def discover(keyword: str = Form(...)):
     keyword = keyword.strip()
     if not keyword:
         return RedirectResponse("/", status_code=303)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(executor, discover_competitors_sync, keyword)
     return RedirectResponse("/", status_code=303)
 
@@ -1389,7 +1636,7 @@ async def create_article(keyword: str = Form(...)):
     err = None
     if AIMLAPI_KEY:
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             st_active = get_active_strategy()
             content = await loop.run_in_executor(executor, generate_article_ai, keyword, st_active)
             title = f"Guide: {keyword}"
@@ -1577,7 +1824,7 @@ def autopilot_sync():
 
 
 async def run_autopilot():
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(executor, autopilot_sync)
     return RedirectResponse("/", status_code=303)
 
@@ -1662,7 +1909,7 @@ def prospect_sync(keyword: str):
 async def backlink_prospect(keyword: str = Form(...)):
     keyword = keyword.strip()
     if keyword:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(executor, prospect_sync, keyword)
     return RedirectResponse("/", status_code=303)
 
@@ -1708,7 +1955,7 @@ def check_links_sync(url: str):
 
 @app.post("/links/check")
 async def check_page_links(url: str = Form(...)):
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(executor, check_links_sync, url)
     with get_db() as db:
         db.execute(
@@ -1842,12 +2089,12 @@ def sgap_sync() -> dict:
 async def job_sgap_sync():
     if not sgap_ready():
         return
-    await asyncio.get_event_loop().run_in_executor(executor, sgap_sync)
+    await asyncio.get_running_loop().run_in_executor(executor, sgap_sync)
 
 
 @app.post("/autopilot/sync")
 async def autopilot_sync_now():
-    await asyncio.get_event_loop().run_in_executor(executor, sgap_sync)
+    await asyncio.get_running_loop().run_in_executor(executor, sgap_sync)
     return RedirectResponse("/", status_code=303)
 
 
@@ -1871,7 +2118,7 @@ async def social_to_autopilot(id: int = Form(...)):
         return sgap_api("POST", "/drafts", json={"channel": channel, "title": title, "body": message, "ai_model": "command-center"})
 
     try:
-        result = await asyncio.get_event_loop().run_in_executor(executor, send)
+        result = await asyncio.get_running_loop().run_in_executor(executor, send)
         with get_db() as db:
             db.execute("UPDATE socialqueue SET status=? WHERE id=?", (f"sendt til autopilot (kladde #{result.get('id')})", id))
     except Exception as e:
@@ -1954,7 +2201,7 @@ async def delete_keyword(id: int = Form(...)):
 
 @app.post("/keywords/check")
 async def check_keywords():
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(executor, check_all_keywords_sync)
     return RedirectResponse("/", status_code=303)
 
@@ -1983,7 +2230,7 @@ def ingest_gsc_data(db, data):
             "INSERT INTO gsc_queries (day, query, clicks, impressions, position) VALUES (?,?,?,?,?) "
             "ON CONFLICT(day, query) DO UPDATE SET clicks=excluded.clicks, "
             "impressions=excluded.impressions, position=excluded.position",
-            (data.get("date", date.today().isoformat()), q.get("query", ""), q.get("clicks", ""),
+            (data.get("date", date.today().isoformat()), q.get("query", ""), q.get("clicks", 0),
              q.get("impressions", 0), q.get("position", 0)),
         )
     return len(days), len(queries)
@@ -2086,7 +2333,7 @@ def startup_selftest_sync():
             db.execute("DELETE FROM _selftest")
     except Exception as e:
         fejl.append("DB-skrivetest: " + str(e)[:80])
-    if APP_TOKEN and not AIMLAPI_KEY:
+    if user_count() and not AIMLAPI_KEY:
         fejl.append("AIMLAPI_KEY mangler - AI-artikler vil fejle")
     if ruter < 40:
         fejl.append("Kun " + str(ruter) + " ruter registreret (forventet 50+)")
@@ -2104,57 +2351,303 @@ def startup_selftest_sync():
 
 
 async def job_backup_db():
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(executor, backup_db_sync)
-
-
-def self_update_sync():
-    try:
-        if sys.platform.startswith("win"):
-            # v7.9: self-update bruger bash-installeren (Linux/macOS). Paa Windows: opdater manuelt.
-            with get_db() as db:
-                add_alarm(db, "self-update", "Self-update er ikke understoettet paa Windows endnu - opdater manuelt via git pull eller ny install.sh", "advarsel")
-            return False
-        backup_db_sync(tag="pre-update")  # rollback-punkt foer nye filer skrives
-        headers = {"Authorization": "Bearer " + GITHUB_TOKEN, "Accept": "application/vnd.github.raw"}
-        r = HTTP.get(f"https://api.github.com/repos/{GITHUB_REPO}/contents/install.sh", headers=headers, timeout=30)
-        r.raise_for_status()
-        script_path = os.path.join(os.path.dirname(BASE_DIR), "install.sh")
-        with open(script_path, "w") as f:
-            f.write(r.text)
-        subprocess.Popen(["bash", script_path], cwd=os.path.dirname(script_path))
-        return True
-    except Exception as e:
-        with get_db() as db:
-            add_alarm(db, "self-update", "Selv-opdatering fejlede: " + str(e)[:120], "advarsel")
-        return False
 
 
 @app.post("/self-update")
 async def self_update():
+    """Bevaret for gamle bogmaerker: koerer GitHub-opdateringen (backup + filsynk)."""
+    return await update_apply_now()
+
+
+# ---------- Opdatering fra GitHub (repo-synk, ikke remote shell) ----------
+# Henter tarballen for seneste commit paa main og skriver kun whitelistede projektfiler.
+# Der laves DB-backup foer hver opdatering, og appen skal genstartes bagefter.
+UPDATE_PATHS = (
+    "app/", "scripts/", "deploy/", "requirements.txt", "README.md", "run.sh", "run.bat",
+    "install.sh", "Dockerfile", "docker-compose.yml", ".env.example",
+)
+
+
+def _gh_headers(accept: str = "application/vnd.github+json") -> dict:
+    headers = {"Accept": accept, "User-Agent": f"CommandCenter/{APP_VERSION}"}
     if GITHUB_TOKEN:
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(executor, self_update_sync)
+        headers["Authorization"] = "Bearer " + GITHUB_TOKEN
+    return headers
+
+
+def deployed_commit() -> str:
+    """Installeret commit (fra settings, ellers fra git-historikken - som saa gemmes)."""
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT value FROM settings WHERE key='deployed_commit'").fetchone()
+        if row and row["value"]:
+            return row["value"]
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(["git", "-C", os.path.dirname(BASE_DIR), "rev-parse", "HEAD"],
+                             capture_output=True, text=True, timeout=5)
+        sha = out.stdout.strip() if out.returncode == 0 else ""
+        if sha:
+            with get_db() as db:
+                db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('deployed_commit', ?)", (sha,))
+            return sha
+    except Exception:
+        pass
+    return ""
+
+
+def update_check_sync() -> dict:
+    """Sammenligner installeret commit med seneste commit paa main."""
+    result = {"ok": False, "current": deployed_commit(), "latest": "", "behind": False,
+              "date": "", "message": "", "url": "", "error": ""}
+    if not GITHUB_TOKEN:
+        result["error"] = "GITHUB_TOKEN mangler - opdatering fra GitHub kraever adgang til repoet"
+        return result
+    try:
+        r = HTTP.get(f"https://api.github.com/repos/{GITHUB_REPO}/commits",
+                     params={"sha": "main", "per_page": 1}, headers=_gh_headers(), timeout=20)
+        if r.status_code in (401, 403):
+            result["error"] = "GitHub afviste adgang (401/403) - tjek GITHUB_TOKEN"
+            return result
+        if r.status_code == 404:
+            result["error"] = f"Repoet {GITHUB_REPO} blev ikke fundet - tjek GITHUB_REPO"
+            return result
+        r.raise_for_status()
+        commits = r.json()
+        if not isinstance(commits, list) or not commits:
+            result["error"] = "Ingen commits fundet paa main"
+            return result
+        commit = commits[0]
+        info = commit.get("commit") or {}
+        result["latest"] = commit.get("sha", "")
+        result["date"] = (info.get("author") or {}).get("date", "")
+        result["message"] = (info.get("message") or "").splitlines()[0][:200]
+        result["url"] = commit.get("html_url", "")
+        result["behind"] = bool(result["latest"] and result["latest"] != result["current"])
+        result["ok"] = True
+    except Exception as e:
+        result["error"] = "Opdaterings-tjek fejlede: " + str(e)[:150]
+    return result
+
+
+def _safe_extract(tar, dest: str):
+    """Pak kun whitelistede filer ud - ingen .., absolutte stier eller links."""
+    written = []
+    for member in tar.getmembers():
+        if not member.isfile():
+            continue
+        parts = member.name.split("/", 1)      # GitHub-tarball: <owner>-<repo>-<sha>/<sti>
+        if len(parts) != 2:
+            continue
+        rel = parts[1]
+        if rel.startswith("/") or ".." in rel.split("/"):
+            continue
+        if not any(rel == p or rel.startswith(p) for p in UPDATE_PATHS):
+            continue
+        source = tar.extractfile(member)
+        if source is None:
+            continue
+        target = os.path.join(dest, rel)
+        os.makedirs(os.path.dirname(target) or dest, exist_ok=True)
+        with open(target, "wb") as fh:
+            shutil.copyfileobj(source, fh)
+        written.append(rel)
+    return written
+
+
+def _install_requirements() -> dict:
+    """Koer pip install -r requirements.txt i projektets venv efter en opdatering."""
+    project = os.path.dirname(BASE_DIR)
+    requirements = os.path.join(project, "requirements.txt")
+    pip = os.path.join(project, "venv", "bin", "pip")
+    if not os.path.exists(pip):
+        pip = shutil.which("pip3") or shutil.which("pip") or ""
+    if not pip:
+        return {"ok": False, "output": "pip blev ikke fundet - koer 'pip install -r requirements.txt' selv"}
+    try:
+        proc = subprocess.run([pip, "install", "-q", "-r", requirements],
+                              capture_output=True, text=True, timeout=300, cwd=project)
+        output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+        return {"ok": proc.returncode == 0, "output": output[-400:]}
+    except Exception as e:
+        return {"ok": False, "output": str(e)[:200]}
+
+
+def restart_mode() -> str:
+    """Hvordan appen kan genstartes her: custom, systemd-user, systemd, script eller manual."""
+    if os.environ.get("UPDATE_RESTART_CMD"):
+        return "custom"
+    try:
+        if subprocess.run(["systemctl", "--user", "cat", "command-center"],
+                          capture_output=True, timeout=5).returncode == 0:
+            return "systemd-user"
+    except Exception:
+        pass
+    try:
+        if subprocess.run(["systemctl", "cat", "command-center"],
+                          capture_output=True, timeout=5).returncode == 0:
+            return "systemd"
+    except Exception:
+        pass
+    return "script" if os.path.exists(os.path.join(os.path.dirname(BASE_DIR), "scripts", "restart.sh")) else "manual"
+
+
+def schedule_restart(delay: float = 1.5) -> dict:
+    """Planlaeg genstart EFTER HTTP-svaret er sendt (systemd-unit eller scripts/restart.sh).
+
+    Kan slaa s fra med UPDATE_AUTO_RESTART=0; UPDATE_RESTART_CMD overstyrer kommandoen."""
+    mode = restart_mode()
+    if os.environ.get("UPDATE_AUTO_RESTART", "1") in ("0", "false", "no"):
+        return {"scheduled": False, "mode": mode, "reason": "UPDATE_AUTO_RESTART=0"}
+    project = os.path.dirname(BASE_DIR)
+    script = os.path.join(project, "scripts", "restart.sh")
+    try:
+        if os.environ.get("UPDATE_RESTART_CMD"):
+            cmd = ["bash", "-lc", f"sleep {delay}; {os.environ['UPDATE_RESTART_CMD']}"]
+        elif os.path.exists(script):
+            cmd = ["bash", script, "--delay", str(delay)]
+        elif mode == "systemd-user":
+            cmd = ["bash", "-lc", f"sleep {delay}; systemctl --user restart command-center"]
+        elif mode == "systemd":
+            cmd = ["bash", "-lc", f"sleep {delay}; systemctl restart command-center"]
+        else:
+            return {"scheduled": False, "mode": mode,
+                    "reason": "ingen systemd-unit og ingen scripts/restart.sh - genstart manuelt"}
+        subprocess.Popen(cmd, cwd=project, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        return {"scheduled": True, "mode": mode}
+    except Exception as e:
+        return {"scheduled": False, "mode": mode, "reason": str(e)[:150]}
+
+
+def update_apply_sync() -> dict:
+    """Backup + hent seneste tarball + skriv whitelistede filer + requirements. Genstart bagefter."""
+    if not GITHUB_TOKEN:
+        return {"ok": False, "error": "GITHUB_TOKEN mangler - opdatering fra GitHub kraever adgang til repoet"}
+    check = update_check_sync()
+    if not check["ok"]:
+        return {"ok": False, "error": check["error"]}
+    ref = check["latest"] or "main"
+    try:
+        backup_db_sync(tag="pre-update")       # rollback-punkt foer nye filer skrives
+        r = HTTP.get(f"https://api.github.com/repos/{GITHUB_REPO}/tarball/{ref}",
+                     headers=_gh_headers(), timeout=120)
+        r.raise_for_status()
+        with tarfile.open(fileobj=io.BytesIO(r.content), mode="r:gz") as tar:
+            written = _safe_extract(tar, os.path.dirname(BASE_DIR))
+        if not written:
+            return {"ok": False, "error": "Tarballen indeholdt ingen kendte projektfiler"}
+        requirements_changed = "requirements.txt" in written
+        requirements_install = _install_requirements() if requirements_changed else {"ok": True, "output": "uaendret"}
+        with get_db() as db:
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('deployed_commit', ?)", (ref,))
+            add_alarm(db, "opdatering", f"Hentede {ref[:7]} fra GitHub ({len(written)} filer) - genstart appen", "info")
+        return {"ok": True, "error": "", "current": check["current"], "latest": ref, "behind": False,
+                "files": written, "needs_restart": True,
+                "requirements_changed": requirements_changed,
+                "requirements_install": requirements_install}
+    except Exception as e:
+        return {"ok": False, "error": "Opdatering fejlede: " + str(e)[:180]}
+
+
+@app.get("/api/update")
+async def api_update():
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key='github_update'").fetchone()
+    cached = {}
+    try:
+        cached = jsonlib.loads(row["value"]) if row and row["value"] else {}
+    except Exception:
+        cached = {}
+    return JSONResponse({"current": deployed_commit(), "repo": GITHUB_REPO,
+                         "token": bool(GITHUB_TOKEN), "restart_mode": restart_mode(),
+                         "auto_restart": os.environ.get("UPDATE_AUTO_RESTART", "1") not in ("0", "false", "no"),
+                         "last_check": cached})
+
+
+@app.post("/update/check")
+async def update_check_now():
+    result = await asyncio.get_running_loop().run_in_executor(executor, update_check_sync)
+    with get_db() as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('github_update', ?)",
+                   (jsonlib.dumps(result),))
+        if not result["ok"]:
+            add_alarm(db, "opdatering", "Tjek for nye commits fejlede: " + result["error"], "advarsel")
+        elif result["behind"]:
+            add_alarm(db, "opdatering", f"Ny version paa GitHub: {result['latest'][:7]} - {result['message']}", "info")
     return RedirectResponse("/", status_code=303)
+
+
+def store_update_result(result: dict):
+    with get_db() as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('github_update', ?)",
+                   (jsonlib.dumps(result),))
+        if not result.get("ok"):
+            add_alarm(db, "opdatering", result.get("error", "ukendt fejl"), "advarsel")
+
+
+@app.post("/update/apply")
+async def update_apply_now(restart: str = Form("1")):
+    result = await asyncio.get_running_loop().run_in_executor(executor, update_apply_sync)
+    if result.get("ok"):
+        result["restart"] = (schedule_restart() if restart == "1"
+                             else {"scheduled": False, "mode": restart_mode(), "reason": "genstart fravalgt"})
+    store_update_result(result)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/api/update/check")
+async def api_update_check():
+    """Maskin-endpoint til scripts/update.sh - samme tjek som knappen, men JSON."""
+    result = await asyncio.get_running_loop().run_in_executor(executor, update_check_sync)
+    store_update_result(result)
+    return JSONResponse(result)
+
+
+@app.post("/api/update/apply")
+async def api_update_apply(request: Request):
+    """Maskin-endpoint: hent filer, installér requirements og genstart (medmindre restart=0)."""
+    restart = request.query_params.get("restart", "1") not in ("0", "false", "no")
+    result = await asyncio.get_running_loop().run_in_executor(executor, update_apply_sync)
+    if result.get("ok"):
+        result["restart"] = (schedule_restart() if restart
+                             else {"scheduled": False, "mode": restart_mode(), "reason": "restart=0"})
+    store_update_result(result)
+    return JSONResponse(result)
+
+
+async def job_update_check():
+    if not GITHUB_TOKEN:
+        return
+    result = await asyncio.get_running_loop().run_in_executor(executor, update_check_sync)
+    with get_db() as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('github_update', ?)",
+                   (jsonlib.dumps(result),))
+        if result.get("ok") and result.get("behind"):
+            add_alarm(db, "opdatering", f"Ny version paa GitHub: {result['latest'][:7]} - {result['message']}", "info")
 
 
 # ---------- Duplicates & redirects rapport ----------
 def duplicates_report():
     with get_db() as db:
+        latest = " AND run_id=(SELECT id FROM crawl_runs ORDER BY id DESC LIMIT 1)"
         dup_titles = db.execute(
             "SELECT title, COUNT(*) AS n, GROUP_CONCAT(url, ' | ') AS urls FROM seopages "
-            "WHERE title != '' GROUP BY LOWER(TRIM(title)) HAVING n > 1 ORDER BY n DESC LIMIT 20"
+            "WHERE title != ''" + latest + " GROUP BY LOWER(TRIM(title)) HAVING n > 1 ORDER BY n DESC LIMIT 20"
         ).fetchall()
         dup_h1 = db.execute(
             "SELECT h1, COUNT(*) AS n, GROUP_CONCAT(url, ' | ') AS urls FROM seopages "
-            "WHERE h1 != '' GROUP BY LOWER(TRIM(h1)) HAVING n > 1 ORDER BY n DESC LIMIT 20"
+            "WHERE h1 != ''" + latest + " GROUP BY LOWER(TRIM(h1)) HAVING n > 1 ORDER BY n DESC LIMIT 20"
         ).fetchall()
         dup_content = db.execute(
             "SELECT content_hash, COUNT(*) AS n, GROUP_CONCAT(url, ' | ') AS urls FROM seopages "
-            "WHERE content_hash != '' GROUP BY content_hash HAVING n > 1 ORDER BY n DESC LIMIT 20"
+            "WHERE content_hash != ''" + latest + " GROUP BY content_hash HAVING n > 1 ORDER BY n DESC LIMIT 20"
         ).fetchall()
         redirects = db.execute(
-            "SELECT url, redirects FROM seopages WHERE redirects != '' ORDER BY id LIMIT 50"
+            "SELECT url, redirects FROM seopages WHERE redirects != ''" + latest + " ORDER BY id LIMIT 50"
         ).fetchall()
     return {"titles": [dict(r) for r in dup_titles], "h1": [dict(r) for r in dup_h1],
             "content": [dict(r) for r in dup_content], "redirects": [dict(r) for r in redirects]}
@@ -2182,7 +2675,10 @@ async def suggest_internal_links():
     if not AIMLAPI_KEY:
         return JSONResponse({"ok": False, "error": "AIMLAPI_KEY ikke sat"})
     with get_db() as db:
-        pages = db.execute("SELECT url, title, h1, words FROM seopages ORDER BY score DESC LIMIT 40").fetchall()
+        pages = db.execute(
+            "SELECT url, title, h1, words FROM seopages "
+            "WHERE run_id=(SELECT id FROM crawl_runs ORDER BY id DESC LIMIT 1) ORDER BY score DESC LIMIT 40"
+        ).fetchall()
         kws = [r["keyword"] for r in db.execute("SELECT keyword FROM keywords LIMIT 20").fetchall()]
     if len(pages) < 3:
         return JSONResponse({"ok": False, "error": "Koer foerst et site-crawl (min. 3 sider)"})
@@ -2195,7 +2691,7 @@ async def suggest_internal_links():
         'Return ONLY a JSON array like [{"from":"URL","to":"URL","anchor":"anchor text","reason":"short reason"}]. No markdown.'
     )
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         raw = await loop.run_in_executor(executor, ai_chat, prompt)
         m = re.search(r"\[.*\]", raw, re.S)
         suggestions = jsonlib.loads(m.group(0)) if m else []
@@ -2234,32 +2730,19 @@ async def seo_rewrite(request: Request):
     url = str(form.get("url", "")).strip()
     if not url:
         return JSONResponse({"error": "url paakraevet"}, status_code=400)
-    # hent eksisterende titel/meta fra seneste crawl, ellers hent live
+    # Hent titel/meta live - crawl-data kan vaere foraeldet eller fra en anden URL.
     title = desc = ""
-    with get_db() as db:
-        row = db.execute("SELECT title, meta_len FROM seopages WHERE url=? ORDER BY id DESC LIMIT 1", (url,)).fetchone()
-    if not row:
-        try:
-            r = safe_request(url, timeout=10)
-            soup = BeautifulSoup(r.text, "html.parser")
-            t = soup.find("title")
-            title = t.get_text(strip=True) if t else ""
-            m = soup.find("meta", attrs={"name": "description"})
-            desc = m.get("content", "") if m else ""
-        except Exception:
-            pass
-    else:
-        try:
-            r = safe_request(url, timeout=10)
-            soup = BeautifulSoup(r.text, "html.parser")
-            t = soup.find("title")
-            title = t.get_text(strip=True) if t else ""
-            m = soup.find("meta", attrs={"name": "description"})
-            desc = m.get("content", "") if m else ""
-        except Exception:
-            pass
+    try:
+        r = safe_request(url, timeout=10)
+        soup = BeautifulSoup(r.text, "html.parser")
+        t = soup.find("title")
+        title = t.get_text(strip=True) if t else ""
+        m = soup.find("meta", attrs={"name": "description"})
+        desc = m.get("content", "") if m else ""
+    except Exception:
+        pass
     kw = str(form.get("keyword", "")).strip()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(executor, rewrite_meta_sync, url, title, desc, kw)
     return JSONResponse(result)
 
@@ -2279,7 +2762,7 @@ async def generate_meta(id: int = Form(...)):
         "Article text:\n" + text
     )
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         raw = await loop.run_in_executor(executor, ai_chat, prompt)
         m = re.search(r"\{.*\}", raw, re.S)
         data = jsonlib.loads(m.group(0)) if m else {}
@@ -2304,7 +2787,7 @@ async def ai_visibility(question: str = Form(...)):
     if not question:
         return RedirectResponse("/", status_code=303)
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         answer = await loop.run_in_executor(executor, ai_chat, question + " Name specific websites and shops in your answer.", 800)
         found = TRACK_DOMAIN.lower() in answer.lower()
         snippet = ""
@@ -2331,14 +2814,15 @@ def add_alarm_sync_global(message):
 
 
 def run_monitor_sync(m):
+    """Returnerer (status, ok, vaerdi) - vaerdi er den raa talvaerdi for pris-monitors."""
     url = m["url"]
     try:
         resp = safe_request(url, timeout=10)
         if resp.status_code >= 400:
-            return f"HTTP-fejl {resp.status_code}", False
+            return f"HTTP-fejl {resp.status_code}", False, None
         if m["type"] == "contains":
             ok = m["expected"] in resp.text
-            return ("Fundet" if ok else "IKKE fundet: " + m["expected"][:50], ok)
+            return ("Fundet" if ok else "IKKE fundet: " + m["expected"][:50], ok, None)
         elif m["type"] == "price":
             psoup = BeautifulSoup(resp.text, "html.parser")
             price = None
@@ -2358,15 +2842,16 @@ def run_monitor_sync(m):
                     except Exception:
                         continue
             if price is None:
-                return "Ingen pris fundet paa siden", False
-            prev = m["last_result"] or ""
+                return "Ingen pris fundet paa siden", False, None
+            # Sammenlign med den gemte talvaerdi (last_value), ikke med status-teksten.
+            prev = str(m["last_value"] or "").strip()
             try:
-                changed = abs(float(prev) - float(price)) > 0.001 if prev else False
+                changed = bool(prev) and abs(float(prev) - float(price)) > 0.001
             except Exception:
                 changed = False
             if changed:
                 add_alarm_sync_global(f"Prisaendring paa {url}: {prev} -> {price}")
-            return f"Pris: {price}" + (f" (var {prev})" if changed else ""), True
+            return f"Pris: {price}" + (f" (var {prev})" if changed else ""), True, str(price)
         elif m["type"] == "json":
             data = resp.json()
             node = data
@@ -2379,30 +2864,39 @@ def run_monitor_sync(m):
                     node = None
                     break
             ok = bool(node)
-            return (f"JSON-path '{m['expected']}' = {str(node)[:60]}", ok)
-        return "Ukendt type", False
+            return (f"JSON-path '{m['expected']}' = {str(node)[:60]}", ok, None)
+        return "Ukendt type", False, None
     except Exception as e:
-        return f"Fejl: {str(e)[:120]}", False
+        return f"Fejl: {str(e)[:120]}", False, None
 
 
 def check_all_monitors_sync():
     with get_db() as db:
         monitors = db.execute("SELECT * FROM monitors").fetchall()
     for m in monitors:
-        status, ok = run_monitor_sync(m)
+        status, ok, value = run_monitor_sync(m)
         with get_db() as db:
-            db.execute("UPDATE monitors SET last_status=?, last_result=?, last_checked=? WHERE id=?",
-                       (status, status, now_iso(), m["id"]))
+            db.execute("UPDATE monitors SET last_status=?, last_result=?, last_value=?, last_checked=? WHERE id=?",
+                       (status, status, value, now_iso(), m["id"]))
             if not ok:
                 add_alarm(db, "monitor", f"{m['name']} ({m['url']}): {status}", "kritisk")
 
 
 @app.post("/monitors/add")
 async def add_monitor(name: str = Form(...), url: str = Form(...), type_: str = Form(...), expected: str = Form(...)):
-    if name.strip() and url.strip() and expected.strip():
+    if not (name.strip() and url.strip() and expected.strip()):
+        return RedirectResponse("/", status_code=303)
+    if type_ not in ("contains", "json", "price"):
+        type_ = "contains"
+    try:
+        clean_url = normalize_url(url)
+    except ValueError as e:
         with get_db() as db:
-            db.execute("INSERT INTO monitors (name, url, type, expected) VALUES (?,?,?,?)",
-                       (name.strip(), normalize_url(url), type_, expected.strip()))
+            add_alarm(db, "monitor", f"Kunne ikke tilfoeje monitor '{name.strip()}': {e}", "advarsel")
+        return RedirectResponse("/", status_code=303)
+    with get_db() as db:
+        db.execute("INSERT INTO monitors (name, url, type, expected) VALUES (?,?,?,?)",
+                   (name.strip(), clean_url, type_, expected.strip()))
     return RedirectResponse("/", status_code=303)
 
 
@@ -2415,7 +2909,7 @@ async def delete_monitor(id: int = Form(...)):
 
 @app.post("/monitors/check")
 async def check_monitors():
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(executor, check_all_monitors_sync)
     return RedirectResponse("/", status_code=303)
 
@@ -2457,7 +2951,7 @@ async def keyword_ideas(keyword: str = Form(...)):
     keyword = keyword.strip()
     if not keyword:
         return RedirectResponse("/", status_code=303)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     ideas = await loop.run_in_executor(executor, autocomplete_sources, keyword)
     with get_db() as db:
         for idea, source in ideas:
@@ -2522,7 +3016,7 @@ async def kw_difficulty(request: Request):
     keyword = str(form.get("keyword", "")).strip()
     if not keyword:
         return RedirectResponse("/", status_code=303)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(executor, keyword_difficulty_sync, keyword)
     if result.get("ok"):
         with get_db() as db2:
@@ -2577,7 +3071,7 @@ async def serp_gap(keyword: str = Form(...)):
     keyword = keyword.strip()
     if not keyword:
         return RedirectResponse("/", status_code=303)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(executor, serp_gap_sync, keyword)
     return RedirectResponse("/", status_code=303)
 
@@ -2611,7 +3105,7 @@ async def article_score(id: int = Form(...)):
     if gap_row:
         gap = {"summary": jsonlib.loads(gap_row["stats_json"])["summary"]}
     else:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         gap = await loop.run_in_executor(executor, serp_gap_sync, art["keyword"])
     result = content_score(art, gap)
     if result:
@@ -2638,7 +3132,7 @@ async def outreach_scan(url: str = Form(...)):
             return emails
         except Exception:
             return set()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     emails = await loop.run_in_executor(executor, scan, url)
     with get_db() as db:
         for e in emails:
@@ -2655,13 +3149,46 @@ async def visibility_series():
     return JSONResponse({"labels": [r["day"][5:] for r in rows], "scores": [r["score"] for r in rows]})
 
 
+# ---------- Sanitering af artikel-HTML (XSS) ----------
+# AI-genereret indhold (og SERP-snippets i prompten) er ikke til at stole paa. Foer det vises
+# med |safe i dashboardet, fjernes alt undtagen en lille allow-list af formateringstags.
+ALLOWED_ARTICLE_TAGS = {
+    "p", "br", "h2", "h3", "h4", "ul", "ol", "li", "strong", "b", "em", "i",
+    "a", "blockquote", "table", "thead", "tbody", "tr", "th", "td",
+}
+DANGEROUS_ARTICLE_TAGS = ("script", "style", "iframe", "object", "embed", "form", "svg", "math", "link", "meta")
+
+
+def sanitize_article_html(html: str) -> str:
+    """Allow-list-sanitering af artikel-HTML (samme ide som DOMPurify, blot server-side)."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    for tag in soup(list(DANGEROUS_ARTICLE_TAGS)):
+        tag.decompose()
+    for tag in soup.find_all(True):
+        if tag.name not in ALLOWED_ARTICLE_TAGS:
+            tag.unwrap()          # ukendt tag: behold teksten, drop tagget
+            continue
+        # Laes href FOER alle attributter fjernes, saa gode links overlever.
+        href = (tag.get("href") or "").strip()
+        tag.attrs = {}            # drop onclick/style/javascript: m.m.
+        if tag.name == "a" and href and re.match(r"^(https?://|/)", href, re.I):
+            tag["href"] = href
+            tag["rel"] = "noopener noreferrer"
+            tag["target"] = "_blank"
+    return str(soup)
+
+
 # ---------- Dashboard ----------
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     with get_db() as db:
         domains = db.execute("SELECT * FROM domains ORDER BY id DESC").fetchall()
         competitors = db.execute("SELECT * FROM competitors ORDER BY id DESC LIMIT 20").fetchall()
-        articles = db.execute("SELECT * FROM articles ORDER BY id DESC LIMIT 10").fetchall()
+        articles = []
+        for art_row in db.execute("SELECT * FROM articles ORDER BY id DESC LIMIT 10").fetchall():
+            art = dict(art_row)
+            art["content"] = sanitize_article_html(art.get("content") or "")
+            articles.append(art)
         linkchecks = db.execute("SELECT * FROM linkcheck ORDER BY id DESC LIMIT 10").fetchall()
         socialqueue = db.execute("SELECT * FROM socialqueue ORDER BY id DESC LIMIT 100").fetchall()  # full list: /social/export.csv
         notes = db.execute("SELECT * FROM notes ORDER BY id DESC LIMIT 10").fetchall()
@@ -2680,7 +3207,10 @@ async def dashboard(request: Request):
         ai_vis = db.execute("SELECT * FROM ai_visibility ORDER BY id DESC LIMIT 5").fetchall()
         links_sug = db.execute("SELECT * FROM internal_links ORDER BY id").fetchall()
         health_hist = db.execute("SELECT COUNT(*) AS n FROM health_history").fetchone()["n"]
-        seo_pages = db.execute("SELECT * FROM seopages ORDER BY score ASC LIMIT 100").fetchall()
+        seo_pages = db.execute(
+            "SELECT * FROM seopages WHERE run_id=(SELECT id FROM crawl_runs ORDER BY id DESC LIMIT 1) "
+            "ORDER BY score ASC LIMIT 100"
+        ).fetchall()
         crawl = db.execute("SELECT * FROM crawl_runs ORDER BY id DESC LIMIT 1").fetchone()
         difficulties = db.execute("SELECT * FROM keyword_difficulty ORDER BY created_at DESC LIMIT 20").fetchall()
         # Read here, while the connection is open (get_db closes it when the block ends).
@@ -2688,9 +3218,15 @@ async def dashboard(request: Request):
         strategy_row = db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone()
         check_row = db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone()
         sgap_row = db.execute("SELECT value FROM settings WHERE key='sgap_snapshot'").fetchone()
+        users = db.execute("SELECT id, username, created_at FROM users ORDER BY id").fetchall()
+        update_row = db.execute("SELECT value FROM settings WHERE key='github_update'").fetchone()
     active_key = (strategy_row["value"] if strategy_row else None) or DEFAULT_STRATEGY
     if active_key not in STRATEGIES:
         active_key = DEFAULT_STRATEGY
+    try:
+        update_state = jsonlib.loads(update_row["value"]) if update_row and update_row["value"] else None
+    except Exception:
+        update_state = None
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
         "domains": domains,
@@ -2708,7 +3244,12 @@ async def dashboard(request: Request):
         "wp_enabled": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "serpapi_enabled": bool(SERPAPI_KEY),
         "telegram_enabled": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
-        "auth_required": bool(APP_TOKEN),
+        "current_user": getattr(request.state, "user", None),
+        "update_state": update_state,
+        "update_token": bool(GITHUB_TOKEN),
+        "update_repo": GITHUB_REPO,
+        "current_commit": deployed_commit(),
+        "users": users,
         "seo_pages": seo_pages,
         "monitors": monitors,
         "ideas": ideas,
@@ -2809,7 +3350,7 @@ async def settings_strategy(request: Request):
         with get_db() as db:
             db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('active_strategy', ?)", (key,))
         try:
-            await asyncio.get_event_loop().run_in_executor(executor, strategy_check_sync, key)
+            await asyncio.get_running_loop().run_in_executor(executor, strategy_check_sync, key)
         except Exception:
             pass
     return RedirectResponse("/", status_code=303)
@@ -2859,7 +3400,8 @@ async def health():
         "wordpress": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "serpapi": bool(SERPAPI_KEY),
         "telegram": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
-        "auth": bool(APP_TOKEN),
+        "auth": "users",
+        "users": user_count(),
     }
     return JSONResponse(body, status_code=503 if status == "kritisk" else 200)
 
@@ -2868,7 +3410,7 @@ async def health():
 async def job_check_domains():
     if not module_on("domains"):
         return
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(executor, check_all_domains_sync)
 
 
@@ -2877,7 +3419,7 @@ async def job_check_keywords():
         return
     if not SERPAPI_KEY:
         return
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(executor, check_all_keywords_sync)
 
 
@@ -2890,6 +3432,7 @@ async def lifespan(app_: FastAPI):
         scheduler.add_job(cleanup_old_data, CronTrigger(hour=4, minute=30), id="cleanup", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(pull_bridge_sync, IntervalTrigger(minutes=BRIDGE_POLL_MINUTES), id="pull_bridge", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_backup_db, CronTrigger(hour=4, minute=40), id="db_backup", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_update_check, CronTrigger(hour=5, minute=0), id="update_check", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_sgap_sync, IntervalTrigger(minutes=30), id="sgap_sync", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.start()
         try:
@@ -2943,17 +3486,18 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
     </style>
 </head>
 {% if insecure %}<div class="bg-yellow-600 text-black text-xs text-center py-1.5 px-4 font-semibold">&Uacute;t&uacute;n HTTPS &mdash; token sendes ukrypteret. S&aelig;t nginx + TLS op foran CC (se Install-dokumentationen).</div>{% endif %}
-<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
+<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null, histOpen: false, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.10 PRO</span></h1>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.11 PRO</span></h1>
             <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
-            <form action="/self-update" method="POST" onsubmit="return confirm('Hent og installér nyeste version? Genstart run.sh bagefter.')"><button class="text-xs text-zinc-400 hover:text-emerald-400">⬆️ Opdatér</button></form>
+            <form action="/update/apply" method="POST" onsubmit="return confirm('Hent og installér nyeste version fra GitHub? Der laves en DB-backup først, og appen skal genstartes bagefter.')"><button class="text-xs text-zinc-400 hover:text-emerald-400">⬆️ Opdatér</button></form>
             <a href="/health" class="text-xs text-emerald-400">Systemstatus</a>
-            {% if auth_required %}<a href="/logout" class="text-xs text-zinc-500 hover:text-rose-400">Log ud</a>{% endif %}
+            {% if current_user %}<span class="text-xs text-zinc-500">👤 {{ current_user.username }}</span>
+            <a href="/logout" class="text-xs text-zinc-500 hover:text-rose-400">Log ud</a>{% endif %}
         </div>
     </div>
 </header>
@@ -2970,6 +3514,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
         <button @click="tab='ai'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='ai' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🤖 AI Tools</button>
         <button @click="tab='pro'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='pro' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">💼 Pro</button>
         <button @click="tab='moduler'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='moduler' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">⚙️ Moduler</button>
+        <button @click="tab='brugere'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='brugere' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">👤 Brugere</button>
         
         <button @click="tab='alarms'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='alarms' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🚨 Alarmer{% if alarms %} ({{ alarms|length }}){% endif %}</button>
         <button @click="tab='notes'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='notes' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">📝 Noter</button>
@@ -2977,9 +3522,9 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 </nav>
 <main class="max-w-7xl mx-auto p-4 space-y-4">
 
-    {% if not ai_enabled or not wp_enabled or not auth_required %}
+    {% if not ai_enabled or not wp_enabled %}
     <div class="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-3 text-xs text-amber-300">
-        Setup: AI {{ '✅' if ai_enabled else '❌ (AIMLAPI_KEY)' }} · WordPress {{ '✅' if wp_enabled else '❌ (WP_URL/WP_USER/WP_APP_PASSWORD)' }} · SerpAPI {{ '✅' if serpapi_enabled else '❌ (SERPAPI_KEY)' }} · Telegram {{ '✅' if telegram_enabled else '— (valgfrit)' }} · Login {{ '✅' if auth_required else '❌ (APP_TOKEN — sæt den, hvis dashboardet kører på en VPS!)' }} — se .env.example
+        Setup: AI {{ '✅' if ai_enabled else '❌ (AIMLAPI_KEY)' }} · WordPress {{ '✅' if wp_enabled else '❌ (WP_URL/WP_USER/WP_APP_PASSWORD)' }} · SerpAPI {{ '✅' if serpapi_enabled else '❌ (SERPAPI_KEY)' }} · Telegram {{ '✅' if telegram_enabled else '— (valgfrit)' }} — se .env.example
     </div>
     {% endif %}
 
@@ -3006,6 +3551,31 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
         {% endif %}
 
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Opdatering fra GitHub <span class="text-zinc-600 normal-case">({{ update_repo }})</span></h2>
+                <div class="flex gap-2">
+                    <form action="/update/check" method="POST"><button class="text-xs bg-zinc-800 text-zinc-300 border border-zinc-700 px-3 py-1.5 rounded-lg">🔄 Tjek for nye commits</button></form>
+                    <form action="/update/apply" method="POST" class="flex items-center gap-2" onsubmit="return confirm('Hent og installér nyeste version fra GitHub? Der laves en DB-backup først, appen genstarter bagefter.')">
+                        <label class="flex items-center gap-1 text-[11px] text-zinc-400" title="Genstarter appen når filerne er skrevet (systemd-unit eller scripts/restart.sh)"><input type="checkbox" name="restart" value="1" checked> genstart</label>
+                        <button class="text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-3 py-1.5 rounded-lg">⬆️ Opdater</button>
+                    </form>
+                </div>
+            </div>
+            <p class="text-xs text-zinc-500">Installeret: <span class="text-zinc-300">{{ (current_commit or 'ukendt')[:7] }}</span>{% if update_state and update_state.latest %} · Nyeste på main: <span class="text-zinc-300">{{ update_state.latest[:7] }}</span>{% endif %}</p>
+            {% if not update_token %}
+            <p class="text-xs text-amber-400 mt-2">GITHUB_TOKEN mangler i .env — opdatering kræver adgang til det private repo.</p>
+            {% elif update_state %}
+                {% if update_state.error %}<p class="text-xs text-rose-400 mt-2">{{ update_state.error }}</p>
+                {% elif update_state.behind %}<p class="text-xs text-amber-300 mt-2">Ny version tilgængelig{% if update_state.date %} ({{ update_state.date[:16] }}){% endif %}: {{ update_state.message }}</p>
+                {% else %}<p class="text-xs text-emerald-400 mt-2">Du kører nyeste version.</p>{% endif %}
+                {% if update_state.files %}<p class="text-xs text-zinc-500 mt-1">Sidste opdatering skrev {{ update_state.files|length }} filer{% if update_state.requirements_changed %} (requirements geninstalleret){% endif %}.</p>{% endif %}
+                {% if update_state.restart %}{% if update_state.restart.scheduled %}<p class="text-xs text-sky-300 mt-1">Genstarter nu ({{ update_state.restart.mode }}) — genindlæs siden om et øjeblik.</p>{% else %}<p class="text-xs text-amber-300 mt-1">Ikke genstartet: {{ update_state.restart.reason }}</p>{% endif %}{% endif %}
+            {% else %}
+            <p class="text-xs text-zinc-500 mt-2">Tryk "Tjek for nye commits" for at sammenligne med GitHub (tjekker også automatisk kl. 05:00).</p>
+            {% endif %}
+        </div>
+
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Tilføj domæne</h2>
             <form action="/domains/add" method="POST" class="flex gap-2">
                 <input type="text" name="url" placeholder="ditsite.dk" required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
@@ -3028,7 +3598,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                         </div>
                     </div>
                     <div class="flex items-center gap-3">
-                        <button @click="tab='seo'; showHistory({{ domain.id }}, '{{ domain.url }}')" class="text-emerald-400 hover:underline">📈</button>
+                        <button @click="tab='seo'; showHistory({{ domain.id }}, $el.dataset.url)" data-url="{{ domain.url }}" class="text-emerald-400 hover:underline">📈</button>
                         <form action="/domains/delete" method="POST">
                             <input type="hidden" name="id" value="{{ domain.id }}">
                             <button class="text-zinc-500 hover:text-rose-400">✕</button>
@@ -3066,7 +3636,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                 seoLoading = true; seoResult = null;
                 fetch('/seo/audit', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'},
                     body: 'url=' + encodeURIComponent($el.querySelector('input[name=url]').value) + '&keyword=' + encodeURIComponent($el.querySelector('input[name=keyword]').value || '') + '&level=' + encodeURIComponent($el.querySelector('select[name=level]').value) + '&psi=' + ($el.querySelector('input[name=psi]')?.checked ? '1' : '0') })
-                .then(r => r.json()).then(data => { seoResult = data; seoLoading = false; })"
+                .then(r => r.json()).then(data => { seoResult = data; seoLoading = false; }).catch(() => { seoLoading = false; seoResult = { score: 0, items: [{ ok: false, text: 'Netværksfejl — prøv igen' }] }; })"
                 class="flex flex-col md:flex-row gap-2">
                 <input type="text" name="url" placeholder="https://steamgears.eu/guide..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
                 <input type="text" name="keyword" placeholder="Focus keyword (valgfrit)" class="md:w-52 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
@@ -3230,7 +3800,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             <p x-show="!dups" class="text-xs text-zinc-500">Kør et site-crawl først — kræver crawl-data.</p>
         </div>
 
-        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5" x-show="false" id="histcard">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5" x-show="histOpen" style="display: none;" id="histcard">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3" id="histtitle">Historik</h2>
             <canvas id="histchart" height="80"></canvas>
         </div>
@@ -3252,7 +3822,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                 {% for comp in competitors %}
                 <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs space-y-1">
                     <div class="flex justify-between items-center">
-                        <a href="{{ comp.url }}" target="_blank" class="font-medium text-emerald-400 hover:underline">{{ comp.name }}</a>
+                        {% if comp.url.startswith('http') %}<a href="{{ comp.url }}" target="_blank" rel="noopener" class="font-medium text-emerald-400 hover:underline">{{ comp.name }}</a>{% else %}<span class="font-medium text-zinc-300">{{ comp.name }}</span>{% endif %}
                         <form action="/competitors/delete" method="POST">
                             <input type="hidden" name="id" value="{{ comp.id }}">
                             <button class="text-zinc-500 hover:text-rose-400">✕</button>
@@ -3334,6 +3904,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                         </div>
                     </div>
                     {% if art.meta_title %}<div class="text-zinc-500 border-t border-zinc-800 pt-2">📌 <span class="text-zinc-300">{{ art.meta_title }}</span> — {{ art.meta_desc }}</div>{% endif %}
+                    {# art.content er allow-list-saniteret i dashboard-routen i main.py (ingen scripts/handlers) #}
                     <div class="text-zinc-400 max-h-48 overflow-y-auto border-t border-zinc-800 pt-2">{{ art.content | safe }}</div>
                 </div>
                 {% else %}
@@ -3357,7 +3928,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                         {% for b in backlink_rows %}
                         <tr class="border-b border-zinc-800/60">
                             <td class="py-2 pr-3 text-zinc-300">{{ b.keyword }}</td>
-                            <td class="py-2 pr-3"><a href="{{ b.url }}" target="_blank" class="text-emerald-400">{{ b.site }}</a></td>
+                            <td class="py-2 pr-3">{% if b.url.startswith('http') %}<a href="{{ b.url }}" target="_blank" rel="noopener" class="text-emerald-400">{{ b.site }}</a>{% else %}<span class="text-zinc-300">{{ b.site }}</span>{% endif %}</td>
                             <td class="py-2 pr-3 text-zinc-400">{{ b.type }}</td>
                             <td class="py-2 pr-3 text-zinc-300">{{ b.email or '—' }}</td>
                             <td class="py-2 pr-3 max-w-md"><details><summary class="cursor-pointer text-zinc-400">Vis draft</summary><p class="mt-2 text-zinc-400 whitespace-pre-line">{{ b.draft }}</p></details></td>
@@ -3714,6 +4285,47 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
         </div>
     </section>
 
+    <!-- BRUGERE -->
+    <section x-show="tab === 'brugere'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Brugere ({{ users|length }})</h2>
+            <p class="text-xs text-zinc-500 mb-3">Adgang sker med brugernavn + adgangskode (PBKDF2-SHA256). Den foerste bruger blev oprettet ved foerste besoeg — opret gerne en ekstra, saa du ikke laaser dig ude.</p>
+            <div class="space-y-2">
+                {% for u in users %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs flex justify-between items-center">
+                    <div>
+                        <span class="font-medium">{{ u.username }}</span>
+                        {% if current_user and u.id == current_user.id %}<span class="text-[10px] text-emerald-400 ml-2">dig</span>{% endif %}
+                        <div class="text-zinc-500">Oprettet {{ u.created_at }}</div>
+                    </div>
+                    <form action="/users/delete" method="POST">
+                        <input type="hidden" name="id" value="{{ u.id }}">
+                        <button class="text-zinc-500 hover:text-rose-400">✕</button>
+                    </form>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Opret bruger</h2>
+            <form action="/users/add" method="POST" class="grid grid-cols-1 md:grid-cols-3 gap-2">
+                <input type="text" name="username" placeholder="Brugernavn" required pattern="[A-Za-z0-9._-]{3,32}" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <input type="password" name="password" placeholder="Adgangskode (min. 8 tegn)" required minlength="8" autocomplete="new-password" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Opret bruger</button>
+            </form>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Skift min adgangskode</h2>
+            <form action="/users/password" method="POST" class="grid grid-cols-1 md:grid-cols-4 gap-2">
+                <input type="password" name="current" placeholder="Nuværende" required autocomplete="current-password" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <input type="password" name="new" placeholder="Ny (min. 8 tegn)" required minlength="8" autocomplete="new-password" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <input type="password" name="confirm" placeholder="Gentag ny" required minlength="8" autocomplete="new-password" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Gem</button>
+            </form>
+            <p class="text-[10px] text-zinc-600 mt-2">Ved skift logges dine andre sessioner ud.</p>
+        </div>
+    </section>
+
     <!-- NOTER -->
     <section x-show="tab === 'notes'" class="space-y-4" style="display: none;">
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
@@ -3747,8 +4359,9 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 
 <script>
 function showHistory(domainId, url) {
-    document.getElementById('histcard').style.display = '';
-    document.getElementById('histtitle').textContent = 'Svartid-historik: ' + url;
+    const s = Alpine.$data(document.body);
+    s.histOpen = true;
+    document.getElementById('histtitle').textContent = 'Svartid-historik: ' + (url || '');
     fetch('/api/history/' + domainId).then(r => r.json()).then(data => {
         const ctx = document.getElementById('histchart');
         if (window.histChartInstance) window.histChartInstance.destroy();
@@ -3814,26 +4427,62 @@ EOF_HTML
 echo "📄 app/templates/login.html..."
 cat << 'EOF_LOGIN' > "$PROJECT_DIR/app/templates/login.html"
 <!DOCTYPE html>
-<html lang="da" class="dark">
+<html lang="da">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Command Center — Login</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <title>Command Center — {{ 'Opret bruger' if mode == 'setup' else 'Log ind' }}</title>
+    <style>
+      /* Ingen CDN'er: login-siden skal virke og se ens ud uden internetadgang. */
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+             padding: 24px; background: #09090b; color: #f4f4f5;
+             font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+      .card { width: 100%; max-width: 390px; background: #18181b; border: 1px solid #27272a;
+              border-radius: 16px; padding: 28px; box-shadow: 0 20px 50px rgba(0,0,0,.4); }
+      h1 { margin: 0 0 6px; font-size: 16px; letter-spacing: .02em; }
+      p.sub { margin: 0 0 18px; font-size: 12px; color: #a1a1aa; }
+      label { display: block; margin: 14px 0 6px; font-size: 11px; letter-spacing: .06em;
+              text-transform: uppercase; color: #a1a1aa; }
+      input { width: 100%; padding: 10px 12px; font-size: 14px; color: #f4f4f5; background: #09090b;
+              border: 1px solid #3f3f46; border-radius: 10px; }
+      input:focus-visible { outline: 2px solid #34d399; outline-offset: 1px; border-color: #34d399; }
+      button { width: 100%; margin-top: 22px; padding: 11px 16px; font-size: 14px; font-weight: 600;
+               color: #34d399; background: rgba(52,211,153,.12); border: 1px solid rgba(52,211,153,.35);
+               border-radius: 10px; cursor: pointer; }
+      button:hover { background: rgba(52,211,153,.2); }
+      button:focus-visible { outline: 2px solid #34d399; outline-offset: 2px; }
+      .error { margin: 0 0 6px; padding: 9px 11px; font-size: 12px; color: #fda4af;
+               background: rgba(244,63,94,.09); border: 1px solid rgba(244,63,94,.35); border-radius: 10px; }
+      .foot { margin: 16px 0 0; font-size: 11px; color: #71717a; text-align: center; }
+    </style>
 </head>
-<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans flex items-center justify-center">
-    <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-8 w-full max-w-sm space-y-4">
-        <h1 class="font-bold text-lg">⚡ COMMAND CENTER</h1>
-        <p class="text-xs text-zinc-400">Indtast din adgangstoken</p>
-        {% if error %}<p class="text-xs text-rose-400">{{ error }}</p>{% endif %}
-        <form action="/login" method="POST" class="space-y-3">
-            <input type="password" name="token" required autofocus
-                   class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
-            <button class="w-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">
-                Log ind
-            </button>
-        </form>
-    </div>
+<body>
+<div class="card">
+    <h1>⚡ COMMAND CENTER</h1>
+    {% if mode == 'setup' %}
+    <p class="sub">Foerste start: opret din bruger. Der er ingen token — kun brugernavn og adgangskode.</p>
+    {% else %}
+    <p class="sub">Log ind med din bruger.</p>
+    {% endif %}
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    <form action="{{ '/setup' if mode == 'setup' else '/login' }}" method="POST">
+        <label for="username">Brugernavn</label>
+        <input id="username" type="text" name="username" value="{{ username }}" autocomplete="username"
+               pattern="[A-Za-z0-9._-]{3,32}" title="3-32 tegn: a-z, 0-9, punktum, bindestreg, underscore"
+               required autofocus>
+        <label for="password">Adgangskode</label>
+        <input id="password" type="password" name="password" autocomplete="{{ 'new-password' if mode == 'setup' else 'current-password' }}"
+               minlength="8" required>
+        {% if mode == 'setup' %}
+        <label for="confirm">Gentag adgangskode</label>
+        <input id="confirm" type="password" name="confirm" autocomplete="new-password" minlength="8" required>
+        {% endif %}
+        <button type="submit">{{ 'Opret bruger og log ind' if mode == 'setup' else 'Log ind' }}</button>
+    </form>
+    <p class="foot">Adgangskoder gemmes som PBKDF2-SHA256-hash. Sessionen varer 30 dage.</p>
+</div>
 </body>
 </html>
 EOF_LOGIN
@@ -3845,17 +4494,47 @@ cd "$(dirname "$0")"
 if [ -f .env ]; then
     set -a; source .env; set +a
 fi
+HOST="${CC_HOST:-127.0.0.1}"
+PORT="${CC_PORT:-8000}"
+PUBLIC="${CC_PUBLIC_URL:-}"
+FORWARDED="${CC_FORWARDED_ALLOW_IPS:-127.0.0.1}"
+
+# Maskinens rigtige IPv4 (bruges naar der lyttes paa 0.0.0.0)
+lan_ip() {
+    { hostname -I 2>/dev/null | awk '{print $1}'
+      ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") print $(i + 1)}'
+    } | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1
+}
+
 if [ ! -d "venv" ]; then
     python3 -m venv venv
 fi
 source venv/bin/activate
 pip install --upgrade pip > /dev/null 2>&1
 pip install -r requirements.txt
-echo "⚡ Starter Command Center v7.10..."
+
+mkdir -p app/data
+echo $$ > app/data/cc.pid   # pidfile: scripts/restart.sh kan genstarte en app startet med ./run.sh
+echo "⚡ Starter Command Center v7.11..."
+echo "   Lokalt:   http://127.0.0.1:$PORT"
+if [ -n "$PUBLIC" ]; then
+    echo "   Offentlig: $PUBLIC   (via nginx -> http://$HOST:$PORT)"
+    echo "   nginx:    proxy_set_header X-Forwarded-Proto \$scheme;  (ellers bliver cookien ikke Secure)"
+fi
+case "$HOST" in
+    0.0.0.0|::|"")
+        echo "   Netvaerk: http://$(lan_ip || echo '<din-ip>'):$PORT   (lytter paa $HOST:$PORT)"
+        ;;
+    *)
+        echo "   Lytter paa $HOST:$PORT — brug CC_HOST=0.0.0.0 for adgang uden nginx"
+        ;;
+esac
+echo "   Login:    opret din bruger ved foerste besoeg (ingen token), derefter brugernavn + adgangskode"
+
 if [ "$DEV" = "1" ]; then
-    uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+    exec uvicorn app.main:app --host "$HOST" --port "$PORT" --proxy-headers --forwarded-allow-ips "$FORWARDED" --reload
 else
-    uvicorn app.main:app --host 127.0.0.1 --port 8000
+    exec uvicorn app.main:app --host "$HOST" --port "$PORT" --proxy-headers --forwarded-allow-ips "$FORWARDED"
 fi
 EOF_RUNSH
 
@@ -3892,110 +4571,399 @@ After=network.target
 Type=simple
 User=%i
 WorkingDirectory=/home/%i/command-center
-ExecStart=/home/%i/command-center/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+# Goer .env-vaerdier (GITHUB_TOKEN m.fl.) til rigtige miljoevariabler; "-" = ok hvis filen mangler.
+EnvironmentFile=-/home/%i/command-center/.env
+# proxy-headers + forwarded-allow-ips: nginx paa 127.0.0.1 sender X-Forwarded-Proto/For.
+ExecStart=/home/%i/command-center/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1
 Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF_SERVICE
 
+echo "📄 deploy/nginx-command-center.conf..."
+cat << 'EOF_NGINX' > "$PROJECT_DIR/deploy/nginx-command-center.conf"
+# Command Center bag nginx (Ultra.cc / VPS)
+#
+# Saadan bruges den:
+#   Ultra.cc: læg filen i din nginx-proxy-mappe (fx ~/.apps/nginx/proxy.d/command-center.conf)
+#             eller kopier "location /"-blokken ind i den server { } du bruger.
+#   VPS:      kopier til /etc/nginx/conf.d/command-center.conf og ret server_name.
+#
+# Appen skal lytte paa 127.0.0.1:8000 (CC_HOST/CC_PORT i .env) og har ingen websockets,
+# saa der er ingen "map"- eller "upstream"-blokke - kun det her, som virker inde i en server { }.
+#
+# VIGTIGT: appen kan ikke ligge paa en understi (https://host/apps/cc/) - alle links er absolute.
+# Brug et subdomæne eller en egen port til Command Center.
+
+server {
+    listen 80;
+    server_name cc.eksempel.dk;
+
+    # Slaa TLS til (Ultra.cc har certifikater i deres panel; ellers brug certbot).
+    # Derefter: return 301 https://$host$request_uri;  i denne blok,
+    # og flyt location-blokken ned i en "listen 443 ssl;"-server.
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+
+        # Uden X-Forwarded-Proto tror appen den koerer paa http:
+        # session-cookien bliver ikke Secure, og der vises en HTTPS-advarsel i UI'et.
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Crawl, content gap, backlink-prospecting og AI-kald kan tage minutter - ellers 504.
+        proxy_connect_timeout 15s;
+        proxy_send_timeout    300s;
+        proxy_read_timeout    300s;
+        proxy_buffering       off;
+
+        # Formularer er smaa: et loft saa et stort opslag ikke kan dræbe proxien.
+        client_max_body_size 4m;
+
+        add_header X-Content-Type-Options nosniff always;
+        add_header Referrer-Policy same-origin always;
+    }
+}
+EOF_NGINX
+
+echo "📄 deploy/command-center.user.service..."
+cat << 'EOF_USERSVC' > "$PROJECT_DIR/deploy/command-center.user.service"
+[Unit]
+Description=Steamgears Command Center (bruger-service, fx Ultra.cc)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/command-center
+# Lader .env-vaerdier som GITHUB_TOKEN og BRIDGE_POLL_MINUTES blive rigtige miljoevariabler
+# (appen laeser selv de fleste, men dette er den paalidelige vej). "-" = ok hvis filen mangler.
+EnvironmentFile=-%h/command-center/.env
+# 127.0.0.1 + proxy-headers: nginx paa samme maskine sender X-Forwarded-Proto/For.
+ExecStart=%h/command-center/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF_USERSVC
+
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.10 PRO
+# Command Center v7.11 PRO
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
+Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
+
+## Nyheder i v7.11
+
+- **Brugere i stedet for token-login** — første besøg opretter din bruger (`/setup`), derefter logger du ind med brugernavn + adgangskode (PBKDF2-SHA256, salt pr. bruger, 30 dages HttpOnly-session). Fanen **Brugere** opretter/sletter brugere og skifter adgangskode. `APP_TOKEN` findes ikke længere; `JUNO_TOKEN` er nu kun en maskin-nøgle til `/api/*`.
+- **Opdatering fra GitHub** — Cockpit viser installeret commit vs. seneste commit på `main`, tjekker selv kl. 05:00, og "Opdater" laver DB-backup og henter kun projektets filer. Den gamle "hent install.sh og kør den"-vej er fjernet.
+- **nginx / Ultra.cc** — `deploy/nginx-command-center.conf`, `deploy/command-center.user.service` og proxy-header-understøttelse, så appen bliver på `127.0.0.1` bag nginx med korrekte Secure-cookies og rigtig klient-IP.
+- **Rettelser fra kodegennemgang** — saniteret artikel-HTML (XSS), `.env` læses før konfigurationen, pris-monitors registrerer ændringer igen, crawl-diff virker (to crawls gemmes), `/monitors/add` giver ikke længere 500, HTTPS-advarslen rammer rigtigt, plus mindre korrekthedsrettelser.
 
 ## Funktioner
-- 🎛️ **Cockpit** — domæneovervågning (uptime, svartid, SSL), daglig drift-kort (Woo/checkout via Juno-bro)
-- 🔍 **SEO Scanner** — deep audit af enkelt side (20+ vægtede kontroller inkl. focus keyword, lesbarhed, mixed content, schema, OG/Twitter) + **site-crawl** med score per side og robots.txt/sitemap-tjek
-- ✍️ **Artikler** — AI-generering (Gemini via aimlapi) eller skabelon, **push direkte til WordPress som udkast**, **fakta-prompt med SerpAPI-konkurrentanalyse** (top 5 resultater ind i prompten — artiklen skal slå dem), autopilot (idé → artikel → WP-kladde, ny idé via Google-autocomplete når puljen er tom)
-- 🎯 **SEO-strategi-vælger** — dropdown (AdSense-indkomst / Affiliate / Backlink-vækst): styler AI-artikler (stil + længde) og autopiloten (artikel vs. prospecting), med automatisk pre-flight-tjek af nøgler, moduler, cron og DB efter hvert valg (grøn/rød-checkliste)
-- 🛡️ **v7.9 Stabilitet** — daglig DB-backup (04:40, seneste 14 gemmes) + automatisk backup foer hver self-update; opstarts-selvtest (DB-skrivetest, noegler, rute-taelling → kritisk alarm ved fejl); login rate-limit (5 fejl = 10 min laas pr. IP); HTTPS-advarsel i UI; scripts/smoke_test.sh; run.bat (Windows-startscript, klar til fremtid - self-update er Linux-only)
-- 🌱 **Growth Pack** — autopilot-nøgleord-side (05:15 dagligt), **backlink-prospector** (SerpAPI top 10 → sitetype + kontakt-e-mail + AI-outreach-draft), visibility-index
-- 🧩 **Moduler** — slå funktioner fra/til i 3 niveauer (kerne/udvidet/fuld); alt visuelles følger modulet
-- 🎯 **Keywords** — Google-positioner via SerpAPI, tjekket automatisk daglig kl. 06:00
-- 🕷️ **SERP & Spy** — konkurrent-opdagelse + crawl af titel/H1/beskrivelse
-- 🔗 **Links** — ekstern linktjek med brodte-links-rapport
-- 📱 **Social** — opslagskø med CSV-export
-- 🚨 **Alarmer** — SSL-udlob, nedetid, brodte links, fejlede scans; valgfrit Telegram-push
-- 📈 **Historik** — svartid-grafer pr. domæne (Chart.js)
-- 🌉 **Juno-broer** — `POST /api/bridge/gsc` og `/api/bridge/drift` (header `X-CC-Token`) sa Juno kan pushe GSC-tal og daglig drift
 
-## v7.10 – fra v8-planen (Drive)
-- **Kvalitetsgate**: autopilot-artikler sendes kun til WordPress, hvis de har nok ord (min. `QUALITY_MIN_WORDS`, eller 80 % af SERP-gennemsnittet fra Content Gap), indeholder fokus-keywordet og har mindst 2 H2. Ellers status "Stoppet af kvalitetsgate" + alarm. Manuel push er tilladt, men giver en info-alarm. Faerre end 2 interne links giver kun en advarsel.
-- **API-budget**: hvert kald til SerpAPI og aimlapi taelles pr. maaned; ved `SERPAPI_MONTHLY_LIMIT` / `AI_MONTHLY_LIMIT` stoppes kaldene til den 1. Alarm (og Telegram) ved 80 % og 100 %.
-- **/health**: tester at databasen kan skrive og hvor fuld disken er (advarsel ≥ 80 %, kritisk ≥ 90 % → HTTP 503) og viser maanedens API-forbrug.
+- 🎛️ **Cockpit** — domæneovervågning (uptime, svartid, SSL), drift-kort fra Juno-broen, opdaterings-panel og alarmer
+- 🔍 **SEO Scanner** — deep audit af enkelt side (20+ vægtede kontroller inkl. focus keyword, læsbarhed, mixed content, schema, OG/Twitter) + **site-crawl** med score per side, robots.txt/sitemap-tjek og crawl-diff mod forrige crawl
+- ✍️ **Artikler** — AI-generering (Gemini via aimlapi) eller skabelon, **push til WordPress som udkast**, **fakta-prompt med SerpAPI-konkurrentanalyse**, autopilot (idé → artikel → WP-kladde) og **kvalitetsgate** før publicering
+- 🎯 **SEO-strategi** — AdSense / Affiliate / Backlink-vækst styrer AI-artiklernes stil + længde og autopilotens arbejde, med automatisk pre-flight-checkliste
+- 🌱 **Growth Pack** — backlink-prospector (SerpAPI top 10 → sitetype + kontakt-e-mail + AI-outreach-draft), keyword-ideer via Google/DDG-autocomplete, visibility-index
+- 🎯 **Keywords** — Google-positioner via SerpAPI (dagligt kl. 06:00), sværhedsgrads-heuristik, content gap mod top 10
+- 🕷️ **SERP & Spy** — konkurrent-opdagelse + crawl af titel/H1/beskrivelse
+- 🔗 **Links** — ekstern linktjek + AI-forslag til interne links
+- 📱 **Social** — opslagskø med CSV-export og "→ Autopilot" (kladde i WordPress-pluginnet)
+- 🩺 **Monitors** — tekst/JSON/pris-overvågning med alarmer ved ændring
+- 👤 **Brugere** — opret/slet brugere, skift adgangskode; den sidste bruger kan ikke slettes
+- 🚨 **Alarmer** — SSL-udløb, nedetid, brudte links, fejlede scans, nye GitHub-commits; valgfrit Telegram-push
+- 📈 **Historik** — svartid per domæne, site-health og visibility over tid (Chart.js)
+- 🌉 **Juno-broer** — `POST /api/bridge/gsc` og `/api/bridge/drift` med `X-CC-Token`
+
+## Login & opsætning
+
+1. `cp .env.example .env` og udfyld nøgler
+2. `./run.sh` — scriptet udskriver den adresse appen lytter på (samt LAN-IP når `CC_HOST=0.0.0.0`)
+3. Åbn adressen: **første besøg opretter din bruger** (`/setup`) — derefter log ind med brugernavn + adgangskode. Der er ingen token i `.env`.
+4. Nye brugere, sletning og adgangskode-skift klares under fanen **Brugere**
+5. (VPS) kør bag reverse proxy med TLS, eller brug `deploy/command-center.service` + SSH-tunnel
+
+## Ultra.cc / nginx (reverse proxy)
+
+1. `.env`: udfyld nøgler, sæt `CC_PUBLIC_URL=https://<din-adresse>`, lad `CC_HOST=127.0.0.1` og `CC_FORWARDED_ALLOW_IPS=127.0.0.1`
+2. Start appen: `./run.sh`, eller `deploy/command-center.user.service` med `systemctl --user enable --now command-center`
+3. Læg `deploy/nginx-command-center.conf` ind i den `server { }` du bruger (Ultra.cc: `~/.apps/nginx/proxy.d/`), og genindlæs nginx
+4. Åbn `CC_PUBLIC_URL` — første besøg opretter din bruger
+
+Det skal med i proxy-blokken:
+
+- `proxy_set_header X-Forwarded-Proto $scheme;` — ellers tror appen den kører på http: session-cookien bliver ikke `Secure`, og der vises en HTTPS-advarsel
+- `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` — så login-låsen pr. IP rammer klienten i stedet for nginx
+- `proxy_read_timeout 300s;` — crawl, content gap og backlink-prospecting kan tage minutter (ellers 504 fra nginx)
+- Appen kan **ikke** ligge på en understi (`https://host/apps/cc/`): alle links er absolutte — brug et subdomæne eller en egen port
+
+## Opdatering fra GitHub
+
+Panelet i Cockpit sammenligner installeret commit med seneste commit på `main`:
+
+- **Tjek for nye commits** (`POST /update/check`) — viser SHA, dato og commit-besked, eller den præcise fejl (manglende token, 401/403, 404). Kører også automatisk kl. 05:00.
+- **Opdater** (`POST /update/apply`) — tager en `pre-update`-backup af databasen, henter commit-tarballen og skriver **kun** projektets filer (`app/`, `scripts/`, `deploy/`, requirements, start-scripts, `install.sh`, Dockerfile, compose, `.env.example`). `.env`, databasen og `..`-stier røres ikke.
+- **Alt i ét hug**: er `requirements.txt` ændret, køres `pip install -r` automatisk, og appen **genstarter sig selv** ~1,5 s efter svaret (systemd-unit, ellers `scripts/restart.sh` med pidfile + `run.sh`). Fjern fluebenet "genstart" i panelet, eller sæt `UPDATE_AUTO_RESTART=0`, for at genstarte manuelt. `UPDATE_RESTART_CMD` overstyrer kommandoen (fx din egen supervisor).
+- **Fra terminalen**: `bash scripts/update.sh` gør hele kæden (tjek → filer → requirements → genstart) og venter til `/health` svarer igen; `--check` tjekker kun, `--no-restart` springer genstarten over. `bash scripts/restart.sh` genstarter uden at opdatere.
+- Status som JSON: `GET /api/update` (inkl. `restart_mode` og `auto_restart`). Kræver `GITHUB_TOKEN` (privat repo) og `JUNO_TOKEN` for scriptet. `/self-update` findes stadig som alias for `/update/apply`.
 
 ## Steamgears Autopilot-bro (WordPress-plugin 7.5+)
+
 Command Center og WordPress-pluginnet **Steamgears Autopilot** snakker sammen via pluginnets REST-API
 (`/wp-json/sgap/v1`) med de samme `WP_URL` / `WP_USER` / `WP_APP_PASSWORD` som WordPress-push
-(`WP_USER` skal vaere administrator).
-- **Status hver 30. min** (fanen Social → "Steamgears Autopilot"): koe (i koe / sendes / udgivet / fejlet),
-  kladder der venter paa godkendelse, og udgivet/klik/ordrer/omsaetning pr. kanal de sidste 30 dage.
-- **Alarmer + Telegram** naar noget aendrer sig: nye fejlede opslag, nye kladder til godkendelse, eller pluginnet svarer ikke.
-- **"→ Autopilot"** paa hvert opslag i CC's sociale koe sender det som kladde til pluginnet (godkendes i WordPress
-  under Steamgears → AI Drafts, hvorefter pluginnet udgiver via Publer).
-- Slaa til/fra under Moduler ("Autopilot-bro"). Retningen er altid CC → site, saa CC kan blive paa 127.0.0.1.
+(`WP_USER` skal være administrator).
+
+- **Status hver 30. min** (fanen Social → "Steamgears Autopilot"): kø, kladder der venter på godkendelse, og udgivet/klik/ordrer/omsætning pr. kanal de sidste 30 dage
+- **Alarmer** når noget ændrer sig: nye fejlede opslag, nye kladder, eller pluginnet svarer ikke
+- **"→ Autopilot"** sender et opslag som kladde til pluginnet (godkendes i WordPress under Steamgears → AI Drafts)
+- Slå til/fra under Moduler ("Autopilot-bro"). Retningen er altid CC → site, så CC kan blive på 127.0.0.1
 
 ## Installering
+
 ```bash
 curl -H "Authorization: Bearer <TOKEN>" -H "Accept: application/vnd.github.raw" \
   https://api.github.com/repos/humle93/command-center/contents/install.sh -o install.sh && bash install.sh
 ```
 
-Eller med Docker: `cp .env.example .env && docker compose up -d --build`
+Eller med Docker: `cp .env.example .env && docker compose up -d --build`. `install.sh` er selvstændig og
+skriver alle filer (inkl. `deploy/nginx-command-center.conf` og `deploy/command-center.user.service`).
 
-## Opsaetning
-1. `cp .env.example .env` og udfyld noegler
-2. `./run.sh` → http://127.0.0.1:8000
-3. (VPS) saet `APP_TOKEN` i `.env` og kør bag reverse proxy, eller brug `deploy/command-center.service` + SSH-tunnel
+## Drift & test
 
-## v7.5 — performance & drift
-- **Pull-bro**: Juno committer JSON-filer til repoets bridge/pending/, CC henter selv hver time (GITHUB_TOKEN i .env) — ingen tunnel eller FTP noedvendig
-- **Selv-opdatering**: Opdater-knap i toppen henter nyeste install.sh og koerer den
-- **SQLite**: WAL-mode, busy_timeout, 8 indekser, daglig oprydning kl. 04:30
-- **HTTP**: connection-pooling og gzip-komprimering
-- **UI**: sticky nav, preconnect, spinner, hover/focus-puds, mobile-forbedringer
-
-## v7.4 PRO tilfoejelser
-- **Crawl-diff** (Screaming Frog-stil): sammenlign to crawls — nye/fjernede sider, aendret indhold (hash), score-fald >10
-- **Redirect-audit**: kæder (2+ hop), redirect-loops og usikre http-redirects fra crawleren
-- **Sitemap-generator**: download sitemap.xml bygget fra seneste crawl (/api/sitemap.xml)
-- **Keyword-svaerhedsgrad** (Ahrefs-kopi): heuristic over top 10 — autoritetsdomaener, unikke domaener, annoncer → 0-100 score
-- **AI titel/meta-rewrite**: Gemini foreslar 3 titler + 3 meta descriptions direkte fra deep audit (klik for at kopiere)
-
-## PRO-funktioner (betalt-varktoej-kloner)
-- **Content Gap** (Semrush-kopi): top 10 SERP hentes via SerpAPI, gennemsnit af ord/H2 beregnes, og dine artikel-kladder scores mod markedet (Content Score)
-- **Keyword-ideer** (Ubersuggest-kopi): Google + DuckDuckGo autocomplete, gratis
-- **Email-finder** (Hunter.io-kopi): scan sider for kontakt-emails til linkbuilding-outreach
-- **Pris-overvaagning**: monitors med typen "pris" laeser JSON-LD/product:price og alarmerer ved pris-andringer hos konkurrenter
-- **Visibility Index** (SE Ranking-kopi): samlet synlighedstal ud fra dine keyword-positioner, graf over tid
-- **Core Web Vitals**: valgfri Google PageSpeed API-noegle (PSI_API_KEY) giver perf/LCP/CLS i deep audit
-- **Flesch-lesbarhed** (Hemingway-kopi) i hver side-audit
+- **Cron**: domæne-tjek hver 6. time, keyword-tjek 06:00, autopilot 05:15, oprydning 04:30, DB-backup 04:40, GitHub-tjek 05:00, Autopilot-bro hver 30. min
+- **Backup**: `app/backups/cc-daglig-*.db` (14 gemmes) + `cc-pre-update-*.db` før hver opdatering
+- **Health**: `/health` (200, eller 503 ved kritisk DB/disk-tilstand) viser også månedens API-forbrug
+- **Tests**: `python3 tests/test_v8_features.py` (enhedstests), `bash tests/ci_check.sh` (boot + alle sider + auth + bridge + link-audit)
 
 ## Sikkerhed
-- `APP_TOKEN` = login til hele UI'et og noeglen til Juno-broerne (header `X-CC-Token`)
-- Default binding er 127.0.0.1 — saet aldrig `0.0.0.0` uden reverse proxy + auth
+
+- **Brugere**: PBKDF2-SHA256 med salt pr. bruger; sessioner er HttpOnly-cookies (30 dage) gemt som `sha256(id)` i databasen, så en DB-kopi ikke giver adgang. Skift af adgangskode logger dine andre sessioner ud.
+- **JUNO_TOKEN** er en separat maskin-nøgle til `/api/*` (header `X-CC-Token`), ikke til mennesker.
+- **Cookie/HTTPS**: cookien sættes `Secure` når appen ser https (kræver `X-Forwarded-Proto` bag proxy — se nginx-afsnittet).
+- **API-budget**: SerpAPI og aimlapi tælles pr. måned og stoppes ved loftet (`SERPAPI_MONTHLY_LIMIT`, `AI_MONTHLY_LIMIT`), med alarm ved 80 % og 100 %.
+- Default binding er 127.0.0.1 — sæt aldrig `0.0.0.0` uden reverse proxy + TLS.
+
+## Kendte begrænsninger
+
+- Dashboardet henter Tailwind, Alpine.js og Chart.js fra CDN (login-siden er helt selvstændig). Uden internetadgang ser dashboardet stadig ud, men uden styling/interaktivitet.
+- Opdatering kræver `GITHUB_TOKEN`; ændringer i `requirements.txt` rapporteres men installeres først ved næste `./run.sh`.
+- `install.sh` indeholder kopier af projektets filer (CI tjekker at de matcher); ret derfor altid kildefilerne og kør regen, ikke installeren.
+- Screenshots i `docs/img/` er fra v7.8-UI'et.
 EOF_README
 
 echo "📄 scripts/smoke_test.sh..."
+cat << 'EOF_RESTART' > scripts/restart.sh
+#!/bin/bash
+# Genstarter Command Center. Bruges af opdateringen (POST /update/apply) og kan koeres manuelt.
+#
+#   bash scripts/restart.sh              # genstart med det samme
+#   bash scripts/restart.sh --delay 2    # vent 2 s (saa HTTP-svaret kan naa frem)
+#
+# Raekkefoelge:
+#   1. UPDATE_RESTART_CMD (hvis sat i .env)
+#   2. systemd --user unit "command-center"  (Ultra.cc)
+#   3. systemd system unit "command-center"
+#   4. pidfile app/data/cc.pid + ./run.sh    (naar appen er startet med ./run.sh)
+set -u
+cd "$(dirname "$0")/.."
+
+DELAY=0
+if [ "${1:-}" = "--delay" ]; then
+    DELAY="${2:-2}"
+fi
+case "$DELAY" in
+    ''|*[!0-9]*) DELAY=0 ;;
+esac
+[ "$DELAY" -gt 0 ] && sleep "$DELAY"
+
+PIDFILE="app/data/cc.pid"
+LOG="nohup.out"
+
+restart_systemd_user() {
+    systemctl --user cat "$1" > /dev/null 2>&1 || return 1
+    systemctl --user restart "$1"
+}
+
+restart_systemd_system() {
+    systemctl cat "$1" > /dev/null 2>&1 || return 1
+    systemctl restart "$1"
+}
+
+if [ -n "${UPDATE_RESTART_CMD:-}" ]; then
+    echo "Genstarter med UPDATE_RESTART_CMD: $UPDATE_RESTART_CMD"
+    # shellcheck disable=SC2086
+    eval "$UPDATE_RESTART_CMD"
+    exit $?
+fi
+
+for unit in command-center steamgears-command-center; do
+    if restart_systemd_user "$unit"; then
+        echo "Genstartede systemd --user unit '$unit'."
+        exit 0
+    fi
+done
+
+if restart_systemd_system command-center; then
+    echo "Genstartede systemd unit 'command-center'."
+    exit 0
+fi
+
+# Ingen unit: brug pidfile fra run.sh og start appen igen i baggrunden.
+if [ -f "$PIDFILE" ]; then
+    OLD_PID="$(cat "$PIDFILE" 2>/dev/null)"
+    if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+        echo "Stopper proces $OLD_PID..."
+        kill "$OLD_PID" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            kill -0 "$OLD_PID" 2>/dev/null || break
+            sleep 0.5
+        done
+        kill -9 "$OLD_PID" 2>/dev/null || true
+    fi
+fi
+
+echo "Starter appen igen (log: $LOG)..."
+nohup ./run.sh >> "$LOG" 2>&1 &
+echo "Ny proces startet - foelg opstarten i $LOG"
+exit 0
+EOF_RESTART
+cat << 'EOF_UPDATE' > scripts/update.sh
+#!/bin/bash
+# Opdaterer Command Center fra GitHub: tjek -> filsynk (med backup) -> requirements -> genstart.
+# Appens update-endpoints bruges, saa logikken findes kun ét sted.
+#
+#   bash scripts/update.sh              # opdater + genstart, vent til appen svarer
+#   bash scripts/update.sh --no-restart # opdater, men genstart selv bagefter
+#   bash scripts/update.sh --check      # kun tjek, skriv intet
+#
+# Kraever JUNO_TOKEN i .env (maskin-noegle til /api/*).
+set -u
+cd "$(dirname "$0")/.."
+
+if [ -f .env ]; then
+    set -a; source .env; set +a
+fi
+
+MODE="apply"
+case "${1:-}" in
+    --no-restart) MODE="apply-no-restart" ;;
+    --check) MODE="check" ;;
+    -h|--help)
+        sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+        exit 0
+        ;;
+    "") ;;
+    *) echo "Ukendt argument: $1 (brug --check, --no-restart eller -h)" >&2; exit 64 ;;
+esac
+
+HOST="${CC_HOST:-127.0.0.1}"
+PORT="${CC_PORT:-8000}"
+case "$HOST" in
+    0.0.0.0|::|"") PROBE=127.0.0.1 ;;
+    *) PROBE="$HOST" ;;
+esac
+BASE="http://$PROBE:$PORT"
+TOKEN="${JUNO_TOKEN:-}"
+
+PY="./venv/bin/python"
+[ -x "$PY" ] || PY="python3"
+field() {
+    printf '%s' "$1" | "$PY" -c 'import json,sys;print(json.load(sys.stdin).get(sys.argv[1]))' "$2" 2>/dev/null
+}
+
+if [ -z "$TOKEN" ]; then
+    echo "❌ JUNO_TOKEN mangler i .env - update-endpoints kraever maskin-noeglen." >&2
+    exit 2
+fi
+if ! curl -sf -o /dev/null --max-time 5 -H "X-CC-Token: $TOKEN" "$BASE/api/update"; then
+    echo "❌ Appen svarer ikke paa $BASE - start den foerst (./run.sh)." >&2
+    exit 3
+fi
+
+echo "→ Tjekker GitHub mod $BASE..."
+CHECK="$(curl -s --max-time 120 -X POST -H "X-CC-Token: $TOKEN" "$BASE/api/update/check")"
+[ -n "$CHECK" ] || { echo "❌ Tomt svar fra /api/update/check" >&2; exit 4; }
+echo "   installeret: $(field "$CHECK" current)"
+echo "   nyeste:      $(field "$CHECK" latest)  $(field "$CHECK" message)"
+if [ "$(field "$CHECK" ok)" != "True" ]; then
+    echo "❌ Tjekket fejlede: $(field "$CHECK" error)" >&2
+    exit 4
+fi
+if [ "$(field "$CHECK" behind)" != "True" ]; then
+    echo "✅ Du kører nyeste version."
+    exit 0
+fi
+
+if [ "$MODE" = "check" ]; then
+    echo "⬆️  Ny version tilgængelig."
+    exit 0
+fi
+
+RESTART=1
+[ "$MODE" = "apply-no-restart" ] && RESTART=0
+echo "→ Henter og skriver filer (DB-backup foerst, requirements installeres hvis de er aendret)..."
+RESULT="$(curl -s --max-time 600 -X POST -H "X-CC-Token: $TOKEN" "$BASE/api/update/apply?restart=$RESTART")"
+[ -n "$RESULT" ] || { echo "❌ Tomt svar fra /api/update/apply" >&2; exit 5; }
+
+echo "   ok:           $(field "$RESULT" ok)"
+echo "   filer:        $(printf '%s' "$RESULT" | "$PY" -c 'import json,sys;print(len(json.load(sys.stdin).get("files") or []))' 2>/dev/null)"
+echo "   requirements: $(printf '%s' "$RESULT" | "$PY" -c 'import json,sys;d=json.load(sys.stdin).get("requirements_install") or {};print(("OK" if d.get("ok") else "FEJL")+": "+(d.get("output") or "")[:200])' 2>/dev/null)"
+if [ "$(field "$RESULT" ok)" != "True" ]; then
+    echo "❌ Opdateringen fejlede: $(field "$RESULT" error)" >&2
+    exit 5
+fi
+echo "   genstart:     $(printf '%s' "$RESULT" | "$PY" -c 'import json,sys;r=json.load(sys.stdin).get("restart") or {};print(("planlagt ("+str(r.get("mode"))+")") if r.get("scheduled") else "IKKE planlagt: "+str(r.get("reason")))' 2>/dev/null)"
+
+if [ "$RESTART" = "0" ]; then
+    echo "✅ Filer opdateret. Genstart selv: bash scripts/restart.sh"
+    exit 0
+fi
+
+echo "→ Venter paa at appen svarer igen..."
+for _ in $(seq 1 60); do
+    sleep 1
+    if curl -sf -o /dev/null --max-time 3 "$BASE/health"; then
+        echo "✅ Opdateret og genstartet - $BASE svarer igen."
+        exit 0
+    fi
+done
+echo "⚠️  Appen svarede ikke inden 60 s. Se logs: journalctl --user -u command-center (eller nohup.out)" >&2
+exit 6
+EOF_UPDATE
 cat << 'EOF_SMOKE' > "$PROJECT_DIR/scripts/smoke_test.sh"
 #!/bin/bash
-# Command Center smoke-test (v7.9) - koer efter install eller self-update.
-# Brug: bash scripts/smoke_test.sh
+# Command Center smoke-test - koer efter install eller self-update.
+# Brug: bash scripts/smoke_test.sh   (CC_HOST/CC_PORT overstyrer adressen)
+HOST="${CC_HOST:-127.0.0.1}"
 PORT="${CC_PORT:-8000}"
+PUBLIC="${CC_PUBLIC_URL:-}"
+PROBE="$HOST"
+case "$HOST" in
+    0.0.0.0|::|"") PROBE=127.0.0.1 ;;
+esac
+BASE="http://$PROBE:$PORT"
+echo "Smoke-test mod $BASE (lytter paa $HOST:$PORT)"
+[ -n "$PUBLIC" ] && echo "Offentlig adresse (bag nginx): $PUBLIC"
 ok=1
-for p in /health /login; do
-  code=$(curl -s -o /dev/null --max-time 5 -w "%{http_code}" "http://127.0.0.1:$PORT$p" 2>/dev/null) || code=000
+for p in /health /login /setup; do
+  code=$(curl -s -o /dev/null --max-time 5 -w "%{http_code}" "$BASE$p" 2>/dev/null) || code=000
   case "$code" in
-    200) echo "OK   $p -> 200" ;;
+    200|303) echo "OK   $p -> $code" ;;
     *) echo "FAIL $p -> $code"; ok=0 ;;
   esac
 done
 if [ "$ok" = "1" ]; then
-  echo "✅ Smoke-test OK"
+  echo "✅ Smoke-test OK — åbn ${PUBLIC:-$BASE} (første besøg opretter din bruger)"
 else
-  echo "❌ Smoke-test FEJLEDE - tjek logs: journalctl -u command-center ellers tail -50 ~/command-center/nohup.out"
+  echo "❌ Smoke-test FEJLEDE - tjek logs: journalctl --user -u command-center ellers journalctl -u command-center"
 fi
 exit $((1 - ok))  # 0 = alt OK (shell-konvention)
 EOF_SMOKE
@@ -4003,15 +4971,28 @@ EOF_SMOKE
 echo "📄 run.bat..."
 cat << 'EOF_WINBAT' > "$PROJECT_DIR/run.bat"
 @echo off
-REM Command Center - Windows startscript (v7.9). Ligger .env ved siden af og koer filen.
+REM Command Center - Windows startscript. Opretter din bruger ved foerste besoeg (ingen token).
 cd /d "%~dp0"
 if exist .env for /f "usebackq eol=# tokens=1,* delims==" %%a in (".env") do set "%%a=%%b"
+set "HOST=127.0.0.1"
+set "PORT=8000"
+set "FORWARDED=127.0.0.1"
+if defined CC_HOST set "HOST=%CC_HOST%"
+if defined CC_PORT set "PORT=%CC_PORT%"
+if defined CC_FORWARDED_ALLOW_IPS set "FORWARDED=%CC_FORWARDED_ALLOW_IPS%"
 if not exist venv python -m venv venv
 call venv\Scripts\activate.bat
 python -m pip install --upgrade pip > nul 2>&1
 python -m pip install -r requirements.txt
-echo Starter Command Center v7.9 (Windows - lokal brug, self-update er Linux-only)...
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+set "LAN="
+for /f "tokens=2 delims=:" %%i in ('ipconfig ^| findstr /c:"IPv4"') do if not defined LAN set "LAN=%%i"
+if defined LAN set "LAN=%LAN: =%"
+echo Starter Command Center v7.11 (Windows)...
+echo    Lokalt:   http://127.0.0.1:%PORT%
+if defined CC_PUBLIC_URL echo    Offentlig: %CC_PUBLIC_URL%   (via nginx -^> http://%HOST%:%PORT%)
+if defined LAN echo    Netvaerk: http://%LAN%:%PORT%   (naas kun med CC_HOST=0.0.0.0)
+echo    Login:    opret din bruger ved foerste besoeg (ingen token).
+python -m uvicorn app.main:app --host %HOST% --port %PORT% --proxy-headers --forwarded-allow-ips %FORWARDED%
 EOF_WINBAT
 
 if [ -f "$PROJECT_DIR/.env" ]; then echo "✅ .env findes allerede - bruger den"; else cp "$PROJECT_DIR/.env.example" "$PROJECT_DIR/.env"; echo "⚠ Opret .env (se .env.example) inden foerste start"; fi
@@ -4021,20 +5002,56 @@ cd "$(dirname "$0")"
 if [ -f .env ]; then
     set -a; source .env; set +a
 fi
+HOST="${CC_HOST:-127.0.0.1}"
+PORT="${CC_PORT:-8000}"
+PUBLIC="${CC_PUBLIC_URL:-}"
+FORWARDED="${CC_FORWARDED_ALLOW_IPS:-127.0.0.1}"
+
+# Maskinens rigtige IPv4 (bruges naar der lyttes paa 0.0.0.0)
+lan_ip() {
+    { hostname -I 2>/dev/null | awk '{print $1}'
+      ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") print $(i + 1)}'
+    } | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1
+}
+
 if [ ! -d "venv" ]; then
     python3 -m venv venv
 fi
 source venv/bin/activate
 pip install --upgrade pip > /dev/null 2>&1
 pip install -r requirements.txt
-echo "⚡ Starter Command Center v7.10..."
+
+mkdir -p app/data
+echo $$ > app/data/cc.pid   # pidfile: scripts/restart.sh kan genstarte en app startet med ./run.sh
+echo "⚡ Starter Command Center v7.11..."
+echo "   Lokalt:   http://127.0.0.1:$PORT"
+if [ -n "$PUBLIC" ]; then
+    echo "   Offentlig: $PUBLIC   (via nginx -> http://$HOST:$PORT)"
+    echo "   nginx:    proxy_set_header X-Forwarded-Proto \$scheme;  (ellers bliver cookien ikke Secure)"
+fi
+case "$HOST" in
+    0.0.0.0|::|"")
+        echo "   Netvaerk: http://$(lan_ip || echo '<din-ip>'):$PORT   (lytter paa $HOST:$PORT)"
+        ;;
+    *)
+        echo "   Lytter paa $HOST:$PORT — brug CC_HOST=0.0.0.0 for adgang uden nginx"
+        ;;
+esac
+echo "   Login:    opret din bruger ved foerste besoeg (ingen token), derefter brugernavn + adgangskode"
+
 if [ "$DEV" = "1" ]; then
-    uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+    exec uvicorn app.main:app --host "$HOST" --port "$PORT" --proxy-headers --forwarded-allow-ips "$FORWARDED" --reload
 else
-    uvicorn app.main:app --host 127.0.0.1 --port 8000
+    exec uvicorn app.main:app --host "$HOST" --port "$PORT" --proxy-headers --forwarded-allow-ips "$FORWARDED"
 fi
 EOF_RUN
 chmod +x "$PROJECT_DIR/run.sh"
-if curl -s -o /dev/null --max-time 3 http://127.0.0.1:8000/health 2>/dev/null; then echo "🔎 App koerer allerede - koerer smoke-test:"; bash "$PROJECT_DIR/scripts/smoke_test.sh" || true; fi
-echo "✨ Installation klar! Sæt noegler i $PROJECT_DIR/.env og kør: cd ~/command-center && ./run.sh (smoke-test bagefter: bash scripts/smoke_test.sh)"
+if curl -s -o /dev/null --max-time 3 "http://127.0.0.1:${CC_PORT:-8000}/health" 2>/dev/null; then echo "🔎 App koerer allerede - koerer smoke-test:"; bash "$PROJECT_DIR/scripts/smoke_test.sh" || true; fi
+LAN_IP=$({ hostname -I 2>/dev/null | awk '{print $1}'; ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") print $(i + 1)}'; } | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+echo "✨ Installation klar!"
+echo "   Start:      cd $PROJECT_DIR && ./run.sh"
+echo "   Adresse:    http://127.0.0.1:${CC_PORT:-8000}   (LAN: http://${LAN_IP:-<din-ip>}:${CC_PORT:-8000} naar CC_HOST=0.0.0.0)"
+echo "   Login:      opret din bruger ved foerste besoeg - ingen token"
+echo "   Smoke-test: bash $PROJECT_DIR/scripts/smoke_test.sh"
+echo "   nginx:      saet CC_PUBLIC_URL i $PROJECT_DIR/.env og brug deploy/nginx-command-center.conf"
 

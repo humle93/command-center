@@ -27,17 +27,51 @@ import io
 import time
 import re
 import hashlib
+import hmac
 import json as jsonlib
 import subprocess
 import sys
+import tarfile
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data", "center.db")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
+try:  # python-dotenv er i requirements, men appen skal ogsaa kunne starte uden
+    from dotenv import load_dotenv as _load_dotenv_file
+except Exception:
+    _load_dotenv_file = None
+
+
+def load_dotenv(path=None):
+    """Laes .env FOER konfigurationen nedenfor - rigtige miljoevariabler vinder.
+
+    Inline-kommentarer (`KEY=   # note`) fjernes ogsaa naar python-dotenv bruges, saa en
+    kommentar fra .env-skabelonen ikke ender som vaerdi (fx et JUNO_TOKEN bestaaende af tekst)."""
+    path = path or os.path.join(os.path.dirname(BASE_DIR), ".env")
+    if not os.path.exists(path):
+        return
+    entries = []
+    for line in open(path):
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        entries.append((key.strip(), val.strip(), val.split(" #")[0].strip()))
+    if _load_dotenv_file is not None:
+        _load_dotenv_file(path, override=False)
+    for key, raw, cleaned in entries:
+        current = os.environ.get(key)
+        if current is None:
+            os.environ[key] = cleaned            # ikke sat (fallback uden python-dotenv)
+        elif current.strip() == raw:
+            os.environ[key] = cleaned            # python-dotenv tog inline-kommentaren med
+
+
+load_dotenv()
+
 # --- Konfiguration via miljoevariabler / .env ---
-APP_TOKEN = os.environ.get("APP_TOKEN", "").strip()          # login-token (tom = ingen auth, lokal tilstand)
-JUNO_TOKEN = os.environ.get("JUNO_TOKEN", "").strip()
+JUNO_TOKEN = os.environ.get("JUNO_TOKEN", "").strip()        # maskin-noegle til /api/* (valgfri)
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()     # GitHub-token: pull-bro + selv-opdatering
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "humle93/command-center").strip()
 BRIDGE_POLL_MINUTES = int(os.environ.get("BRIDGE_POLL_MINUTES", "60"))  # hvor ofte CC henter bridge-filer
@@ -54,7 +88,7 @@ SSL_WARN_DAYS = int(os.environ.get("SSL_WARN_DAYS", "30"))
 LINKCHECK_LIMIT = int(os.environ.get("LINKCHECK_LIMIT", "25"))
 PSI_API_KEY = os.environ.get("PSI_API_KEY", "").strip()   # Google PageSpeed API (gratis noegle)
 
-APP_VERSION = "7.10.0"
+APP_VERSION = "7.11.0"
 app = FastAPI(title="Command Center Engine", version=APP_VERSION)
 # Git does not keep empty folders, so a fresh clone has no app/static: create it or startup fails.
 os.makedirs(STATIC_DIR, exist_ok=True)
@@ -63,29 +97,6 @@ templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 scheduler = AsyncIOScheduler(timezone="Europe/Copenhagen")
 executor = ThreadPoolExecutor(max_workers=8)
 
-
-def load_dotenv(path=None):
-    path = path or os.path.join(os.path.dirname(BASE_DIR), ".env")
-    if not os.path.exists(path):
-        return
-    for line in open(path):
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        os.environ.setdefault(key.strip(), val.strip())
-
-
-load_dotenv()
-APP_TOKEN = os.environ.get("APP_TOKEN", "").strip()
-AIMLAPI_KEY = os.environ.get("AIMLAPI_KEY", "").strip()
-WP_URL = os.environ.get("WP_URL", "").strip()
-WP_USER = os.environ.get("WP_USER", "").strip()
-WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "").strip()
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "").strip()
-TRACK_DOMAIN = os.environ.get("TRACK_DOMAIN", "steamgears.eu").strip()
 
 
 _WAL_SET = False
@@ -314,6 +325,19 @@ def init_db():
             top_domains TEXT,
             created_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            created_at TEXT,
+            last_seen TEXT,
+            expires_at TEXT
+        );
         """)
 
 
@@ -341,6 +365,7 @@ def migrate_db():
             "articles": ["meta_title", "meta_desc"],
             "seopages": ["content_hash", "redirects"],
             "crawl_runs": ["sitemap_broken", "sitemap_missing"],
+            "monitors": ["last_value"],
         }.items():
             existing = [r[1] for r in db.execute(f"PRAGMA table_info({table})").fetchall()]
             for c in want:
@@ -400,48 +425,198 @@ def set_module(name: str, state: str):
 
 
 def cleanup_old_data():
-    """Daglig oprydning: gamle maalinger rulles af, DB holdes sund."""
+    """Daglig oprydning: gamle maalinger rulles af, DB holdes sund.
+
+    Tidspunkter gemmes som lokal ISO-tid (now_iso), saa cutoff skal regnes i Python -
+    SQLite's datetime('now') er UTC og rammer derfor forkert."""
+    now = datetime.now()
+
+    def cutoff(days):
+        return (now - timedelta(days=days)).isoformat(timespec="seconds")
+
     with get_db() as db:
-        db.execute("DELETE FROM check_history WHERE checked_at < datetime('now', '-90 days')")
-        db.execute("DELETE FROM alarms WHERE resolved=1 AND created_at < datetime('now', '-30 days')")
-        db.execute("DELETE FROM health_history WHERE checked_at < datetime('now', '-180 days')")
-        db.execute("DELETE FROM keyword_ideas WHERE created_at < datetime('now', '-180 days')")
+        db.execute("DELETE FROM check_history WHERE checked_at < ?", (cutoff(90),))
+        db.execute("DELETE FROM alarms WHERE resolved=1 AND created_at < ?", (cutoff(30),))
+        db.execute("DELETE FROM health_history WHERE checked_at < ?", (cutoff(180),))
+        db.execute("DELETE FROM keyword_ideas WHERE created_at < ?", (cutoff(180),))
 
 
-# ---------- Auth ----------
+# ---------- Auth: brugere, sessioner og Juno-token ----------
+# Dashboardet har rigtige brugere: brugernavn + adgangskode (PBKDF2-SHA256 med salt pr. bruger).
+# Foerste besoeg opretter den foerste bruger via /setup - der er ingen delt token i .env.
+# JUNO_TOKEN findes stadig som maskin-noegle, men giver KUN adgang til /api/* (bridge-push fra Juno).
+SESSION_COOKIE = "cc_session"
+SESSION_MAX_AGE = 60 * 60 * 24 * 30        # 30 dage
+PBKDF2_ITERATIONS = 240_000
+MIN_PASSWORD_LEN = 8
+_USERNAME_RE = re.compile(r"[A-Za-z0-9._-]{3,32}")
+
+_LOGIN_FAILS: dict = {}  # IP -> (antal fejl, laas-til)
+_LOGIN_MAX_FAILS = 5
+_LOGIN_LOCK_SECONDS = 600
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", (password or "").encode(), salt, PBKDF2_ITERATIONS)
+    return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        algo, iterations, salt_hex, digest_hex = (stored or "").split("$")
+        if algo != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac("sha256", (password or "").encode(), bytes.fromhex(salt_hex), int(iterations))
+        return hmac.compare_digest(digest.hex(), digest_hex)
+    except Exception:
+        return False
+
+
+def _session_key(sid: str) -> str:
+    """Sessioner gemmes som sha256(id), saa en kopi af databasen ikke giver adgang."""
+    return hashlib.sha256((sid or "").encode()).hexdigest()
+
+
+def user_count() -> int:
+    try:
+        with get_db() as db:
+            return db.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+    except Exception:
+        return 0
+
+
+def create_user(username: str, password: str) -> int:
+    username = (username or "").strip()
+    if not _USERNAME_RE.fullmatch(username):
+        raise ValueError("Brugernavn: 3-32 tegn (a-z, 0-9, punktum, bindestreg, underscore)")
+    if len(password or "") < MIN_PASSWORD_LEN:
+        raise ValueError(f"Adgangskoden skal vaere mindst {MIN_PASSWORD_LEN} tegn")
+    with get_db() as db:
+        cur = db.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?,?,?)",
+                         (username, hash_password(password), now_iso()))
+        return cur.lastrowid
+
+
+def start_session(user_id: int) -> str:
+    sid = secrets.token_urlsafe(32)
+    expires = (datetime.now() + timedelta(seconds=SESSION_MAX_AGE)).isoformat(timespec="seconds")
+    with get_db() as db:
+        db.execute("DELETE FROM sessions WHERE expires_at < ?", (now_iso(),))
+        db.execute("INSERT INTO sessions (id, user_id, created_at, last_seen, expires_at) VALUES (?,?,?,?,?)",
+                   (_session_key(sid), user_id, now_iso(), now_iso(), expires))
+    return sid
+
+
+def end_session(sid: str):
+    if sid:
+        with get_db() as db:
+            db.execute("DELETE FROM sessions WHERE id=?", (_session_key(sid),))
+
+
+def session_redirect(request: Request, sid: str) -> RedirectResponse:
+    resp = RedirectResponse("/", status_code=303)
+    resp.set_cookie(SESSION_COOKIE, sid, httponly=True, samesite="lax",
+                    max_age=SESSION_MAX_AGE, secure=request.url.scheme == "https")
+    return resp
+
+
+def current_user(request: Request):
+    """Brugeren bag session-cookien (eller None)."""
+    sid = request.cookies.get(SESSION_COOKIE) or ""
+    if not sid:
+        return None
+    key = _session_key(sid)
+    try:
+        with get_db() as db:
+            row = db.execute(
+                "SELECT u.id, u.username, s.expires_at FROM sessions s "
+                "JOIN users u ON u.id = s.user_id WHERE s.id=?", (key,)
+            ).fetchone()
+            if not row:
+                return None
+            if (row["expires_at"] or "") < now_iso():
+                db.execute("DELETE FROM sessions WHERE id=?", (key,))
+                return None
+            db.execute("UPDATE sessions SET last_seen=? WHERE id=?", (now_iso(), key))
+            return {"id": row["id"], "username": row["username"]}
+    except Exception:
+        return None
+
+
 def is_authed(request: Request) -> bool:
-    if not APP_TOKEN:
-        return True
-    # Constant-time comparison so the token cannot be guessed from response timing.
-    supplied = request.cookies.get("cc_token") or request.headers.get("x-cc-token") or ""
-    return secrets.compare_digest(supplied, APP_TOKEN)
+    """Er kaldet lavet af en logget-ind bruger? (Juno-token haandteres af middlewaren.)"""
+    return bool(getattr(request.state, "user", None))
 
 
 def is_juno(request: Request) -> bool:
-    """Juno-adgang: separat token, gyldig KUN for /api/*-endpoints (laese-data + bridge-push)."""
-    return bool(JUNO_TOKEN) and request.headers.get("x-cc-token") == JUNO_TOKEN
+    """Juno-adgang: separat maskin-noegle, gyldig KUN for /api/*-endpoints."""
+    supplied = request.headers.get("x-cc-token") or ""
+    return bool(JUNO_TOKEN) and secrets.compare_digest(supplied, JUNO_TOKEN)
 
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
-    request.state.insecure = (request.headers.get("x-forwarded-proto", "https") == "http" and (request.client.host if request.client else "") not in ("127.0.0.1", "::1"))
-    public = ("/login", "/health", "/static")
-    if APP_TOKEN and not any(path.startswith(p) for p in public) and not is_authed(request):
-        if path.startswith("/api/") and is_juno(request):
+    host = request.client.host if request.client else ""
+    # scheme er allerede X-Forwarded-Proto-resolveret af uvicorn/starlette.
+    request.state.insecure = request.url.scheme == "http" and host not in ("127.0.0.1", "::1", "localhost")
+    request.state.user = current_user(request)
+    if any(path.startswith(p) for p in ("/login", "/setup", "/health", "/static")):
+        return await call_next(request)
+    if request.state.user:
+        return await call_next(request)
+    if path.startswith("/api/"):
+        if is_juno(request):
             juno_forbidden = ("/api/bridge", "/api/duplicates", "/api/visibility", "/api/health-history")
-            if request.method != "GET" and any(path.startswith(fp) for fp in juno_forbidden) and not (path == "/api/bridge/gsc" or path == "/api/bridge/drift"):
-                return JSONResponse({"error": "juno-token: kun GET eller bridge-push"}, status_code=403)  # Juno-token har adgang til API-endpoints (inkl. bridge-push)
-        elif path.startswith("/api/"):
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
-        else:
-            return RedirectResponse("/login", status_code=303)
-    return await call_next(request)
+            if request.method != "GET" and any(path.startswith(fp) for fp in juno_forbidden) \
+                    and path not in ("/api/bridge/gsc", "/api/bridge/drift"):
+                return JSONResponse({"error": "juno-token: kun GET eller bridge-push"}, status_code=403)
+            return await call_next(request)
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return RedirectResponse("/setup" if user_count() == 0 else "/login", status_code=303)
+
+
+@app.get("/setup", response_class=HTMLResponse)
+async def setup_page(request: Request):
+    if user_count() > 0:
+        return RedirectResponse("/login", status_code=303)
+    return templates.TemplateResponse("login.html", {"request": request, "mode": "setup", "error": "", "username": ""})
+
+
+@app.post("/setup")
+async def setup_user(request: Request):
+    """Foerste start: opret den foerste bruger (kun naar der ikke findes brugere)."""
+    if user_count() > 0:
+        return RedirectResponse("/login", status_code=303)
+    form = await request.form()
+    username = (form.get("username") or "").strip()
+    password = form.get("password") or ""
+    confirm = form.get("confirm") or ""
+    err = ""
+    user_id = None
+    if password != confirm:
+        err = "De to adgangskoder er ikke ens"
+    else:
+        try:
+            user_id = create_user(username, password)
+        except ValueError as e:
+            err = str(e)
+        except sqlite3.IntegrityError:
+            err = "Brugernavnet er allerede taget"
+    if not user_id:
+        return templates.TemplateResponse("login.html", {"request": request, "mode": "setup",
+                                                         "username": username, "error": err}, status_code=400)
+    with get_db() as db:
+        add_alarm(db, "brugere", f"Foerste bruger '{username}' oprettet", "info")
+    return session_redirect(request, start_session(user_id))
 
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request, "error": ""})
+    if user_count() == 0:
+        return RedirectResponse("/setup", status_code=303)
+    return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "error": "", "username": ""})
 
 
 @app.post("/login")
@@ -450,30 +625,80 @@ async def login(request: Request):
     now = time.time()
     fails, locked_until = _LOGIN_FAILS.get(ip, (0, 0.0))
     if locked_until > now:
-        return templates.TemplateResponse("login.html", {"request": request, "error": "For mange fejlede login - proev igen om " + str(int(locked_until - now)) + " sek."}, status_code=429)
+        return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "username": "",
+                                                         "error": "For mange fejlede logins - proev igen om " + str(int(locked_until - now)) + " sek."}, status_code=429)
     form = await request.form()
-    token = (form.get("token") or "").strip()
-    if APP_TOKEN and secrets.compare_digest(token, APP_TOKEN):
-        resp = RedirectResponse("/", status_code=303)
-        resp.set_cookie("cc_token", token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30)
+    username = (form.get("username") or "").strip()
+    password = form.get("password") or ""
+    with get_db() as db:
+        user = db.execute("SELECT id, username, password_hash FROM users WHERE username=?", (username,)).fetchone()
+    if user and verify_password(password, user["password_hash"]):
         _LOGIN_FAILS.pop(ip, None)
-        return resp
+        return session_redirect(request, start_session(user["id"]))
     fails += 1
-    if fails >= 5:
-        _LOGIN_FAILS[ip] = (0, now + 600)  # 5 fejl = 10 min laas
-    else:
-        _LOGIN_FAILS[ip] = (fails, locked_until)
-    return templates.TemplateResponse("login.html", {"request": request, "error": "Forkert token"}, status_code=401)
+    _LOGIN_FAILS[ip] = (0, now + _LOGIN_LOCK_SECONDS) if fails >= _LOGIN_MAX_FAILS else (fails, locked_until)
+    if len(_LOGIN_FAILS) > 2000:  # undgaa at listen vokser ubegraenset
+        _LOGIN_FAILS.clear()
+    return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "username": username,
+                                                     "error": "Forkert brugernavn eller adgangskode"}, status_code=401)
 
 
 @app.get("/logout")
-async def logout():
+async def logout(request: Request):
+    end_session(request.cookies.get(SESSION_COOKIE) or "")
     resp = RedirectResponse("/login", status_code=303)
-    resp.delete_cookie("cc_token")
+    resp.delete_cookie(SESSION_COOKIE)
     return resp
 
 
-_LOGIN_FAILS: dict = {}  # v7.9: IP -> (antal fejl, laas-til)
+@app.post("/users/add")
+async def users_add(username: str = Form(...), password: str = Form(...)):
+    try:
+        create_user(username, password)
+    except ValueError as e:
+        with get_db() as db:
+            add_alarm(db, "brugere", f"Kunne ikke oprette bruger '{username}': {str(e)[:120]}", "advarsel")
+    except sqlite3.IntegrityError:
+        with get_db() as db:
+            add_alarm(db, "brugere", f"Kunne ikke oprette bruger '{username}': navnet er optaget", "advarsel")
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/users/delete")
+async def users_delete(request: Request, id: int = Form(...)):
+    me = getattr(request.state, "user", None)
+    with get_db() as db:
+        total = db.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+        if total <= 1:
+            add_alarm(db, "brugere", "Den sidste bruger kan ikke slettes - opret en ny bruger foerst", "advarsel")
+            return RedirectResponse("/", status_code=303)
+        db.execute("DELETE FROM sessions WHERE user_id=?", (id,))
+        db.execute("DELETE FROM users WHERE id=?", (id,))
+    if me and me["id"] == id:
+        resp = RedirectResponse("/login", status_code=303)
+        resp.delete_cookie(SESSION_COOKIE)
+        return resp
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/users/password")
+async def users_password(request: Request, current: str = Form(...), new: str = Form(...), confirm: str = Form("")):
+    me = getattr(request.state, "user", None)
+    if not me:
+        return RedirectResponse("/login", status_code=303)
+    with get_db() as db:
+        row = db.execute("SELECT password_hash FROM users WHERE id=?", (me["id"],)).fetchone()
+        if not row or not verify_password(current, row["password_hash"]):
+            add_alarm(db, "brugere", f"Fejlet adgangskode-skift for '{me['username']}'", "info")
+            return RedirectResponse("/", status_code=303)
+        if new != confirm or len(new) < MIN_PASSWORD_LEN:
+            add_alarm(db, "brugere", f"Adgangskode-skift afvist for '{me['username']}': mindst {MIN_PASSWORD_LEN} tegn og ens i begge felter", "info")
+            return RedirectResponse("/", status_code=303)
+        db.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(new), me["id"]))
+        # Log de andre sessioner ud, behold denne.
+        db.execute("DELETE FROM sessions WHERE user_id=? AND id<>?",
+                   (me["id"], _session_key(request.cookies.get(SESSION_COOKIE) or "")))
+    return RedirectResponse("/", status_code=303)
 
 
 # ---------- Hjaelpere ----------
@@ -598,7 +823,7 @@ def check_domain_sync(url: str):
         ssl_days = None
         if url.startswith("https://"):
             try:
-                host = urlparse(url).netloc
+                host = urlparse(url).hostname or ""  # netloc kan indeholde port -> socket fejler
                 context = ssl.create_default_context()
                 with socket.create_connection((host, 443), timeout=4) as sock:
                     with context.wrap_socket(sock, server_hostname=host) as ssock:
@@ -649,7 +874,7 @@ def check_all_domains_sync():
 
 @app.post("/domains/check")
 async def check_all_domains():
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(executor, check_all_domains_sync)
     return RedirectResponse("/", status_code=303)
 
@@ -890,7 +1115,7 @@ async def run_seo_audit(request: Request):
     keyword = form.get("keyword", "")
     use_psi = form.get("psi", "") == "1"
     level = form.get("level", "standard")
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(executor, analyze_page, url, keyword)
     result["url"] = url
     result["level"] = level
@@ -907,7 +1132,7 @@ async def run_seo_audit(request: Request):
         if not use_psi and PSI_API_KEY:
             use_psi = True  # dyb scan koerer automatisk Core Web Vitals
     if use_psi:
-        loop2 = asyncio.get_event_loop()
+        loop2 = asyncio.get_running_loop()
         psi = await loop2.run_in_executor(executor, psi_fetch, url)
         if psi:
             result["psi"] = psi
@@ -922,9 +1147,15 @@ def site_crawl_sync(start_url: str, max_pages: int = 30):
     try:
         start_url = normalize_url(start_url)
         host = urlparse(start_url).netloc
+        # Behold det seneste crawl, saa crawl-diff kan sammenligne med det nye; ryd alt aeldre.
         with get_db() as db:
-            db.execute("DELETE FROM seopages")
-            db.execute("DELETE FROM crawl_runs")
+            keep = [r["id"] for r in db.execute("SELECT id FROM crawl_runs ORDER BY id DESC LIMIT 1").fetchall()]
+            if keep:
+                marks = ",".join("?" * len(keep))
+                db.execute(f"DELETE FROM seopages WHERE run_id NOT IN ({marks})", keep)
+                db.execute(f"DELETE FROM crawl_runs WHERE id NOT IN ({marks})", keep)
+            else:
+                db.execute("DELETE FROM seopages")
         # robots.txt + sitemap.xml
         robots_ok = sitemap_ok = False
         sitemap_count = 0
@@ -962,8 +1193,8 @@ def site_crawl_sync(start_url: str, max_pages: int = 30):
                 t0 = datetime.now()
                 resp = safe_request(current, timeout=10)
                 ms = int((datetime.now() - t0).total_seconds() * 1000)
-                res = analyze_page(current, "", html=resp.text if resp.status_code == 200 else None,
-                                   status_code=resp.status_code, ms=ms)
+                # html videregives altid, saa analyze_page ikke henter siden igen ved 4xx/5xx.
+                res = analyze_page(current, "", html=resp.text or "", status_code=resp.status_code, ms=ms)
                 status = resp.status_code
             except Exception:
                 res = {"score": 0, "title": "", "meta": "", "h1": "", "words": 0, "raw": []}
@@ -1052,7 +1283,7 @@ async def start_crawl(url: str = Form(...), max_pages: int = Form(30), level: st
     if preset:
         max_pages = preset
     max_pages = max(5, min(int(max_pages or 30), 100))
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     loop.run_in_executor(executor, site_crawl_sync, url, max_pages)
     return RedirectResponse("/", status_code=303)
 
@@ -1104,7 +1335,10 @@ async def gen_sitemap():
 @app.get("/api/redirects")
 async def redirect_audit():
     with get_db() as db:
-        rows = db.execute("SELECT url, redirects, http_status FROM seopages WHERE redirects != ''").fetchall()
+        rows = db.execute(
+            "SELECT url, redirects, http_status FROM seopages WHERE redirects != '' "
+            "AND run_id=(SELECT id FROM crawl_runs ORDER BY id DESC LIMIT 1)"
+        ).fetchall()
     chains = []
     loops = []
     insecure = []
@@ -1162,7 +1396,7 @@ async def discover(keyword: str = Form(...)):
     keyword = keyword.strip()
     if not keyword:
         return RedirectResponse("/", status_code=303)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(executor, discover_competitors_sync, keyword)
     return RedirectResponse("/", status_code=303)
 
@@ -1336,7 +1570,7 @@ async def create_article(keyword: str = Form(...)):
     err = None
     if AIMLAPI_KEY:
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             st_active = get_active_strategy()
             content = await loop.run_in_executor(executor, generate_article_ai, keyword, st_active)
             title = f"Guide: {keyword}"
@@ -1524,7 +1758,7 @@ def autopilot_sync():
 
 
 async def run_autopilot():
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(executor, autopilot_sync)
     return RedirectResponse("/", status_code=303)
 
@@ -1609,7 +1843,7 @@ def prospect_sync(keyword: str):
 async def backlink_prospect(keyword: str = Form(...)):
     keyword = keyword.strip()
     if keyword:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(executor, prospect_sync, keyword)
     return RedirectResponse("/", status_code=303)
 
@@ -1655,7 +1889,7 @@ def check_links_sync(url: str):
 
 @app.post("/links/check")
 async def check_page_links(url: str = Form(...)):
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(executor, check_links_sync, url)
     with get_db() as db:
         db.execute(
@@ -1789,12 +2023,12 @@ def sgap_sync() -> dict:
 async def job_sgap_sync():
     if not sgap_ready():
         return
-    await asyncio.get_event_loop().run_in_executor(executor, sgap_sync)
+    await asyncio.get_running_loop().run_in_executor(executor, sgap_sync)
 
 
 @app.post("/autopilot/sync")
 async def autopilot_sync_now():
-    await asyncio.get_event_loop().run_in_executor(executor, sgap_sync)
+    await asyncio.get_running_loop().run_in_executor(executor, sgap_sync)
     return RedirectResponse("/", status_code=303)
 
 
@@ -1818,7 +2052,7 @@ async def social_to_autopilot(id: int = Form(...)):
         return sgap_api("POST", "/drafts", json={"channel": channel, "title": title, "body": message, "ai_model": "command-center"})
 
     try:
-        result = await asyncio.get_event_loop().run_in_executor(executor, send)
+        result = await asyncio.get_running_loop().run_in_executor(executor, send)
         with get_db() as db:
             db.execute("UPDATE socialqueue SET status=? WHERE id=?", (f"sendt til autopilot (kladde #{result.get('id')})", id))
     except Exception as e:
@@ -1901,7 +2135,7 @@ async def delete_keyword(id: int = Form(...)):
 
 @app.post("/keywords/check")
 async def check_keywords():
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(executor, check_all_keywords_sync)
     return RedirectResponse("/", status_code=303)
 
@@ -1930,7 +2164,7 @@ def ingest_gsc_data(db, data):
             "INSERT INTO gsc_queries (day, query, clicks, impressions, position) VALUES (?,?,?,?,?) "
             "ON CONFLICT(day, query) DO UPDATE SET clicks=excluded.clicks, "
             "impressions=excluded.impressions, position=excluded.position",
-            (data.get("date", date.today().isoformat()), q.get("query", ""), q.get("clicks", ""),
+            (data.get("date", date.today().isoformat()), q.get("query", ""), q.get("clicks", 0),
              q.get("impressions", 0), q.get("position", 0)),
         )
     return len(days), len(queries)
@@ -2033,7 +2267,7 @@ def startup_selftest_sync():
             db.execute("DELETE FROM _selftest")
     except Exception as e:
         fejl.append("DB-skrivetest: " + str(e)[:80])
-    if APP_TOKEN and not AIMLAPI_KEY:
+    if user_count() and not AIMLAPI_KEY:
         fejl.append("AIMLAPI_KEY mangler - AI-artikler vil fejle")
     if ruter < 40:
         fejl.append("Kun " + str(ruter) + " ruter registreret (forventet 50+)")
@@ -2051,57 +2285,303 @@ def startup_selftest_sync():
 
 
 async def job_backup_db():
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(executor, backup_db_sync)
-
-
-def self_update_sync():
-    try:
-        if sys.platform.startswith("win"):
-            # v7.9: self-update bruger bash-installeren (Linux/macOS). Paa Windows: opdater manuelt.
-            with get_db() as db:
-                add_alarm(db, "self-update", "Self-update er ikke understoettet paa Windows endnu - opdater manuelt via git pull eller ny install.sh", "advarsel")
-            return False
-        backup_db_sync(tag="pre-update")  # rollback-punkt foer nye filer skrives
-        headers = {"Authorization": "Bearer " + GITHUB_TOKEN, "Accept": "application/vnd.github.raw"}
-        r = HTTP.get(f"https://api.github.com/repos/{GITHUB_REPO}/contents/install.sh", headers=headers, timeout=30)
-        r.raise_for_status()
-        script_path = os.path.join(os.path.dirname(BASE_DIR), "install.sh")
-        with open(script_path, "w") as f:
-            f.write(r.text)
-        subprocess.Popen(["bash", script_path], cwd=os.path.dirname(script_path))
-        return True
-    except Exception as e:
-        with get_db() as db:
-            add_alarm(db, "self-update", "Selv-opdatering fejlede: " + str(e)[:120], "advarsel")
-        return False
 
 
 @app.post("/self-update")
 async def self_update():
+    """Bevaret for gamle bogmaerker: koerer GitHub-opdateringen (backup + filsynk)."""
+    return await update_apply_now()
+
+
+# ---------- Opdatering fra GitHub (repo-synk, ikke remote shell) ----------
+# Henter tarballen for seneste commit paa main og skriver kun whitelistede projektfiler.
+# Der laves DB-backup foer hver opdatering, og appen skal genstartes bagefter.
+UPDATE_PATHS = (
+    "app/", "scripts/", "deploy/", "requirements.txt", "README.md", "run.sh", "run.bat",
+    "install.sh", "Dockerfile", "docker-compose.yml", ".env.example",
+)
+
+
+def _gh_headers(accept: str = "application/vnd.github+json") -> dict:
+    headers = {"Accept": accept, "User-Agent": f"CommandCenter/{APP_VERSION}"}
     if GITHUB_TOKEN:
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(executor, self_update_sync)
+        headers["Authorization"] = "Bearer " + GITHUB_TOKEN
+    return headers
+
+
+def deployed_commit() -> str:
+    """Installeret commit (fra settings, ellers fra git-historikken - som saa gemmes)."""
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT value FROM settings WHERE key='deployed_commit'").fetchone()
+        if row and row["value"]:
+            return row["value"]
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(["git", "-C", os.path.dirname(BASE_DIR), "rev-parse", "HEAD"],
+                             capture_output=True, text=True, timeout=5)
+        sha = out.stdout.strip() if out.returncode == 0 else ""
+        if sha:
+            with get_db() as db:
+                db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('deployed_commit', ?)", (sha,))
+            return sha
+    except Exception:
+        pass
+    return ""
+
+
+def update_check_sync() -> dict:
+    """Sammenligner installeret commit med seneste commit paa main."""
+    result = {"ok": False, "current": deployed_commit(), "latest": "", "behind": False,
+              "date": "", "message": "", "url": "", "error": ""}
+    if not GITHUB_TOKEN:
+        result["error"] = "GITHUB_TOKEN mangler - opdatering fra GitHub kraever adgang til repoet"
+        return result
+    try:
+        r = HTTP.get(f"https://api.github.com/repos/{GITHUB_REPO}/commits",
+                     params={"sha": "main", "per_page": 1}, headers=_gh_headers(), timeout=20)
+        if r.status_code in (401, 403):
+            result["error"] = "GitHub afviste adgang (401/403) - tjek GITHUB_TOKEN"
+            return result
+        if r.status_code == 404:
+            result["error"] = f"Repoet {GITHUB_REPO} blev ikke fundet - tjek GITHUB_REPO"
+            return result
+        r.raise_for_status()
+        commits = r.json()
+        if not isinstance(commits, list) or not commits:
+            result["error"] = "Ingen commits fundet paa main"
+            return result
+        commit = commits[0]
+        info = commit.get("commit") or {}
+        result["latest"] = commit.get("sha", "")
+        result["date"] = (info.get("author") or {}).get("date", "")
+        result["message"] = (info.get("message") or "").splitlines()[0][:200]
+        result["url"] = commit.get("html_url", "")
+        result["behind"] = bool(result["latest"] and result["latest"] != result["current"])
+        result["ok"] = True
+    except Exception as e:
+        result["error"] = "Opdaterings-tjek fejlede: " + str(e)[:150]
+    return result
+
+
+def _safe_extract(tar, dest: str):
+    """Pak kun whitelistede filer ud - ingen .., absolutte stier eller links."""
+    written = []
+    for member in tar.getmembers():
+        if not member.isfile():
+            continue
+        parts = member.name.split("/", 1)      # GitHub-tarball: <owner>-<repo>-<sha>/<sti>
+        if len(parts) != 2:
+            continue
+        rel = parts[1]
+        if rel.startswith("/") or ".." in rel.split("/"):
+            continue
+        if not any(rel == p or rel.startswith(p) for p in UPDATE_PATHS):
+            continue
+        source = tar.extractfile(member)
+        if source is None:
+            continue
+        target = os.path.join(dest, rel)
+        os.makedirs(os.path.dirname(target) or dest, exist_ok=True)
+        with open(target, "wb") as fh:
+            shutil.copyfileobj(source, fh)
+        written.append(rel)
+    return written
+
+
+def _install_requirements() -> dict:
+    """Koer pip install -r requirements.txt i projektets venv efter en opdatering."""
+    project = os.path.dirname(BASE_DIR)
+    requirements = os.path.join(project, "requirements.txt")
+    pip = os.path.join(project, "venv", "bin", "pip")
+    if not os.path.exists(pip):
+        pip = shutil.which("pip3") or shutil.which("pip") or ""
+    if not pip:
+        return {"ok": False, "output": "pip blev ikke fundet - koer 'pip install -r requirements.txt' selv"}
+    try:
+        proc = subprocess.run([pip, "install", "-q", "-r", requirements],
+                              capture_output=True, text=True, timeout=300, cwd=project)
+        output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+        return {"ok": proc.returncode == 0, "output": output[-400:]}
+    except Exception as e:
+        return {"ok": False, "output": str(e)[:200]}
+
+
+def restart_mode() -> str:
+    """Hvordan appen kan genstartes her: custom, systemd-user, systemd, script eller manual."""
+    if os.environ.get("UPDATE_RESTART_CMD"):
+        return "custom"
+    try:
+        if subprocess.run(["systemctl", "--user", "cat", "command-center"],
+                          capture_output=True, timeout=5).returncode == 0:
+            return "systemd-user"
+    except Exception:
+        pass
+    try:
+        if subprocess.run(["systemctl", "cat", "command-center"],
+                          capture_output=True, timeout=5).returncode == 0:
+            return "systemd"
+    except Exception:
+        pass
+    return "script" if os.path.exists(os.path.join(os.path.dirname(BASE_DIR), "scripts", "restart.sh")) else "manual"
+
+
+def schedule_restart(delay: float = 1.5) -> dict:
+    """Planlaeg genstart EFTER HTTP-svaret er sendt (systemd-unit eller scripts/restart.sh).
+
+    Kan slaa s fra med UPDATE_AUTO_RESTART=0; UPDATE_RESTART_CMD overstyrer kommandoen."""
+    mode = restart_mode()
+    if os.environ.get("UPDATE_AUTO_RESTART", "1") in ("0", "false", "no"):
+        return {"scheduled": False, "mode": mode, "reason": "UPDATE_AUTO_RESTART=0"}
+    project = os.path.dirname(BASE_DIR)
+    script = os.path.join(project, "scripts", "restart.sh")
+    try:
+        if os.environ.get("UPDATE_RESTART_CMD"):
+            cmd = ["bash", "-lc", f"sleep {delay}; {os.environ['UPDATE_RESTART_CMD']}"]
+        elif os.path.exists(script):
+            cmd = ["bash", script, "--delay", str(delay)]
+        elif mode == "systemd-user":
+            cmd = ["bash", "-lc", f"sleep {delay}; systemctl --user restart command-center"]
+        elif mode == "systemd":
+            cmd = ["bash", "-lc", f"sleep {delay}; systemctl restart command-center"]
+        else:
+            return {"scheduled": False, "mode": mode,
+                    "reason": "ingen systemd-unit og ingen scripts/restart.sh - genstart manuelt"}
+        subprocess.Popen(cmd, cwd=project, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        return {"scheduled": True, "mode": mode}
+    except Exception as e:
+        return {"scheduled": False, "mode": mode, "reason": str(e)[:150]}
+
+
+def update_apply_sync() -> dict:
+    """Backup + hent seneste tarball + skriv whitelistede filer + requirements. Genstart bagefter."""
+    if not GITHUB_TOKEN:
+        return {"ok": False, "error": "GITHUB_TOKEN mangler - opdatering fra GitHub kraever adgang til repoet"}
+    check = update_check_sync()
+    if not check["ok"]:
+        return {"ok": False, "error": check["error"]}
+    ref = check["latest"] or "main"
+    try:
+        backup_db_sync(tag="pre-update")       # rollback-punkt foer nye filer skrives
+        r = HTTP.get(f"https://api.github.com/repos/{GITHUB_REPO}/tarball/{ref}",
+                     headers=_gh_headers(), timeout=120)
+        r.raise_for_status()
+        with tarfile.open(fileobj=io.BytesIO(r.content), mode="r:gz") as tar:
+            written = _safe_extract(tar, os.path.dirname(BASE_DIR))
+        if not written:
+            return {"ok": False, "error": "Tarballen indeholdt ingen kendte projektfiler"}
+        requirements_changed = "requirements.txt" in written
+        requirements_install = _install_requirements() if requirements_changed else {"ok": True, "output": "uaendret"}
+        with get_db() as db:
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('deployed_commit', ?)", (ref,))
+            add_alarm(db, "opdatering", f"Hentede {ref[:7]} fra GitHub ({len(written)} filer) - genstart appen", "info")
+        return {"ok": True, "error": "", "current": check["current"], "latest": ref, "behind": False,
+                "files": written, "needs_restart": True,
+                "requirements_changed": requirements_changed,
+                "requirements_install": requirements_install}
+    except Exception as e:
+        return {"ok": False, "error": "Opdatering fejlede: " + str(e)[:180]}
+
+
+@app.get("/api/update")
+async def api_update():
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key='github_update'").fetchone()
+    cached = {}
+    try:
+        cached = jsonlib.loads(row["value"]) if row and row["value"] else {}
+    except Exception:
+        cached = {}
+    return JSONResponse({"current": deployed_commit(), "repo": GITHUB_REPO,
+                         "token": bool(GITHUB_TOKEN), "restart_mode": restart_mode(),
+                         "auto_restart": os.environ.get("UPDATE_AUTO_RESTART", "1") not in ("0", "false", "no"),
+                         "last_check": cached})
+
+
+@app.post("/update/check")
+async def update_check_now():
+    result = await asyncio.get_running_loop().run_in_executor(executor, update_check_sync)
+    with get_db() as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('github_update', ?)",
+                   (jsonlib.dumps(result),))
+        if not result["ok"]:
+            add_alarm(db, "opdatering", "Tjek for nye commits fejlede: " + result["error"], "advarsel")
+        elif result["behind"]:
+            add_alarm(db, "opdatering", f"Ny version paa GitHub: {result['latest'][:7]} - {result['message']}", "info")
     return RedirectResponse("/", status_code=303)
+
+
+def store_update_result(result: dict):
+    with get_db() as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('github_update', ?)",
+                   (jsonlib.dumps(result),))
+        if not result.get("ok"):
+            add_alarm(db, "opdatering", result.get("error", "ukendt fejl"), "advarsel")
+
+
+@app.post("/update/apply")
+async def update_apply_now(restart: str = Form("1")):
+    result = await asyncio.get_running_loop().run_in_executor(executor, update_apply_sync)
+    if result.get("ok"):
+        result["restart"] = (schedule_restart() if restart == "1"
+                             else {"scheduled": False, "mode": restart_mode(), "reason": "genstart fravalgt"})
+    store_update_result(result)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/api/update/check")
+async def api_update_check():
+    """Maskin-endpoint til scripts/update.sh - samme tjek som knappen, men JSON."""
+    result = await asyncio.get_running_loop().run_in_executor(executor, update_check_sync)
+    store_update_result(result)
+    return JSONResponse(result)
+
+
+@app.post("/api/update/apply")
+async def api_update_apply(request: Request):
+    """Maskin-endpoint: hent filer, installér requirements og genstart (medmindre restart=0)."""
+    restart = request.query_params.get("restart", "1") not in ("0", "false", "no")
+    result = await asyncio.get_running_loop().run_in_executor(executor, update_apply_sync)
+    if result.get("ok"):
+        result["restart"] = (schedule_restart() if restart
+                             else {"scheduled": False, "mode": restart_mode(), "reason": "restart=0"})
+    store_update_result(result)
+    return JSONResponse(result)
+
+
+async def job_update_check():
+    if not GITHUB_TOKEN:
+        return
+    result = await asyncio.get_running_loop().run_in_executor(executor, update_check_sync)
+    with get_db() as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('github_update', ?)",
+                   (jsonlib.dumps(result),))
+        if result.get("ok") and result.get("behind"):
+            add_alarm(db, "opdatering", f"Ny version paa GitHub: {result['latest'][:7]} - {result['message']}", "info")
 
 
 # ---------- Duplicates & redirects rapport ----------
 def duplicates_report():
     with get_db() as db:
+        latest = " AND run_id=(SELECT id FROM crawl_runs ORDER BY id DESC LIMIT 1)"
         dup_titles = db.execute(
             "SELECT title, COUNT(*) AS n, GROUP_CONCAT(url, ' | ') AS urls FROM seopages "
-            "WHERE title != '' GROUP BY LOWER(TRIM(title)) HAVING n > 1 ORDER BY n DESC LIMIT 20"
+            "WHERE title != ''" + latest + " GROUP BY LOWER(TRIM(title)) HAVING n > 1 ORDER BY n DESC LIMIT 20"
         ).fetchall()
         dup_h1 = db.execute(
             "SELECT h1, COUNT(*) AS n, GROUP_CONCAT(url, ' | ') AS urls FROM seopages "
-            "WHERE h1 != '' GROUP BY LOWER(TRIM(h1)) HAVING n > 1 ORDER BY n DESC LIMIT 20"
+            "WHERE h1 != ''" + latest + " GROUP BY LOWER(TRIM(h1)) HAVING n > 1 ORDER BY n DESC LIMIT 20"
         ).fetchall()
         dup_content = db.execute(
             "SELECT content_hash, COUNT(*) AS n, GROUP_CONCAT(url, ' | ') AS urls FROM seopages "
-            "WHERE content_hash != '' GROUP BY content_hash HAVING n > 1 ORDER BY n DESC LIMIT 20"
+            "WHERE content_hash != ''" + latest + " GROUP BY content_hash HAVING n > 1 ORDER BY n DESC LIMIT 20"
         ).fetchall()
         redirects = db.execute(
-            "SELECT url, redirects FROM seopages WHERE redirects != '' ORDER BY id LIMIT 50"
+            "SELECT url, redirects FROM seopages WHERE redirects != ''" + latest + " ORDER BY id LIMIT 50"
         ).fetchall()
     return {"titles": [dict(r) for r in dup_titles], "h1": [dict(r) for r in dup_h1],
             "content": [dict(r) for r in dup_content], "redirects": [dict(r) for r in redirects]}
@@ -2129,7 +2609,10 @@ async def suggest_internal_links():
     if not AIMLAPI_KEY:
         return JSONResponse({"ok": False, "error": "AIMLAPI_KEY ikke sat"})
     with get_db() as db:
-        pages = db.execute("SELECT url, title, h1, words FROM seopages ORDER BY score DESC LIMIT 40").fetchall()
+        pages = db.execute(
+            "SELECT url, title, h1, words FROM seopages "
+            "WHERE run_id=(SELECT id FROM crawl_runs ORDER BY id DESC LIMIT 1) ORDER BY score DESC LIMIT 40"
+        ).fetchall()
         kws = [r["keyword"] for r in db.execute("SELECT keyword FROM keywords LIMIT 20").fetchall()]
     if len(pages) < 3:
         return JSONResponse({"ok": False, "error": "Koer foerst et site-crawl (min. 3 sider)"})
@@ -2142,7 +2625,7 @@ async def suggest_internal_links():
         'Return ONLY a JSON array like [{"from":"URL","to":"URL","anchor":"anchor text","reason":"short reason"}]. No markdown.'
     )
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         raw = await loop.run_in_executor(executor, ai_chat, prompt)
         m = re.search(r"\[.*\]", raw, re.S)
         suggestions = jsonlib.loads(m.group(0)) if m else []
@@ -2181,32 +2664,19 @@ async def seo_rewrite(request: Request):
     url = str(form.get("url", "")).strip()
     if not url:
         return JSONResponse({"error": "url paakraevet"}, status_code=400)
-    # hent eksisterende titel/meta fra seneste crawl, ellers hent live
+    # Hent titel/meta live - crawl-data kan vaere foraeldet eller fra en anden URL.
     title = desc = ""
-    with get_db() as db:
-        row = db.execute("SELECT title, meta_len FROM seopages WHERE url=? ORDER BY id DESC LIMIT 1", (url,)).fetchone()
-    if not row:
-        try:
-            r = safe_request(url, timeout=10)
-            soup = BeautifulSoup(r.text, "html.parser")
-            t = soup.find("title")
-            title = t.get_text(strip=True) if t else ""
-            m = soup.find("meta", attrs={"name": "description"})
-            desc = m.get("content", "") if m else ""
-        except Exception:
-            pass
-    else:
-        try:
-            r = safe_request(url, timeout=10)
-            soup = BeautifulSoup(r.text, "html.parser")
-            t = soup.find("title")
-            title = t.get_text(strip=True) if t else ""
-            m = soup.find("meta", attrs={"name": "description"})
-            desc = m.get("content", "") if m else ""
-        except Exception:
-            pass
+    try:
+        r = safe_request(url, timeout=10)
+        soup = BeautifulSoup(r.text, "html.parser")
+        t = soup.find("title")
+        title = t.get_text(strip=True) if t else ""
+        m = soup.find("meta", attrs={"name": "description"})
+        desc = m.get("content", "") if m else ""
+    except Exception:
+        pass
     kw = str(form.get("keyword", "")).strip()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(executor, rewrite_meta_sync, url, title, desc, kw)
     return JSONResponse(result)
 
@@ -2226,7 +2696,7 @@ async def generate_meta(id: int = Form(...)):
         "Article text:\n" + text
     )
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         raw = await loop.run_in_executor(executor, ai_chat, prompt)
         m = re.search(r"\{.*\}", raw, re.S)
         data = jsonlib.loads(m.group(0)) if m else {}
@@ -2251,7 +2721,7 @@ async def ai_visibility(question: str = Form(...)):
     if not question:
         return RedirectResponse("/", status_code=303)
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         answer = await loop.run_in_executor(executor, ai_chat, question + " Name specific websites and shops in your answer.", 800)
         found = TRACK_DOMAIN.lower() in answer.lower()
         snippet = ""
@@ -2278,14 +2748,15 @@ def add_alarm_sync_global(message):
 
 
 def run_monitor_sync(m):
+    """Returnerer (status, ok, vaerdi) - vaerdi er den raa talvaerdi for pris-monitors."""
     url = m["url"]
     try:
         resp = safe_request(url, timeout=10)
         if resp.status_code >= 400:
-            return f"HTTP-fejl {resp.status_code}", False
+            return f"HTTP-fejl {resp.status_code}", False, None
         if m["type"] == "contains":
             ok = m["expected"] in resp.text
-            return ("Fundet" if ok else "IKKE fundet: " + m["expected"][:50], ok)
+            return ("Fundet" if ok else "IKKE fundet: " + m["expected"][:50], ok, None)
         elif m["type"] == "price":
             psoup = BeautifulSoup(resp.text, "html.parser")
             price = None
@@ -2305,15 +2776,16 @@ def run_monitor_sync(m):
                     except Exception:
                         continue
             if price is None:
-                return "Ingen pris fundet paa siden", False
-            prev = m["last_result"] or ""
+                return "Ingen pris fundet paa siden", False, None
+            # Sammenlign med den gemte talvaerdi (last_value), ikke med status-teksten.
+            prev = str(m["last_value"] or "").strip()
             try:
-                changed = abs(float(prev) - float(price)) > 0.001 if prev else False
+                changed = bool(prev) and abs(float(prev) - float(price)) > 0.001
             except Exception:
                 changed = False
             if changed:
                 add_alarm_sync_global(f"Prisaendring paa {url}: {prev} -> {price}")
-            return f"Pris: {price}" + (f" (var {prev})" if changed else ""), True
+            return f"Pris: {price}" + (f" (var {prev})" if changed else ""), True, str(price)
         elif m["type"] == "json":
             data = resp.json()
             node = data
@@ -2326,30 +2798,39 @@ def run_monitor_sync(m):
                     node = None
                     break
             ok = bool(node)
-            return (f"JSON-path '{m['expected']}' = {str(node)[:60]}", ok)
-        return "Ukendt type", False
+            return (f"JSON-path '{m['expected']}' = {str(node)[:60]}", ok, None)
+        return "Ukendt type", False, None
     except Exception as e:
-        return f"Fejl: {str(e)[:120]}", False
+        return f"Fejl: {str(e)[:120]}", False, None
 
 
 def check_all_monitors_sync():
     with get_db() as db:
         monitors = db.execute("SELECT * FROM monitors").fetchall()
     for m in monitors:
-        status, ok = run_monitor_sync(m)
+        status, ok, value = run_monitor_sync(m)
         with get_db() as db:
-            db.execute("UPDATE monitors SET last_status=?, last_result=?, last_checked=? WHERE id=?",
-                       (status, status, now_iso(), m["id"]))
+            db.execute("UPDATE monitors SET last_status=?, last_result=?, last_value=?, last_checked=? WHERE id=?",
+                       (status, status, value, now_iso(), m["id"]))
             if not ok:
                 add_alarm(db, "monitor", f"{m['name']} ({m['url']}): {status}", "kritisk")
 
 
 @app.post("/monitors/add")
 async def add_monitor(name: str = Form(...), url: str = Form(...), type_: str = Form(...), expected: str = Form(...)):
-    if name.strip() and url.strip() and expected.strip():
+    if not (name.strip() and url.strip() and expected.strip()):
+        return RedirectResponse("/", status_code=303)
+    if type_ not in ("contains", "json", "price"):
+        type_ = "contains"
+    try:
+        clean_url = normalize_url(url)
+    except ValueError as e:
         with get_db() as db:
-            db.execute("INSERT INTO monitors (name, url, type, expected) VALUES (?,?,?,?)",
-                       (name.strip(), normalize_url(url), type_, expected.strip()))
+            add_alarm(db, "monitor", f"Kunne ikke tilfoeje monitor '{name.strip()}': {e}", "advarsel")
+        return RedirectResponse("/", status_code=303)
+    with get_db() as db:
+        db.execute("INSERT INTO monitors (name, url, type, expected) VALUES (?,?,?,?)",
+                   (name.strip(), clean_url, type_, expected.strip()))
     return RedirectResponse("/", status_code=303)
 
 
@@ -2362,7 +2843,7 @@ async def delete_monitor(id: int = Form(...)):
 
 @app.post("/monitors/check")
 async def check_monitors():
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(executor, check_all_monitors_sync)
     return RedirectResponse("/", status_code=303)
 
@@ -2404,7 +2885,7 @@ async def keyword_ideas(keyword: str = Form(...)):
     keyword = keyword.strip()
     if not keyword:
         return RedirectResponse("/", status_code=303)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     ideas = await loop.run_in_executor(executor, autocomplete_sources, keyword)
     with get_db() as db:
         for idea, source in ideas:
@@ -2469,7 +2950,7 @@ async def kw_difficulty(request: Request):
     keyword = str(form.get("keyword", "")).strip()
     if not keyword:
         return RedirectResponse("/", status_code=303)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(executor, keyword_difficulty_sync, keyword)
     if result.get("ok"):
         with get_db() as db2:
@@ -2524,7 +3005,7 @@ async def serp_gap(keyword: str = Form(...)):
     keyword = keyword.strip()
     if not keyword:
         return RedirectResponse("/", status_code=303)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(executor, serp_gap_sync, keyword)
     return RedirectResponse("/", status_code=303)
 
@@ -2558,7 +3039,7 @@ async def article_score(id: int = Form(...)):
     if gap_row:
         gap = {"summary": jsonlib.loads(gap_row["stats_json"])["summary"]}
     else:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         gap = await loop.run_in_executor(executor, serp_gap_sync, art["keyword"])
     result = content_score(art, gap)
     if result:
@@ -2585,7 +3066,7 @@ async def outreach_scan(url: str = Form(...)):
             return emails
         except Exception:
             return set()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     emails = await loop.run_in_executor(executor, scan, url)
     with get_db() as db:
         for e in emails:
@@ -2602,13 +3083,46 @@ async def visibility_series():
     return JSONResponse({"labels": [r["day"][5:] for r in rows], "scores": [r["score"] for r in rows]})
 
 
+# ---------- Sanitering af artikel-HTML (XSS) ----------
+# AI-genereret indhold (og SERP-snippets i prompten) er ikke til at stole paa. Foer det vises
+# med |safe i dashboardet, fjernes alt undtagen en lille allow-list af formateringstags.
+ALLOWED_ARTICLE_TAGS = {
+    "p", "br", "h2", "h3", "h4", "ul", "ol", "li", "strong", "b", "em", "i",
+    "a", "blockquote", "table", "thead", "tbody", "tr", "th", "td",
+}
+DANGEROUS_ARTICLE_TAGS = ("script", "style", "iframe", "object", "embed", "form", "svg", "math", "link", "meta")
+
+
+def sanitize_article_html(html: str) -> str:
+    """Allow-list-sanitering af artikel-HTML (samme ide som DOMPurify, blot server-side)."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    for tag in soup(list(DANGEROUS_ARTICLE_TAGS)):
+        tag.decompose()
+    for tag in soup.find_all(True):
+        if tag.name not in ALLOWED_ARTICLE_TAGS:
+            tag.unwrap()          # ukendt tag: behold teksten, drop tagget
+            continue
+        # Laes href FOER alle attributter fjernes, saa gode links overlever.
+        href = (tag.get("href") or "").strip()
+        tag.attrs = {}            # drop onclick/style/javascript: m.m.
+        if tag.name == "a" and href and re.match(r"^(https?://|/)", href, re.I):
+            tag["href"] = href
+            tag["rel"] = "noopener noreferrer"
+            tag["target"] = "_blank"
+    return str(soup)
+
+
 # ---------- Dashboard ----------
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     with get_db() as db:
         domains = db.execute("SELECT * FROM domains ORDER BY id DESC").fetchall()
         competitors = db.execute("SELECT * FROM competitors ORDER BY id DESC LIMIT 20").fetchall()
-        articles = db.execute("SELECT * FROM articles ORDER BY id DESC LIMIT 10").fetchall()
+        articles = []
+        for art_row in db.execute("SELECT * FROM articles ORDER BY id DESC LIMIT 10").fetchall():
+            art = dict(art_row)
+            art["content"] = sanitize_article_html(art.get("content") or "")
+            articles.append(art)
         linkchecks = db.execute("SELECT * FROM linkcheck ORDER BY id DESC LIMIT 10").fetchall()
         socialqueue = db.execute("SELECT * FROM socialqueue ORDER BY id DESC LIMIT 100").fetchall()  # full list: /social/export.csv
         notes = db.execute("SELECT * FROM notes ORDER BY id DESC LIMIT 10").fetchall()
@@ -2627,7 +3141,10 @@ async def dashboard(request: Request):
         ai_vis = db.execute("SELECT * FROM ai_visibility ORDER BY id DESC LIMIT 5").fetchall()
         links_sug = db.execute("SELECT * FROM internal_links ORDER BY id").fetchall()
         health_hist = db.execute("SELECT COUNT(*) AS n FROM health_history").fetchone()["n"]
-        seo_pages = db.execute("SELECT * FROM seopages ORDER BY score ASC LIMIT 100").fetchall()
+        seo_pages = db.execute(
+            "SELECT * FROM seopages WHERE run_id=(SELECT id FROM crawl_runs ORDER BY id DESC LIMIT 1) "
+            "ORDER BY score ASC LIMIT 100"
+        ).fetchall()
         crawl = db.execute("SELECT * FROM crawl_runs ORDER BY id DESC LIMIT 1").fetchone()
         difficulties = db.execute("SELECT * FROM keyword_difficulty ORDER BY created_at DESC LIMIT 20").fetchall()
         # Read here, while the connection is open (get_db closes it when the block ends).
@@ -2635,9 +3152,15 @@ async def dashboard(request: Request):
         strategy_row = db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone()
         check_row = db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone()
         sgap_row = db.execute("SELECT value FROM settings WHERE key='sgap_snapshot'").fetchone()
+        users = db.execute("SELECT id, username, created_at FROM users ORDER BY id").fetchall()
+        update_row = db.execute("SELECT value FROM settings WHERE key='github_update'").fetchone()
     active_key = (strategy_row["value"] if strategy_row else None) or DEFAULT_STRATEGY
     if active_key not in STRATEGIES:
         active_key = DEFAULT_STRATEGY
+    try:
+        update_state = jsonlib.loads(update_row["value"]) if update_row and update_row["value"] else None
+    except Exception:
+        update_state = None
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
         "domains": domains,
@@ -2655,7 +3178,12 @@ async def dashboard(request: Request):
         "wp_enabled": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "serpapi_enabled": bool(SERPAPI_KEY),
         "telegram_enabled": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
-        "auth_required": bool(APP_TOKEN),
+        "current_user": getattr(request.state, "user", None),
+        "update_state": update_state,
+        "update_token": bool(GITHUB_TOKEN),
+        "update_repo": GITHUB_REPO,
+        "current_commit": deployed_commit(),
+        "users": users,
         "seo_pages": seo_pages,
         "monitors": monitors,
         "ideas": ideas,
@@ -2756,7 +3284,7 @@ async def settings_strategy(request: Request):
         with get_db() as db:
             db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('active_strategy', ?)", (key,))
         try:
-            await asyncio.get_event_loop().run_in_executor(executor, strategy_check_sync, key)
+            await asyncio.get_running_loop().run_in_executor(executor, strategy_check_sync, key)
         except Exception:
             pass
     return RedirectResponse("/", status_code=303)
@@ -2806,7 +3334,8 @@ async def health():
         "wordpress": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "serpapi": bool(SERPAPI_KEY),
         "telegram": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
-        "auth": bool(APP_TOKEN),
+        "auth": "users",
+        "users": user_count(),
     }
     return JSONResponse(body, status_code=503 if status == "kritisk" else 200)
 
@@ -2815,7 +3344,7 @@ async def health():
 async def job_check_domains():
     if not module_on("domains"):
         return
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(executor, check_all_domains_sync)
 
 
@@ -2824,7 +3353,7 @@ async def job_check_keywords():
         return
     if not SERPAPI_KEY:
         return
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(executor, check_all_keywords_sync)
 
 
@@ -2837,6 +3366,7 @@ async def lifespan(app_: FastAPI):
         scheduler.add_job(cleanup_old_data, CronTrigger(hour=4, minute=30), id="cleanup", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(pull_bridge_sync, IntervalTrigger(minutes=BRIDGE_POLL_MINUTES), id="pull_bridge", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_backup_db, CronTrigger(hour=4, minute=40), id="db_backup", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_update_check, CronTrigger(hour=5, minute=0), id="update_check", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_sgap_sync, IntervalTrigger(minutes=30), id="sgap_sync", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.start()
         try:

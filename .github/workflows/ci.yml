@@ -18,9 +18,19 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements.txt httpx  # httpx: only for FastAPI TestClient in the tests
       - name: install.sh carries the same files as the repo
+        shell: bash
         run: |
           set -e
-          for pair in "EOF_MAIN app/main.py" "EOF_HTML app/templates/dashboard.html" "EOF_LOGIN app/templates/login.html" "EOF_REQ requirements.txt" "EOF_SMOKE scripts/smoke_test.sh"; do
+          for pair in \
+            "EOF_MAIN app/main.py" "EOF_HTML app/templates/dashboard.html" \
+            "EOF_LOGIN app/templates/login.html" "EOF_REQ requirements.txt" \
+            "EOF_ENVDOT .env.example" "EOF_README README.md" \
+            "EOF_RUN run.sh" "EOF_RUNSH run.sh" "EOF_WINBAT run.bat" \
+            "EOF_SMOKE scripts/smoke_test.sh" "EOF_RESTART scripts/restart.sh" \
+            "EOF_UPDATE scripts/update.sh" "EOF_DOCKER Dockerfile" \
+            "EOF_COMPOSE docker-compose.yml" "EOF_SERVICE deploy/command-center.service" \
+            "EOF_USERSVC deploy/command-center.user.service" \
+            "EOF_NGINX deploy/nginx-command-center.conf"; do
             set -- $pair
             awk "/<< '$1'/{f=1;next} /^$1\$/{f=0} f" install.sh | diff - "$2"
           done

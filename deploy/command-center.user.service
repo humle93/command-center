@@ -1,0 +1,17 @@
+[Unit]
+Description=Steamgears Command Center (bruger-service, fx Ultra.cc)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/command-center
+# Lader .env-vaerdier som GITHUB_TOKEN og BRIDGE_POLL_MINUTES blive rigtige miljoevariabler
+# (appen laeser selv de fleste, men dette er den paalidelige vej). "-" = ok hvis filen mangler.
+EnvironmentFile=-%h/command-center/.env
+# 127.0.0.1 + proxy-headers: nginx paa samme maskine sender X-Forwarded-Proto/For.
+ExecStart=%h/command-center/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

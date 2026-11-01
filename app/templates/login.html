@@ -1,23 +1,59 @@
 <!DOCTYPE html>
-<html lang="da" class="dark">
+<html lang="da">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Command Center — Login</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <title>Command Center — {{ 'Opret bruger' if mode == 'setup' else 'Log ind' }}</title>
+    <style>
+      /* Ingen CDN'er: login-siden skal virke og se ens ud uden internetadgang. */
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+             padding: 24px; background: #09090b; color: #f4f4f5;
+             font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+      .card { width: 100%; max-width: 390px; background: #18181b; border: 1px solid #27272a;
+              border-radius: 16px; padding: 28px; box-shadow: 0 20px 50px rgba(0,0,0,.4); }
+      h1 { margin: 0 0 6px; font-size: 16px; letter-spacing: .02em; }
+      p.sub { margin: 0 0 18px; font-size: 12px; color: #a1a1aa; }
+      label { display: block; margin: 14px 0 6px; font-size: 11px; letter-spacing: .06em;
+              text-transform: uppercase; color: #a1a1aa; }
+      input { width: 100%; padding: 10px 12px; font-size: 14px; color: #f4f4f5; background: #09090b;
+              border: 1px solid #3f3f46; border-radius: 10px; }
+      input:focus-visible { outline: 2px solid #34d399; outline-offset: 1px; border-color: #34d399; }
+      button { width: 100%; margin-top: 22px; padding: 11px 16px; font-size: 14px; font-weight: 600;
+               color: #34d399; background: rgba(52,211,153,.12); border: 1px solid rgba(52,211,153,.35);
+               border-radius: 10px; cursor: pointer; }
+      button:hover { background: rgba(52,211,153,.2); }
+      button:focus-visible { outline: 2px solid #34d399; outline-offset: 2px; }
+      .error { margin: 0 0 6px; padding: 9px 11px; font-size: 12px; color: #fda4af;
+               background: rgba(244,63,94,.09); border: 1px solid rgba(244,63,94,.35); border-radius: 10px; }
+      .foot { margin: 16px 0 0; font-size: 11px; color: #71717a; text-align: center; }
+    </style>
 </head>
-<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans flex items-center justify-center">
-    <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-8 w-full max-w-sm space-y-4">
-        <h1 class="font-bold text-lg">⚡ COMMAND CENTER</h1>
-        <p class="text-xs text-zinc-400">Indtast din adgangstoken</p>
-        {% if error %}<p class="text-xs text-rose-400">{{ error }}</p>{% endif %}
-        <form action="/login" method="POST" class="space-y-3">
-            <input type="password" name="token" required autofocus
-                   class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
-            <button class="w-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">
-                Log ind
-            </button>
-        </form>
-    </div>
+<body>
+<div class="card">
+    <h1>⚡ COMMAND CENTER</h1>
+    {% if mode == 'setup' %}
+    <p class="sub">Foerste start: opret din bruger. Der er ingen token — kun brugernavn og adgangskode.</p>
+    {% else %}
+    <p class="sub">Log ind med din bruger.</p>
+    {% endif %}
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    <form action="{{ '/setup' if mode == 'setup' else '/login' }}" method="POST">
+        <label for="username">Brugernavn</label>
+        <input id="username" type="text" name="username" value="{{ username }}" autocomplete="username"
+               pattern="[A-Za-z0-9._-]{3,32}" title="3-32 tegn: a-z, 0-9, punktum, bindestreg, underscore"
+               required autofocus>
+        <label for="password">Adgangskode</label>
+        <input id="password" type="password" name="password" autocomplete="{{ 'new-password' if mode == 'setup' else 'current-password' }}"
+               minlength="8" required>
+        {% if mode == 'setup' %}
+        <label for="confirm">Gentag adgangskode</label>
+        <input id="confirm" type="password" name="confirm" autocomplete="new-password" minlength="8" required>
+        {% endif %}
+        <button type="submit">{{ 'Opret bruger og log ind' if mode == 'setup' else 'Log ind' }}</button>
+    </form>
+    <p class="foot">Adgangskoder gemmes som PBKDF2-SHA256-hash. Sessionen varer 30 dage.</p>
+</div>
 </body>
 </html>

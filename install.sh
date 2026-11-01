@@ -4706,6 +4706,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 ## Nyheder i v7.11
 
 - **Brugere i stedet for token-login** — første besøg opretter din bruger (`/setup`), derefter logger du ind med brugernavn + adgangskode (PBKDF2-SHA256, salt pr. bruger, 30 dages HttpOnly-session). Fanen **Brugere** opretter/sletter brugere og skifter adgangskode. `APP_TOKEN` findes ikke længere, og der er ingen maskin-nøgle - al adgang kræver en bruger.
+- ⏱️ **Fremdrift på opgaver** — tunge handlinger (crawl, AI-artikel, keyword-tjek, backlink-prospecting …) viser timer, procent og "~N s igen"; crawl læser de rigtige tal (sider/total + ETA) fra `/api/crawl/status`
 - **Opdatering fra GitHub** — Cockpit viser installeret commit vs. seneste commit på `main`, tjekker selv kl. 05:00, og "Opdater" laver DB-backup og henter kun projektets filer. Den gamle "hent install.sh og kør den"-vej er fjernet.
 - **nginx / Ultra.cc** — `deploy/nginx-command-center.conf`, `deploy/command-center.user.service` og proxy-header-understøttelse, så appen bliver på `127.0.0.1` bag nginx med korrekte Secure-cookies og rigtig klient-IP.
 - **Rettelser fra kodegennemgang** — saniteret artikel-HTML (XSS), `.env` læses før konfigurationen, pris-monitors registrerer ændringer igen, crawl-diff virker (to crawls gemmes), `/monitors/add` giver ikke længere 500, HTTPS-advarslen rammer rigtigt, plus mindre korrekthedsrettelser.

@@ -13,9 +13,41 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+      - name: Documentation follows code changes
+        shell: bash
+        run: |
+          set -uo pipefail
+          base="${{ github.event.before }}"
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          fi
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            base="$(git rev-parse HEAD~1 2>/dev/null || echo '')"
+          fi
+          if [ -z "$base" ]; then
+            echo "Ingen sammenlignings-base - springer tjekket over"
+            exit 0
+          fi
+          changed="$(git diff --name-only "$base" HEAD || true)"
+          code="$(printf '%s\n' "$changed" | grep -E '^(app/|scripts/|deploy/|requirements\.txt|run\.sh|run\.bat|install\.sh|Dockerfile|docker-compose\.yml)' | grep -vc '\.md$' || true)"
+          docs="$(printf '%s\n' "$changed" | grep -cE '^(README\.md|docs/|CLAUDE\.md|AGENTS\.md)' || true)"
+          code="${code:-0}"; docs="${docs:-0}"
+          echo "kode-filer: $code · dokumentations-filer: $docs"
+          if [ "$code" -gt 0 ] && [ "$docs" -eq 0 ]; then
+            if git log -1 --pretty=%B | grep -q '\[skip docs\]'; then
+              echo "Dokumentation sprunget over ([skip docs])."
+              exit 0
+            fi
+            echo "::error::Kode er ændret, men README.md/docs er ikke opdateret. Opdater dokumentationen eller skriv [skip docs] i commit-beskeden."
+            printf '%s\n' "$changed"
+            exit 1
+          fi
+          echo "Dokumentation OK"
       - run: pip install -r requirements.txt httpx  # httpx: only for FastAPI TestClient in the tests
       - name: install.sh carries the same files as the repo
         shell: bash

@@ -119,6 +119,7 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 - `tests/ci_check.sh` — boot mod fake WordPress: opretter bruger via `/setup`, tester anonym adgang (401/303), cookie-login, logout, alle sider, Autopilot-broen og fravær af tracebacks
 - `tests/check_paths.py` — hver `action`/`href`/`fetch` i skabelonerne skal matche en route (fanger døde knapper)
 - CI kører desuden en diff af `install.sh`s indlejrede kopier mod repo-filerne
+- CI fejler, hvis `app/`, `scripts/`, `deploy/`, requirements eller start-/container-filer ændres uden at `README.md` eller `docs/` også er opdateret (`[skip docs]` i commit-beskeden springer tjekket over)
 
 ## 12. Versionshistorik (kort)
 

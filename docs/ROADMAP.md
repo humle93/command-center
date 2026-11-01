@@ -1,6 +1,6 @@
 # Command Center — Roadmap
 
-Status pr. **november 2026 (v7.13.x)**. Rækkefølgen i "Næste" er den anbefalede prioritering: sikkerhed og
+Status pr. **november 2026 (v7.14.x)**. Rækkefølgen i "Næste" er den anbefalede prioritering: sikkerhed og
 driftsstabilitet før nye features.
 
 ## Dokumentation i repoet
@@ -19,6 +19,7 @@ driftsstabilitet før nye features.
 
 | Version | Indhold |
 | --- | --- |
+| **v7.14.x** | Planlagt tid gemmes som lokal tid + UTC, og ugyldig sommertid afvises i stedet for at gættes · **Autopilot-broen er idempotent**: `/social/to-autopilot` låser rækken (`social_claim()`) før kaldet, så et dobbeltklik eller et genforsøg ikke giver to kladder; svar fra WordPress frigiver låsen igen, mens en timeout blokerer med status `sendt? (svar udeblev)` · begge testsuiter dækker dobbeltklik |
 | **v7.13.x** | Screenshot-værktøj (`scripts/screenshots.py`, alle 14 faner + login) · CI advarer når `docs/img/` er ældre end dashboard-skabelonen · CI-badge og screenshot-afsnit i README · `docs/img/` opdateret til den kørende UI |
 | **v7.11** | Brugere + sessioner (PBKDF2, `/setup`, "Brugere"-fane) i stedet for token-login · GitHub-opdatering (tjek/opdater med backup og fil-whitelist, dagligt tjek 05:00) · nginx/Ultra.cc-deploy (proxy-headers, systemd user-unit, nginx-config) · rettelser fra kodegennemgang: saniteret artikel-HTML (XSS), `.env` læses før konfiguration, pris-monitor sammenligner tal, crawl-diff virker (to runs gemmes), `/monitors/add` validerer input, HTTPS-advarsel via `request.url.scheme`, ingen dubleret side-hentning, SSL-tjek uden port-fejl, lokal-tids-cutoffs i oprydningen · link-audit i CI · GitHub-opdatering erstatter "kør install.sh fra nettet" · opdateringen installerer requirements og genstarter selv (`scripts/update.sh`, `scripts/restart.sh`) |
 | **v7.10** | Kvalitetsgate før WP-push · API-budget pr. måned med 80 %/100 %-alarmer · rigtig `/health` (DB/disk/forbrug) · CI med fake WordPress og Autopilot-bro |

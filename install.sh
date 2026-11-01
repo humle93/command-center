@@ -191,10 +191,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.13.1"
+APP_VERSION = "7.13.2"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.13.2", "Agent + skill i .agents/: reviewer med repoets regler, kontrakter og faldgruber"),
     ("7.13.1", "Oprydning: doede importer og variabler fjernet, Juno-tabelrester droppes naar de er tomme"),
     ("7.13.0", "Login viser IP og en koerselsrapport; opstart skriver version og nyheder"),
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
@@ -5387,6 +5388,20 @@ Login logger nu IP: `users.last_login_ip`/`last_login_at`, `sessions.ip` og tabe
 Login-siden viser en kort **kørselsrapport** uden at man er logget ind: version + commit, seneste
 opstart, åbne alarmer, antal domæner/keywords/monitors, seneste domænetjek og crawl, DB-størrelse og
 din IP - ingen alarmtekster eller brugernavne.
+
+## Agenter og skills (v7.13.2)
+
+Repoet har to Freebuff/Codebuff-tilføjelser til agenter:
+
+- `.agents/command-center-reviewer.ts` — en **read-only reviewer** der kender de otte regler,
+  kontrakterne (`/health`, `TASK_ESTIMATES`, `alert_outbox`, login-sporet, `NEWEST`) og de kendte
+  faldgruber. Med `params.run_tests=true` kører den begge testsuiter.
+- `.agents/skills/command-center/SKILL.md` — en **skill** med reglerne, kontrakterne,
+  verify-kommandoerne og faldgruberne. Den bliver slash-kommandoen `/skill:command-center`.
+
+De er udviklerværktøj, ikke app-funktioner: de indgår ikke i `install.sh`, og self-update henter dem
+ikke. Modellen i agenten står som `anthropic/claude-sonnet-4.5` (Codebuff-docsenes eksempel) — skift
+den linje hvis kontoen ikke kan tilgå modellen.
 
 ## Dokumentation
 

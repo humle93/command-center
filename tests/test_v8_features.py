@@ -327,6 +327,28 @@ check("oprydning: tomme Juno-tabeller droppes, tabeller med data beholdes",
       "drift" not in names and "gsc_daily" not in names and "gsc_queries" in names and kept == 1,
       (sorted(n for n in names if n.startswith(("drift", "gsc"))), kept))
 
+# --- agent + skill i repoet (v7.13.2) ---
+import re as _re
+agent_p = os.path.join(ROOT, ".agents", "command-center-reviewer.ts")
+skill_p = os.path.join(ROOT, ".agents", "skills", "command-center", "SKILL.md")
+agent = open(agent_p, encoding="utf-8").read() if os.path.exists(agent_p) else ""
+skill = open(skill_p, encoding="utf-8").read() if os.path.exists(skill_p) else ""
+check("agent: definition har id, model, vaerktoejer og prompts",
+      all(k in agent for k in ("id: 'command-center-reviewer'", "displayName:", "model:",
+                               "toolNames:", "instructionsPrompt", "export default definition")),
+      agent[:80])
+check("agent: id matcher filnavnet (Codebuff-krav)",
+      os.path.basename(agent_p) == "command-center-reviewer.ts"
+      and _re.search(r"id: 'command-center-reviewer'", agent) is not None)
+front = skill.split("---")[1] if skill.startswith("---") else ""
+desc = _re.search(r"description: (.+)", skill)
+check("skill: SKILL.md har frontmatter med name = mappenavn",
+      skill.startswith("---") and "name: command-center" in front, front[:80])
+check("skill: beskrivelsen er 10-1024 tegn",
+      bool(desc) and 10 < len(desc.group(1)) <= 1024, desc.group(1)[:60] if desc else None)
+check("agent+skill: ingen hemmeligheder i filerne",
+      not any(t in (agent + skill).lower() for t in ("sk-ant", "api_key=", "password=", "ghp_")))
+
 srv.shutdown()
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)
 print("ALL PASS" if not FAILED else f"{len(FAILED)} FAILED")

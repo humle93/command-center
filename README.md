@@ -114,6 +114,20 @@ Login-siden viser en kort **kørselsrapport** uden at man er logget ind: version
 opstart, åbne alarmer, antal domæner/keywords/monitors, seneste domænetjek og crawl, DB-størrelse og
 din IP - ingen alarmtekster eller brugernavne.
 
+## Agenter og skills (v7.13.2)
+
+Repoet har to Freebuff/Codebuff-tilføjelser til agenter:
+
+- `.agents/command-center-reviewer.ts` — en **read-only reviewer** der kender de otte regler,
+  kontrakterne (`/health`, `TASK_ESTIMATES`, `alert_outbox`, login-sporet, `NEWEST`) og de kendte
+  faldgruber. Med `params.run_tests=true` kører den begge testsuiter.
+- `.agents/skills/command-center/SKILL.md` — en **skill** med reglerne, kontrakterne,
+  verify-kommandoerne og faldgruberne. Den bliver slash-kommandoen `/skill:command-center`.
+
+De er udviklerværktøj, ikke app-funktioner: de indgår ikke i `install.sh`, og self-update henter dem
+ikke. Modellen i agenten står som `anthropic/claude-sonnet-4.5` (Codebuff-docsenes eksempel) — skift
+den linje hvis kontoen ikke kan tilgå modellen.
+
 ## Dokumentation
 
 Kodeændringer kræver dokumentation i samme commit: `README.md` plus den relevante fil i `docs/`

@@ -110,6 +110,14 @@ kørte grønt på `ed97575`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - `migrate_db` dropper nu `drift`/`gsc_daily`/`gsc_queries` **kun hvis de er tomme**.
 - `run_in_executor`-mønstret (35 steder) er bevidst ikke refaktoreret - se arkitektur §15.
 
+### Agent + skill (v7.13.2)
+- `.agents/command-center-reviewer.ts`: read-only reviewer (id = filnavn, jf. Codebuff-kravet), kender
+  regler/kontrakter/faldgruber og kan koere begge testsuiter via `params.run_tests`.
+- `.agents/skills/command-center/SKILL.md`: frontmatter `name: command-center` + de otte regler.
+- Begge er dev-vaerktoej, indgaar ikke i `install.sh` og hentes ikke af self-update.
+- `tests/test_v8_features.py` tjekker at filerne findes, at id matcher filnavn, og at frontmatter er
+  gyldig - saa de ikke raadner stille.
+
 ### Dokumentation og CI
 - `README.md`, manualen og arkitektur-dokumentet er skrevet om til v7.11; `docs/Command_Center_Install_Script.md`
   er erstattet af en kort, korrekt side (den gamle var en 1.362-linjers kopi af v6.0-scriptet).

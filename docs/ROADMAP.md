@@ -1,6 +1,6 @@
 # Command Center — Roadmap
 
-Status pr. **november 2026 (v7.11)**. Rækkefølgen i "Næste" er den anbefalede prioritering: sikkerhed og
+Status pr. **november 2026 (v7.13.x)**. Rækkefølgen i "Næste" er den anbefalede prioritering: sikkerhed og
 driftsstabilitet før nye features.
 
 ## Dokumentation i repoet
@@ -19,6 +19,7 @@ driftsstabilitet før nye features.
 
 | Version | Indhold |
 | --- | --- |
+| **v7.13.x** | Screenshot-værktøj (`scripts/screenshots.py`, alle 14 faner + login) · CI advarer når `docs/img/` er ældre end dashboard-skabelonen · CI-badge og screenshot-afsnit i README · `docs/img/` opdateret til den kørende UI |
 | **v7.11** | Brugere + sessioner (PBKDF2, `/setup`, "Brugere"-fane) i stedet for token-login · GitHub-opdatering (tjek/opdater med backup og fil-whitelist, dagligt tjek 05:00) · nginx/Ultra.cc-deploy (proxy-headers, systemd user-unit, nginx-config) · rettelser fra kodegennemgang: saniteret artikel-HTML (XSS), `.env` læses før konfiguration, pris-monitor sammenligner tal, crawl-diff virker (to runs gemmes), `/monitors/add` validerer input, HTTPS-advarsel via `request.url.scheme`, ingen dubleret side-hentning, SSL-tjek uden port-fejl, lokal-tids-cutoffs i oprydningen · link-audit i CI · GitHub-opdatering erstatter "kør install.sh fra nettet" · opdateringen installerer requirements og genstarter selv (`scripts/update.sh`, `scripts/restart.sh`) |
 | **v7.10** | Kvalitetsgate før WP-push · API-budget pr. måned med 80 %/100 %-alarmer · rigtig `/health` (DB/disk/forbrug) · CI med fake WordPress og Autopilot-bro |
 | **v7.9** | Daglig DB-backup (14 kopier) + pre-update-backup · opstarts-selvtest med alarmer · login-rate-limit · HTTPS-advarsel i UI · smoke-test-script · Windows-startscript |
@@ -53,6 +54,8 @@ driftsstabilitet før nye features.
 - **Screenshot-opdatering** af `docs/img/` — ✅ opdateret med `scripts/screenshots.py` mod v7.13.x-UI'et; kør den igen efter større UI-ændringer
 - **install.sh-afvikling**: undgå de indlejrede filkopier (fx udgiv en zip/tarball eller brug GitHub-opdateringen til første install)
 - **Ekstern overvågning**: valgfri heartbeat til Uptime Kuma/healthchecks.io
+- **Alarm-routing (v7.12)**: SMTP, ntfy, signeret webhook, dedupe og stille timer er på plads; mangler
+  Apprise, maintenance windows og ugentlig digest
 - **SERP-udgiftsprognose**: vis estimeret forbrug for resten af måneden baseret på kørende keywords
 
 ## Kendte begrænsninger (bevidste valg)
@@ -63,7 +66,10 @@ driftsstabilitet før nye features.
 - **`install.sh` duplikerer kildekoden** (CI tjekker paritet). Det gør første install mulig uden `git`, men
   koster vedligeholdelse — se "Senere".
 - **AI-kvalitet afhænger af ekstern model**: kvalitetsgaten fanger længde/keyword/H2, ikke faktuelle fejl.
-- **Screenshots og visse docs-afsnit** kan være ældre end koden.
+- **Screenshots** holdes opdaterede med `scripts/screenshots.py`, og CI advarer når de er ældre end
+  dashboard-skabelonen; enkelte docs-afsnit kan stadig være ældre end koden.
+- **Headless screenshots kræver fontconfig**: uden en `fonts.conf` (via `FONTCONFIG_FILE`) aborterer
+  Chromium med `SkFontMgr_FontConfigInterface ... Not implemented`. Det rammer kun optagelsen, ikke appen.
 
 ## Endgoal
 
@@ -100,5 +106,5 @@ system der ikke kan stoles på, ikke kan automatisere noget som helst.
 
 1. Ret kildefilerne (ikke `install.sh`), og kør:
    `python3 tests/test_v8_features.py && bash tests/ci_check.sh`
-2. Opdater `README.md` og relevante docs i samme ændring — og denne roadmap, hvis noget flytter sig **→ v7.12: SMTP, ntfy og signeret webhook + dedupe + stille timer er på plads; mangler Apprise, maintenance windows og digest.**
+2. Opdater `README.md` og relevante docs i samme ændring — og denne roadmap, hvis noget flytter sig.
 3. Ny funktion? Tilføj en test i `tests/test_v8_features.py` (in-process) eller `tests/ci_check.sh` (boot/HTTP)

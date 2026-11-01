@@ -141,6 +141,16 @@ kørte grønt på `ed97575`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - Ikke-eksisterende sommertid afvises; tvetydig tid giver foerste forekomst (`fold=0`). Testene daekker
   baade 29/3 og 25/10 2026.
 - Zonen er `CC_TZ` (standard Europe/Copenhagen). Ukendt zone falder tilbage, den crasher ikke.
+### Screenshot-script (v7.13.1)
+- `scripts/screenshots.py` tager `cc-login.png` og alle 14 fanebilleder i `docs/img/` mod en kørende
+  app: `python3 scripts/screenshots.py --base http://127.0.0.1:8000 --user X --password Y`.
+  `--only cockpit,notes`, `--viewport` og `--skip-login` findes til delkørsler; login sker via
+  `context.request.post("/login")`, og fanerne skiftes med `Alpine.$data(body).tab = <key>`.
+  Scriptet fejler med en klar besked, hvis Playwright/Chromium mangler, hvis appen stadig er på
+  `/setup`, eller hvis login afvises.
+- Playwright er **ikke** i `requirements.txt` (kun dette script bruger det):
+  `pip install playwright && python3 -m playwright install chromium`.
+- Fane-listen i `TABS` skal foelge nav-knapperne i `app/templates/dashboard.html`.
 
 ### Dokumentation og CI
 - `README.md`, manualen og arkitektur-dokumentet er skrevet om til v7.11; `docs/Command_Center_Install_Script.md`
@@ -197,7 +207,7 @@ springer tjekket over til rene undtagelser.
 - Efter Juno-fjernelsen: ingen GSC-data, og `drift`/`gsc_*`-tabeller kan stadig ligge tomme i en
   eksisterende `center.db` (intet læser eller skriver dem).
 - Systemd-genstartsstien er ikke testet i denne VM (ingen systemd); pidfile-stien er verificeret.
-- `docs/img/`-screenshots er fra v7.8.
+- `docs/img/`-screenshots er fra v7.8; `python3 scripts/screenshots.py` opdaterer dem (kræver Playwright + Chromium, som ikke er en del af appens requirements).
 - Opdatering kræver `GITHUB_TOKEN`; et rigtigt tarball-download er ikke afprøvet her.
 
 ## Roadmap (kort — detaljer i `docs/ROADMAP.md`)

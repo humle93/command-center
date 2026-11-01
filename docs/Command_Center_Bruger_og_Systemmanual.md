@@ -4,7 +4,7 @@ Selv-hostet SEO- og drifts-center til steamgears.eu (FastAPI + SQLite). Alt kør
 
 ![Cockpit](img/cc-cockpit.png)
 
-> Screenshots i `docs/img/` er fra v7.8-UI'et. Funktionaliteten er den samme, men login er nu brugerbaseret, og Cockpit har fået et opdaterings-panel.
+> Screenshots i `docs/img/` er fra v7.8-UI'et. Funktionaliteten er den samme, men login er nu brugerbaseret, og Cockpit har fået et opdaterings-panel. Vil du have billederne opdateret til den version du kører, så kør `python3 scripts/screenshots.py` mod appen (se "Opdater screenshots" nedenfor).
 
 ---
 
@@ -147,6 +147,20 @@ Deaktiverede moduler skjuler UI-knapper og stopper cron-jobs (fx kører growth-a
 ![Moduler](img/cc-moduler.png)
 
 ---
+
+## Opdater screenshots
+
+Billederne i `docs/img/` laves af `scripts/screenshots.py`, så de altid viser den kørende version:
+
+```bash
+pip install playwright && python3 -m playwright install chromium   # kun foerste gang
+python3 scripts/screenshots.py --base http://127.0.0.1:8000 --user ditbrugernavn --password 'din-adgangskode'
+```
+
+Scriptet logger ind, tager `cc-login.png` og skifter derefter gennem alle 14 faner og gemmer
+`cc-cockpit.png` … `cc-notes.png`. Vil du kun opdatere enkelte faner, så brug `--only alarms,notes`,
+og vil du kun have det synlige omraade i stedet for hele siden, så tilføj `--viewport`.
+Brug `--base`, `--user` og `--password` (eller `CC_BASE`, `CC_USER`, `CC_PASSWORD`).
 
 ## Opdatering fra GitHub
 

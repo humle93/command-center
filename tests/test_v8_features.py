@@ -181,6 +181,21 @@ check("auth: no machine token or Juno bridge left",
       and not any("/api/bridge" in getattr(r, "path", "") for r in main.app.routes),
       [getattr(r, "path", "") for r in main.app.routes if "/api/bridge" in getattr(r, "path", "")])
 
+# --- opgave-fremdrift: procent + ETA paa crawl og alle tunge opgaver ---
+main.CRAWL_STATE.update({"running": True, "done": 5, "total": 10, "error": None,
+                         "started_at": main.now_iso(), "finished_at": None})
+prog = main.crawl_progress()
+check("tasks: crawl percent is done/total while running",
+      prog["percent"] == 50 and prog["running"] is True, prog)
+main.CRAWL_STATE.update({"running": False, "finished_at": main.now_iso(), "error": None})
+prog = main.crawl_progress()
+check("tasks: finished crawl reports 100 % and no ETA",
+      prog["percent"] == 100 and prog["eta_seconds"] is None, prog)
+check("tasks: every estimate has a label and a positive duration",
+      bool(main.TASK_ESTIMATES)
+      and all(v.get("label") and int(v.get("seconds", 0)) > 0 for v in main.TASK_ESTIMATES.values())
+      and all(k.startswith("/") for k in main.TASK_ESTIMATES), len(main.TASK_ESTIMATES))
+
 srv.shutdown()
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)
 print("ALL PASS" if not FAILED else f"{len(FAILED)} FAILED")

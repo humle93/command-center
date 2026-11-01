@@ -1162,7 +1162,65 @@ async def run_seo_audit(request: Request):
 
 
 # ---------- SEO: site-crawler ----------
-CRAWL_STATE = {"running": False, "done": 0, "total": 0, "start": "", "error": None, "avg": None}
+CRAWL_STATE = {"running": False, "done": 0, "total": 0, "start": "", "error": None, "avg": None,
+               "started_at": None, "finished_at": None}
+
+# Anslået varighed (sekunder) pr. tung opgave - bruges af UI'et til timer + ETA.
+TASK_ESTIMATES = {
+    "/seo/audit": {"label": "SEO-audit", "seconds": 12},
+    "/seo/rewrite": {"label": "AI titel/meta-forslag", "seconds": 25},
+    "/seo/linksuggest": {"label": "Interne link-forslag", "seconds": 25},
+    "/serp/discover": {"label": "SERP-discovery", "seconds": 20},
+    "/serp/gap": {"label": "Content gap-analyse", "seconds": 30},
+    "/backlinks/prospect": {"label": "Backlink-prospecting", "seconds": 40},
+    "/outreach/scan": {"label": "E-mail-scan", "seconds": 35},
+    "/keywords/check": {"label": "Keyword-tjek", "seconds": 45},
+    "/keywords/ideas": {"label": "Keyword-ideer", "seconds": 20},
+    "/keywords/difficulty": {"label": "Svaerhedsgrad", "seconds": 25},
+    "/domains/check": {"label": "Domaene-tjek", "seconds": 35},
+    "/monitors/check": {"label": "Monitor-tjek", "seconds": 25},
+    "/links/check": {"label": "Link-tjek", "seconds": 25},
+    "/articles/generate": {"label": "AI-artikel", "seconds": 60},
+    "/articles/autopilot": {"label": "Autopilot (ide til kladde)", "seconds": 150},
+    "/articles/meta": {"label": "Meta-forslag", "seconds": 20},
+    "/articles/score": {"label": "Kvalitetsscore", "seconds": 10},
+    "/articles/push": {"label": "Push til WordPress", "seconds": 8},
+    "/ai/visibility": {"label": "AI-synlighed", "seconds": 60},
+    "/autopilot/sync": {"label": "Autopilot-synk", "seconds": 10},
+    "/update/check": {"label": "GitHub-tjek", "seconds": 10},
+    "/api/duplicates": {"label": "Duplikat-analyse", "seconds": 6},
+    "/api/redirects": {"label": "Redirect-audit", "seconds": 6},
+    "/api/crawl/diff": {"label": "Crawl-sammenligning", "seconds": 6},
+}
+
+
+def crawl_progress(state: dict | None = None) -> dict:
+    """Procent, forloebet tid og ETA for crawl - bruges af UI'et og /api/crawl/status."""
+    s = dict(CRAWL_STATE if state is None else state)
+    done = int(s.get("done") or 0)
+    total = int(s.get("total") or 0)
+    running = bool(s.get("running"))
+    started_at, finished_at = s.get("started_at") or "", s.get("finished_at") or ""
+
+    def _dt(value):
+        try:
+            return datetime.fromisoformat(value)
+        except Exception:
+            return None
+
+    t0 = _dt(started_at)
+    elapsed = 0.0
+    if t0:
+        elapsed = max(0.0, ((_dt(finished_at) or datetime.now()) - t0).total_seconds())
+    if running:
+        percent = min(99, int(round(done * 100 / total))) if total else 0
+        eta = int(round(elapsed / done * (total - done))) if done and total > done else None
+    else:
+        percent = 100 if done and not s.get("error") else 0
+        eta = None
+    return {"running": running, "done": done, "total": total, "percent": percent,
+            "elapsed_seconds": round(elapsed, 1), "eta_seconds": eta, "finished": bool(finished_at),
+            "error": s.get("error"), "avg": s.get("avg")}
 
 
 def site_crawl_sync(start_url: str, max_pages: int = 30):
@@ -1202,7 +1260,8 @@ def site_crawl_sync(start_url: str, max_pages: int = 30):
 
         queue = [start_url]
         seen = set()
-        CRAWL_STATE.update({"running": True, "done": 0, "total": max_pages, "start": start_url, "error": None, "avg": None})
+        CRAWL_STATE.update({"running": True, "done": 0, "total": max_pages, "start": start_url, "error": None, "avg": None,
+                            "started_at": now_iso(), "finished_at": None})
         total_score = 0
         pages_saved = 0
         while queue and len(seen) < max_pages:
@@ -1281,11 +1340,11 @@ def site_crawl_sync(start_url: str, max_pages: int = 30):
                        (host, avg, pages_saved, run_id, now_iso()))
             if sitemap_broken:
                 add_alarm(db, "sitemap", f"{len(sitemap_broken)} sitemap-URLs fejler (foerste 50 tjekket)", "advarsel")
-        CRAWL_STATE.update({"running": False, "avg": avg})
+        CRAWL_STATE.update({"running": False, "avg": avg, "finished_at": now_iso()})
         return {"ok": True, "pages": pages_saved, "avg_score": avg, "robots_ok": robots_ok,
                 "sitemap_ok": sitemap_ok, "sitemap_urls": sitemap_count}
     except Exception as e:
-        CRAWL_STATE.update({"running": False, "error": str(e)[:200]})
+        CRAWL_STATE.update({"running": False, "error": str(e)[:200], "finished_at": now_iso()})
         return {"ok": False, "error": str(e)[:200]}
 
 
@@ -1312,7 +1371,8 @@ async def start_crawl(url: str = Form(...), max_pages: int = Form(30), level: st
 
 @app.get("/api/crawl/status")
 async def crawl_status():
-    return JSONResponse(CRAWL_STATE)
+    """Crawl-fremdrift: sider, procent og ETA (polles af dashboardet)."""
+    return JSONResponse(crawl_progress())
 
 
 @app.get("/api/crawl/diff")
@@ -3117,6 +3177,7 @@ async def dashboard(request: Request):
         "update_state": update_state,
         "update_token": bool(GITHUB_TOKEN),
         "update_repo": GITHUB_REPO,
+        "task_estimates": TASK_ESTIMATES,
         "current_commit": deployed_commit(),
         "users": users,
         "seo_pages": seo_pages,
@@ -4209,7 +4270,138 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
     </section>
 </main>
 
+
+<div id="cc-task" class="hidden fixed bottom-4 right-4 z-[60] w-80 max-w-[90vw] bg-zinc-900 border border-zinc-800 rounded-2xl p-3 shadow-2xl shadow-black/60 text-xs" role="status" aria-live="polite">
+    <div class="flex items-center justify-between mb-1">
+        <span id="cc-task-label" class="text-zinc-200 font-medium">Arbejder...</span>
+        <button type="button" onclick="ccTaskHide()" class="text-zinc-500 hover:text-rose-400" aria-label="Skjul fremdrift">✕</button>
+    </div>
+    <div class="h-1.5 bg-zinc-800 rounded-full overflow-hidden"><div id="cc-task-bar" class="h-full bg-emerald-500 transition-all duration-500" style="width:0%"></div></div>
+    <div class="flex items-center justify-between mt-1 text-[11px] text-zinc-500"><span id="cc-task-pct">0 %</span><span id="cc-task-eta"></span></div>
+    <p id="cc-task-note" class="text-[10px] text-zinc-500 mt-1 hidden"></p>
+</div>
+<div id="cc-toast" class="hidden fixed bottom-4 left-4 z-[60] bg-zinc-900 border border-emerald-500/30 rounded-xl px-3 py-2 text-xs text-emerald-300 shadow-lg" role="status"></div>
+
 <script>
+    // ---- Opgave-fremdrift: timer, procent og ETA paa alle laengere opgaver ----
+    const CC_EST = {{ task_estimates | tojson }};
+    let ccTask = null;
+    function ccEl(id) { return document.getElementById(id); }
+    function ccEstimate(path) {
+        if (CC_EST[path]) return CC_EST[path];
+        let best = null, len = 0;
+        for (const key in CC_EST) {
+            if (key.endsWith('/') && path.startsWith(key) && key.length > len) { best = CC_EST[key]; len = key.length; }
+        }
+        return best;
+    }
+    function ccRender() {
+        if (!ccTask) return;
+        const elapsed = (Date.now() - ccTask.start) / 1000;
+        let pct, eta;
+        if (ccTask.live) { pct = ccTask.percent || 0; eta = ccTask.eta; }
+        else { pct = Math.min(95, Math.round(elapsed / ccTask.seconds * 100)); eta = Math.round(ccTask.seconds - elapsed); }
+        ccEl('cc-task-bar').style.width = pct + '%';
+        ccEl('cc-task-pct').textContent = pct + ' %';
+        if (ccTask.live) {
+            ccEl('cc-task-eta').textContent = ccTask.detail || '';
+        } else {
+            ccEl('cc-task-eta').textContent = eta > 0 ? '~' + eta + ' s igen' : 'tager lidt laengere end forventet';
+        }
+    }
+    function ccTaskStart(label, seconds) {
+        if (ccTask && ccTask.timer) clearInterval(ccTask.timer);
+        ccTask = { label: label, seconds: Math.max(1, seconds || 10), start: Date.now(), timer: null, live: false };
+        try { sessionStorage.setItem('ccLastTask', JSON.stringify({ label: label, start: ccTask.start })); } catch (e) {}
+        ccEl('cc-task').classList.remove('hidden');
+        ccEl('cc-task-label').textContent = label;
+        ccEl('cc-task-note').classList.add('hidden');
+        ccEl('cc-task-bar').className = 'h-full bg-emerald-500 transition-all duration-500';
+        ccTask.timer = setInterval(ccRender, 250);
+        ccRender();
+    }
+    function ccTaskDone(ok, note) {
+        if (!ccTask) return;
+        const elapsed = Math.round((Date.now() - ccTask.start) / 1000);
+        if (ccTask.timer) clearInterval(ccTask.timer);
+        ccEl('cc-task-bar').style.width = '100%';
+        ccEl('cc-task-bar').className = 'h-full transition-all duration-500 ' + (ok === false ? 'bg-rose-500' : 'bg-emerald-500');
+        ccEl('cc-task-pct').textContent = '100 %';
+        ccEl('cc-task-eta').textContent = ok === false ? 'fejlede' : 'faerdig paa ' + elapsed + ' s';
+        if (note) { ccEl('cc-task-note').textContent = note; ccEl('cc-task-note').classList.remove('hidden'); }
+        try { sessionStorage.removeItem('ccLastTask'); } catch (e) {}
+        ccTask = null;
+        setTimeout(function () {
+            if (ccTask) return;
+            ccEl('cc-task').classList.add('hidden');
+            ccEl('cc-task-note').classList.add('hidden');
+        }, note ? 8000 : 2500);
+    }
+    function ccTaskHide() {
+        if (ccTask && ccTask.timer) clearInterval(ccTask.timer);
+        ccTask = null;
+        ccEl('cc-task').classList.add('hidden');
+    }
+    // Alle fetch-kald med et estimat faar timer + ETA
+    (function () {
+        const orig = window.fetch;
+        window.fetch = function (input, init) {
+            const url = typeof input === 'string' ? input : (input && input.url) || '';
+            const meta = ccEstimate(url.split('?')[0]);
+            if (!meta) return orig.apply(this, arguments);
+            if (!ccTask) ccTaskStart(meta.label, meta.seconds);
+            return orig.apply(this, arguments).then(
+                function (res) { ccTaskDone(true); return res; },
+                function (err) { ccTaskDone(false); throw err; }
+            );
+        };
+    })();
+    // Tunge formularer: start timeren (0 ms udsaettelse, saa "confirm"-afvisning respekteres)
+    document.addEventListener('submit', function (e) {
+        const form = e.target;
+        if (!form || (form.getAttribute('method') || 'get').toLowerCase() !== 'post') return;
+        const meta = ccEstimate(new URL(form.getAttribute('action') || form.action, location.href).pathname);
+        if (!meta) return;
+        setTimeout(function () {
+            if (e.defaultPrevented || ccTask) return;
+            ccTaskStart(meta.label, meta.seconds);
+            ccEl('cc-task-note').textContent = 'Lad siden staa - den skifter selv, naar opgaven er faerdig.';
+            ccEl('cc-task-note').classList.remove('hidden');
+        }, 0);
+    }, true);
+    // Crawl koerer i baggrunden: vis serverens procent + ETA
+    function ccPollCrawl() {
+        fetch('/api/crawl/status').then(function (r) { return r.json(); }).then(function (s) {
+            if (s.running) {
+                if (!ccTask) ccTaskStart('Site-crawl', 120);
+                ccTask.live = true;
+                ccTask.percent = s.percent || 0;
+                ccTask.eta = s.eta_seconds;
+                ccTask.detail = (s.done || 0) + '/' + (s.total || 0) + ' sider' + (s.eta_seconds ? ' · ~' + s.eta_seconds + ' s igen' : '');
+                ccRender();
+                setTimeout(ccPollCrawl, 3000);
+            } else if (ccTask && ccTask.live) {
+                ccTaskDone(true, 'Crawl faerdig - genindlaes siden for at se siderne.');
+            }
+        }).catch(function () {});
+    }
+    // Toasts efter en side-genindlaesning (fx tung formular der redirecter)
+    (function () {
+        try {
+            const raw = sessionStorage.getItem('ccLastTask');
+            if (!raw) return;
+            const t = JSON.parse(raw);
+            sessionStorage.removeItem('ccLastTask');
+            const age = Math.round((Date.now() - (t.start || Date.now())) / 1000);
+            if (age < 900) {
+                ccEl('cc-toast').textContent = (t.label || 'Opgave') + ' faerdig paa ' + age + ' s';
+                ccEl('cc-toast').classList.remove('hidden');
+                setTimeout(function () { ccEl('cc-toast').classList.add('hidden'); }, 4000);
+            }
+        } catch (e) {}
+    })();
+    ccPollCrawl();
+
 function showHistory(domainId, url) {
     const s = Alpine.$data(document.body);
     s.histOpen = true;

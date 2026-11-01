@@ -1099,7 +1099,65 @@ async def run_seo_audit(request: Request):
 
 
 # ---------- SEO: site-crawler ----------
-CRAWL_STATE = {"running": False, "done": 0, "total": 0, "start": "", "error": None, "avg": None}
+CRAWL_STATE = {"running": False, "done": 0, "total": 0, "start": "", "error": None, "avg": None,
+               "started_at": None, "finished_at": None}
+
+# Anslået varighed (sekunder) pr. tung opgave - bruges af UI'et til timer + ETA.
+TASK_ESTIMATES = {
+    "/seo/audit": {"label": "SEO-audit", "seconds": 12},
+    "/seo/rewrite": {"label": "AI titel/meta-forslag", "seconds": 25},
+    "/seo/linksuggest": {"label": "Interne link-forslag", "seconds": 25},
+    "/serp/discover": {"label": "SERP-discovery", "seconds": 20},
+    "/serp/gap": {"label": "Content gap-analyse", "seconds": 30},
+    "/backlinks/prospect": {"label": "Backlink-prospecting", "seconds": 40},
+    "/outreach/scan": {"label": "E-mail-scan", "seconds": 35},
+    "/keywords/check": {"label": "Keyword-tjek", "seconds": 45},
+    "/keywords/ideas": {"label": "Keyword-ideer", "seconds": 20},
+    "/keywords/difficulty": {"label": "Svaerhedsgrad", "seconds": 25},
+    "/domains/check": {"label": "Domaene-tjek", "seconds": 35},
+    "/monitors/check": {"label": "Monitor-tjek", "seconds": 25},
+    "/links/check": {"label": "Link-tjek", "seconds": 25},
+    "/articles/generate": {"label": "AI-artikel", "seconds": 60},
+    "/articles/autopilot": {"label": "Autopilot (ide til kladde)", "seconds": 150},
+    "/articles/meta": {"label": "Meta-forslag", "seconds": 20},
+    "/articles/score": {"label": "Kvalitetsscore", "seconds": 10},
+    "/articles/push": {"label": "Push til WordPress", "seconds": 8},
+    "/ai/visibility": {"label": "AI-synlighed", "seconds": 60},
+    "/autopilot/sync": {"label": "Autopilot-synk", "seconds": 10},
+    "/update/check": {"label": "GitHub-tjek", "seconds": 10},
+    "/api/duplicates": {"label": "Duplikat-analyse", "seconds": 6},
+    "/api/redirects": {"label": "Redirect-audit", "seconds": 6},
+    "/api/crawl/diff": {"label": "Crawl-sammenligning", "seconds": 6},
+}
+
+
+def crawl_progress(state: dict | None = None) -> dict:
+    """Procent, forloebet tid og ETA for crawl - bruges af UI'et og /api/crawl/status."""
+    s = dict(CRAWL_STATE if state is None else state)
+    done = int(s.get("done") or 0)
+    total = int(s.get("total") or 0)
+    running = bool(s.get("running"))
+    started_at, finished_at = s.get("started_at") or "", s.get("finished_at") or ""
+
+    def _dt(value):
+        try:
+            return datetime.fromisoformat(value)
+        except Exception:
+            return None
+
+    t0 = _dt(started_at)
+    elapsed = 0.0
+    if t0:
+        elapsed = max(0.0, ((_dt(finished_at) or datetime.now()) - t0).total_seconds())
+    if running:
+        percent = min(99, int(round(done * 100 / total))) if total else 0
+        eta = int(round(elapsed / done * (total - done))) if done and total > done else None
+    else:
+        percent = 100 if done and not s.get("error") else 0
+        eta = None
+    return {"running": running, "done": done, "total": total, "percent": percent,
+            "elapsed_seconds": round(elapsed, 1), "eta_seconds": eta, "finished": bool(finished_at),
+            "error": s.get("error"), "avg": s.get("avg")}
 
 
 def site_crawl_sync(start_url: str, max_pages: int = 30):
@@ -1139,7 +1197,8 @@ def site_crawl_sync(start_url: str, max_pages: int = 30):
 
         queue = [start_url]
         seen = set()
-        CRAWL_STATE.update({"running": True, "done": 0, "total": max_pages, "start": start_url, "error": None, "avg": None})
+        CRAWL_STATE.update({"running": True, "done": 0, "total": max_pages, "start": start_url, "error": None, "avg": None,
+                            "started_at": now_iso(), "finished_at": None})
         total_score = 0
         pages_saved = 0
         while queue and len(seen) < max_pages:
@@ -1218,11 +1277,11 @@ def site_crawl_sync(start_url: str, max_pages: int = 30):
                        (host, avg, pages_saved, run_id, now_iso()))
             if sitemap_broken:
                 add_alarm(db, "sitemap", f"{len(sitemap_broken)} sitemap-URLs fejler (foerste 50 tjekket)", "advarsel")
-        CRAWL_STATE.update({"running": False, "avg": avg})
+        CRAWL_STATE.update({"running": False, "avg": avg, "finished_at": now_iso()})
         return {"ok": True, "pages": pages_saved, "avg_score": avg, "robots_ok": robots_ok,
                 "sitemap_ok": sitemap_ok, "sitemap_urls": sitemap_count}
     except Exception as e:
-        CRAWL_STATE.update({"running": False, "error": str(e)[:200]})
+        CRAWL_STATE.update({"running": False, "error": str(e)[:200], "finished_at": now_iso()})
         return {"ok": False, "error": str(e)[:200]}
 
 
@@ -1249,7 +1308,8 @@ async def start_crawl(url: str = Form(...), max_pages: int = Form(30), level: st
 
 @app.get("/api/crawl/status")
 async def crawl_status():
-    return JSONResponse(CRAWL_STATE)
+    """Crawl-fremdrift: sider, procent og ETA (polles af dashboardet)."""
+    return JSONResponse(crawl_progress())
 
 
 @app.get("/api/crawl/diff")
@@ -3054,6 +3114,7 @@ async def dashboard(request: Request):
         "update_state": update_state,
         "update_token": bool(GITHUB_TOKEN),
         "update_repo": GITHUB_REPO,
+        "task_estimates": TASK_ESTIMATES,
         "current_commit": deployed_commit(),
         "users": users,
         "seo_pages": seo_pages,

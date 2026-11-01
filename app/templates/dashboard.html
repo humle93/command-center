@@ -888,7 +888,138 @@
     </section>
 </main>
 
+
+<div id="cc-task" class="hidden fixed bottom-4 right-4 z-[60] w-80 max-w-[90vw] bg-zinc-900 border border-zinc-800 rounded-2xl p-3 shadow-2xl shadow-black/60 text-xs" role="status" aria-live="polite">
+    <div class="flex items-center justify-between mb-1">
+        <span id="cc-task-label" class="text-zinc-200 font-medium">Arbejder...</span>
+        <button type="button" onclick="ccTaskHide()" class="text-zinc-500 hover:text-rose-400" aria-label="Skjul fremdrift">✕</button>
+    </div>
+    <div class="h-1.5 bg-zinc-800 rounded-full overflow-hidden"><div id="cc-task-bar" class="h-full bg-emerald-500 transition-all duration-500" style="width:0%"></div></div>
+    <div class="flex items-center justify-between mt-1 text-[11px] text-zinc-500"><span id="cc-task-pct">0 %</span><span id="cc-task-eta"></span></div>
+    <p id="cc-task-note" class="text-[10px] text-zinc-500 mt-1 hidden"></p>
+</div>
+<div id="cc-toast" class="hidden fixed bottom-4 left-4 z-[60] bg-zinc-900 border border-emerald-500/30 rounded-xl px-3 py-2 text-xs text-emerald-300 shadow-lg" role="status"></div>
+
 <script>
+    // ---- Opgave-fremdrift: timer, procent og ETA paa alle laengere opgaver ----
+    const CC_EST = {{ task_estimates | tojson }};
+    let ccTask = null;
+    function ccEl(id) { return document.getElementById(id); }
+    function ccEstimate(path) {
+        if (CC_EST[path]) return CC_EST[path];
+        let best = null, len = 0;
+        for (const key in CC_EST) {
+            if (key.endsWith('/') && path.startsWith(key) && key.length > len) { best = CC_EST[key]; len = key.length; }
+        }
+        return best;
+    }
+    function ccRender() {
+        if (!ccTask) return;
+        const elapsed = (Date.now() - ccTask.start) / 1000;
+        let pct, eta;
+        if (ccTask.live) { pct = ccTask.percent || 0; eta = ccTask.eta; }
+        else { pct = Math.min(95, Math.round(elapsed / ccTask.seconds * 100)); eta = Math.round(ccTask.seconds - elapsed); }
+        ccEl('cc-task-bar').style.width = pct + '%';
+        ccEl('cc-task-pct').textContent = pct + ' %';
+        if (ccTask.live) {
+            ccEl('cc-task-eta').textContent = ccTask.detail || '';
+        } else {
+            ccEl('cc-task-eta').textContent = eta > 0 ? '~' + eta + ' s igen' : 'tager lidt laengere end forventet';
+        }
+    }
+    function ccTaskStart(label, seconds) {
+        if (ccTask && ccTask.timer) clearInterval(ccTask.timer);
+        ccTask = { label: label, seconds: Math.max(1, seconds || 10), start: Date.now(), timer: null, live: false };
+        try { sessionStorage.setItem('ccLastTask', JSON.stringify({ label: label, start: ccTask.start })); } catch (e) {}
+        ccEl('cc-task').classList.remove('hidden');
+        ccEl('cc-task-label').textContent = label;
+        ccEl('cc-task-note').classList.add('hidden');
+        ccEl('cc-task-bar').className = 'h-full bg-emerald-500 transition-all duration-500';
+        ccTask.timer = setInterval(ccRender, 250);
+        ccRender();
+    }
+    function ccTaskDone(ok, note) {
+        if (!ccTask) return;
+        const elapsed = Math.round((Date.now() - ccTask.start) / 1000);
+        if (ccTask.timer) clearInterval(ccTask.timer);
+        ccEl('cc-task-bar').style.width = '100%';
+        ccEl('cc-task-bar').className = 'h-full transition-all duration-500 ' + (ok === false ? 'bg-rose-500' : 'bg-emerald-500');
+        ccEl('cc-task-pct').textContent = '100 %';
+        ccEl('cc-task-eta').textContent = ok === false ? 'fejlede' : 'faerdig paa ' + elapsed + ' s';
+        if (note) { ccEl('cc-task-note').textContent = note; ccEl('cc-task-note').classList.remove('hidden'); }
+        try { sessionStorage.removeItem('ccLastTask'); } catch (e) {}
+        ccTask = null;
+        setTimeout(function () {
+            if (ccTask) return;
+            ccEl('cc-task').classList.add('hidden');
+            ccEl('cc-task-note').classList.add('hidden');
+        }, note ? 8000 : 2500);
+    }
+    function ccTaskHide() {
+        if (ccTask && ccTask.timer) clearInterval(ccTask.timer);
+        ccTask = null;
+        ccEl('cc-task').classList.add('hidden');
+    }
+    // Alle fetch-kald med et estimat faar timer + ETA
+    (function () {
+        const orig = window.fetch;
+        window.fetch = function (input, init) {
+            const url = typeof input === 'string' ? input : (input && input.url) || '';
+            const meta = ccEstimate(url.split('?')[0]);
+            if (!meta) return orig.apply(this, arguments);
+            if (!ccTask) ccTaskStart(meta.label, meta.seconds);
+            return orig.apply(this, arguments).then(
+                function (res) { ccTaskDone(true); return res; },
+                function (err) { ccTaskDone(false); throw err; }
+            );
+        };
+    })();
+    // Tunge formularer: start timeren (0 ms udsaettelse, saa "confirm"-afvisning respekteres)
+    document.addEventListener('submit', function (e) {
+        const form = e.target;
+        if (!form || (form.getAttribute('method') || 'get').toLowerCase() !== 'post') return;
+        const meta = ccEstimate(new URL(form.getAttribute('action') || form.action, location.href).pathname);
+        if (!meta) return;
+        setTimeout(function () {
+            if (e.defaultPrevented || ccTask) return;
+            ccTaskStart(meta.label, meta.seconds);
+            ccEl('cc-task-note').textContent = 'Lad siden staa - den skifter selv, naar opgaven er faerdig.';
+            ccEl('cc-task-note').classList.remove('hidden');
+        }, 0);
+    }, true);
+    // Crawl koerer i baggrunden: vis serverens procent + ETA
+    function ccPollCrawl() {
+        fetch('/api/crawl/status').then(function (r) { return r.json(); }).then(function (s) {
+            if (s.running) {
+                if (!ccTask) ccTaskStart('Site-crawl', 120);
+                ccTask.live = true;
+                ccTask.percent = s.percent || 0;
+                ccTask.eta = s.eta_seconds;
+                ccTask.detail = (s.done || 0) + '/' + (s.total || 0) + ' sider' + (s.eta_seconds ? ' · ~' + s.eta_seconds + ' s igen' : '');
+                ccRender();
+                setTimeout(ccPollCrawl, 3000);
+            } else if (ccTask && ccTask.live) {
+                ccTaskDone(true, 'Crawl faerdig - genindlaes siden for at se siderne.');
+            }
+        }).catch(function () {});
+    }
+    // Toasts efter en side-genindlaesning (fx tung formular der redirecter)
+    (function () {
+        try {
+            const raw = sessionStorage.getItem('ccLastTask');
+            if (!raw) return;
+            const t = JSON.parse(raw);
+            sessionStorage.removeItem('ccLastTask');
+            const age = Math.round((Date.now() - (t.start || Date.now())) / 1000);
+            if (age < 900) {
+                ccEl('cc-toast').textContent = (t.label || 'Opgave') + ' faerdig paa ' + age + ' s';
+                ccEl('cc-toast').classList.remove('hidden');
+                setTimeout(function () { ccEl('cc-toast').classList.add('hidden'); }, 4000);
+            }
+        } catch (e) {}
+    })();
+    ccPollCrawl();
+
 function showHistory(domainId, url) {
     const s = Alpine.$data(document.body);
     s.histOpen = true;

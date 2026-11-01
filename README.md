@@ -120,11 +120,11 @@ din IP - ingen alarmtekster eller brugernavne.
 
 Fire agenter i tre grupper, plus en skill. Se `.agents/README.md` for detaljer og spawn-eksempler.
 
-| Gruppe | Repo / system | Agenter |
-|---|---|---|
-| App | `humle93/command-center` | `command-center-reviewer` (review mod regler/kontrakter), `cc-verifier` (tests, ruter, installer-paritet) |
-| Integration | `steamgears-autopilot` (WordPress-plugin) | `wp-bridge-auditor` (endpoints, felter, auth, idempotens) |
-| Indhold | `TRACK_DOMAIN` (den overvågede side) | `site-seo-auditor` (striking distance, decay, tynde sider, gap) |
+| Repo | Agenter |
+|---|---|
+| **Command Center** (dette repo) | `command-center-reviewer` (regler/kontrakter), `cc-verifier` (tests, ruter, installer-paritet), `site-seo-auditor` (SEO ud fra appens DB) |
+| **Social Autopilot** (tjenesten) | `social-autopilot-auditor` (`/drafts`, `/autopilot/sync`, kanaler, idempotens, tidszoner) |
+| **Social Autopilot Android** (mobilklienten) | `social-autopilot-android` (API-paritet, Keystore, offline-kø, release) |
 
 - `.agents/skills/command-center/SKILL.md` — en **skill** med reglerne, kontrakterne,
   verify-kommandoerne og faldgruberne. Den bliver slash-kommandoen `/skill:command-center`.

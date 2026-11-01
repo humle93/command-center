@@ -107,10 +107,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.13.3"
+APP_VERSION = "7.13.4"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.13.4", "Agentgrupper rettet til de tre repos: Command Center, Social Autopilot og Android"),
     ("7.13.3", "Fire agenter i tre grupper (app, WordPress-plugin, indhold) + manifest i .agents/"),
     ("7.13.2", "Agent + skill i .agents/ og sidste doede variabler fjernet (sitemap_missing, _up, result)"),
     ("7.13.1", "Oprydning: doede importer og variabler fjernet, Juno-tabelrester droppes naar de er tomme"),

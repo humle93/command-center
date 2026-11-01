@@ -191,10 +191,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.13.3"
+APP_VERSION = "7.13.4"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.13.4", "Agentgrupper rettet til de tre repos: Command Center, Social Autopilot og Android"),
     ("7.13.3", "Fire agenter i tre grupper (app, WordPress-plugin, indhold) + manifest i .agents/"),
     ("7.13.2", "Agent + skill i .agents/ og sidste doede variabler fjernet (sitemap_missing, _up, result)"),
     ("7.13.1", "Oprydning: doede importer og variabler fjernet, Juno-tabelrester droppes naar de er tomme"),
@@ -5394,11 +5395,11 @@ din IP - ingen alarmtekster eller brugernavne.
 
 Fire agenter i tre grupper, plus en skill. Se `.agents/README.md` for detaljer og spawn-eksempler.
 
-| Gruppe | Repo / system | Agenter |
-|---|---|---|
-| App | `humle93/command-center` | `command-center-reviewer` (review mod regler/kontrakter), `cc-verifier` (tests, ruter, installer-paritet) |
-| Integration | `steamgears-autopilot` (WordPress-plugin) | `wp-bridge-auditor` (endpoints, felter, auth, idempotens) |
-| Indhold | `TRACK_DOMAIN` (den overvågede side) | `site-seo-auditor` (striking distance, decay, tynde sider, gap) |
+| Repo | Agenter |
+|---|---|
+| **Command Center** (dette repo) | `command-center-reviewer` (regler/kontrakter), `cc-verifier` (tests, ruter, installer-paritet), `site-seo-auditor` (SEO ud fra appens DB) |
+| **Social Autopilot** (tjenesten) | `social-autopilot-auditor` (`/drafts`, `/autopilot/sync`, kanaler, idempotens, tidszoner) |
+| **Social Autopilot Android** (mobilklienten) | `social-autopilot-android` (API-paritet, Keystore, offline-kø, release) |
 
 - `.agents/skills/command-center/SKILL.md` — en **skill** med reglerne, kontrakterne,
   verify-kommandoerne og faldgruberne. Den bliver slash-kommandoen `/skill:command-center`.

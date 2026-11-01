@@ -337,8 +337,8 @@ skill_p = os.path.join(agents_dir, "skills", "command-center", "SKILL.md")
 manifest = open(manifest_p, encoding="utf-8").read() if os.path.exists(manifest_p) else ""
 skill = open(skill_p, encoding="utf-8").read() if os.path.exists(skill_p) else ""
 texts = {p: open(p, encoding="utf-8").read() for p in agent_files}
-check("agents: mindst tre definitioner (app, integration, indhold)",
-      len(agent_files) >= 3, [os.path.basename(p) for p in agent_files])
+check("agents: mindst fem definitioner fordelt paa tre repos",
+      len(agent_files) >= 5, [os.path.basename(p) for p in agent_files])
 bad = []
 for path, txt in texts.items():
     stem = os.path.basename(path)[:-3]
@@ -351,7 +351,7 @@ check("agents: hver agent er naevnt i .agents/README.md",
       all(os.path.basename(p)[:-3] in manifest for p in agent_files),
       [os.path.basename(p) for p in agent_files if os.path.basename(p)[:-3] not in manifest])
 check("agents: manifestet grupperer dem med de tre repos",
-      "command-center" in manifest and "steamgears-autopilot" in manifest and "TRACK_DOMAIN" in manifest)
+      all(k in manifest for k in ("Command Center", "Social Autopilot", "Social Autopilot Android")))
 front = skill.split("---")[1] if skill.startswith("---") else ""
 desc = _re.search(r"description: (.+)", skill)
 check("skill: SKILL.md har frontmatter med name = mappenavn",

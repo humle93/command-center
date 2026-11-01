@@ -1,20 +1,23 @@
 # Agenter i `.agents/`
 
-Freebuff/Codebuff læser agent-filer direkte i `.agents/` (filnavn = agent-id + `.ts`), så de ligger
-bevidst **fladt** her i stedet for i undermapper. Grupperingen sker via id-prefix og tabellen nedenfor.
+De tre repos hører sammen: **Command Center** er dashboards/klienten, **Social Autopilot** er tjenesten
+der udgiver opslag, og **Social Autopilot Android** er mobilklienten til samme tjeneste.
+Agentfilerne ligger bevidst **fladt** i `.agents/`, fordi Freebuff læser `<id>.ts` direkte her;
+grupperingen sker via id-prefix og tabellen nedenfor.
 
-| Gruppe | Repo / system | Agenter | Formål |
+| # | Repo | Agenter | Formål |
 |---|---|---|---|
-| 1. App | `humle93/command-center` (dette repo) | `command-center-reviewer`, `cc-verifier` | Review mod repoets regler og kontrakter; verificér tests, ruter og installer-paritet før commit |
-| 2. Integration | `steamgears-autopilot` (WordPress-plugin, ≥ 7.5) | `wp-bridge-auditor` | Audit af broen: endpoints, payload-felter, Application Password, idempotens |
-| 3. Indhold | den overvågede side (`TRACK_DOMAIN`, fx steamgears.eu) | `site-seo-auditor` | Striking distance, decay, tynde sider, content gap, kvalitetsgate — ud fra appens egne data |
+| 1 | **Command Center** (dette repo) | `command-center-reviewer`<br>`cc-verifier`<br>`site-seo-auditor` | Review mod repoets regler og kontrakter · verificér tests, ruter og installer-paritet · analysér den overvågede sides SEO ud fra appens egen DB |
+| 2 | **Social Autopilot** (tjenesten) | `social-autopilot-auditor` | Kontrakten `/drafts` + `/autopilot/sync`, Application Password, kanal-mapping, `socialqueue`, idempotens og tidszoner |
+| 3 | **Social Autopilot Android** (mobilklienten) | `social-autopilot-android` | API-paritet med gruppe 2, token i Keystore, offline-kø og genforsøg, planlagte opslag, release-blokeringer |
 
 ## Sådan bruges de
 
-- **Review før commit:** `command-center-reviewer` med `scope` = den ændrede fil/område.
-- **Verificér før push:** `cc-verifier` (sæt `params.quick=true` for kun enhedstest + paritet).
-- **Plugin-kontrakt:** `wp-bridge-auditor` med `area` = `push`/`autopilot`/`social`.
-- **Indholdsanalyse:** `site-seo-auditor` med `focus` = `striking`/`decay`/`thin`/`gap`.
+- **Før commit:** `command-center-reviewer` med `scope` = det ændrede område.
+- **Før push:** `cc-verifier` (`params.quick=true` = kun enhedstest + paritet).
+- **Broen til tjenesten:** `social-autopilot-auditor` med `area` = `push`/`sync`/`kanaler`.
+- **Mobilklienten:** `social-autopilot-android` med `focus` = `api`/`auth`/`offline`/`release`.
+- **Indhold:** `site-seo-auditor` med `focus` = `striking`/`decay`/`thin`/`gap`.
 
 ## Regler for agenterne
 
@@ -25,6 +28,7 @@ De er udviklerværktøj: de indgår ikke i `install.sh`, og self-update henter d
 
 ## Kendt usikkerhed
 
-Gruppe 2 og 3 er navngivet efter det koden faktisk refererer til (`steamgears-autopilot`, `TRACK_DOMAIN`).
-Hvis de rigtige repo-navne er anderledes, er det kun beskrivelserne i de to agenters `systemPrompt`,
-der skal rettes — id'er og filnavne skal blive, fordi de er referencer fra `spawn_agents`.
+Kun Command Center ligger i denne arbejdsmappe. Gruppe 2 og 3 arbejder derfor ud fra den kontrakt
+Command Center allerede implementerer (`/drafts`, `/autopilot/sync`, `socialqueue`, lokal tid).
+Er repoet for gruppe 3 tjekket ud ved siden af, kan `params.android_path` pege på det; ellers beder
+agenten om de filer den mangler i stedet for at gætte.

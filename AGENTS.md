@@ -13,7 +13,8 @@ den indeholder status, hvad der er ændret, konventioner og roadmap.
    - status/handoff → `CLAUDE.md`
    CI (`.github/workflows/ci.yml`) fejler, hvis `app/`, `scripts/`, `deploy/`, `requirements.txt`,
    `run.sh`, `run.bat`, `Dockerfile` eller `docker-compose.yml` ændres uden at README/docs også er rørt.
-   Brug `[skip docs]` i commit-beskeden til rene undtagelser (fx formatering).
+   Brug `[skip docs]` i commit-beskeden til rene undtagelser (fx formatering) `install.sh` er undtaget,
+   fordi den genereres fra kilderne og allerede tjekkes af paritetstrinnet.
 2. **Ret aldrig `install.sh` direkte.** Den indeholder kopier af projektets filer (17 heredocs), og CI
    tjekker paritet. Ret kilderne og regenerér installeren bagefter.
 3. **Test før commit:** `python3 tests/test_v8_features.py` og `bash tests/ci_check.sh` skal begge

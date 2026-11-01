@@ -18,6 +18,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+      # Reglen: kildekode kraever dokumentation i samme commit. install.sh er undtaget,
+      # fordi den genereres fra kilderne og i forvejen tjekkes af paritetstrinnet nedenfor.
       - name: Documentation follows code changes
         shell: bash
         run: |
@@ -34,7 +36,7 @@ jobs:
             exit 0
           fi
           changed="$(git diff --name-only "$base" HEAD || true)"
-          code="$(printf '%s\n' "$changed" | grep -E '^(app/|scripts/|deploy/|requirements\.txt|run\.sh|run\.bat|install\.sh|Dockerfile|docker-compose\.yml)' | grep -vc '\.md$' || true)"
+          code="$(printf '%s\n' "$changed" | grep -E '^(app/|scripts/|deploy/|requirements\.txt|run\.sh|run\.bat|Dockerfile|docker-compose\.yml)' | grep -vc '\.md$' || true)"
           docs="$(printf '%s\n' "$changed" | grep -cE '^(README\.md|docs/|CLAUDE\.md|AGENTS\.md)' || true)"
           code="${code:-0}"; docs="${docs:-0}"
           echo "kode-filer: $code · dokumentations-filer: $docs"

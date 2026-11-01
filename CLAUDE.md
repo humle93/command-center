@@ -162,6 +162,9 @@ kørte grønt på `ed97575`. CI tjekker desuden at alle 17 indlejrede filer i `i
   i manual/README, fane 9-12 (Alarmer, Brugere, Noter, Moduler) i manualen, fuld tabel- og jobliste
   (`alert_outbox`, `login_attempts`, `notes`, `_selftest`, alarmkø hvert minut), de 11 moduler og en
   samlet ruteoversigt i `Command_Center_Dokumentation.md` (§16).
+- CI advarer (men fejler ikke) når `docs/img/` er ældre end `app/templates/dashboard.html`. Trinnet
+  "Screenshots are not older than the dashboard" sammenligner commit-tidspunkter (ikke fil-mtimes,
+  som checkout nulstiller) og henviser til `scripts/screenshots.py`.
 
 ### Commits
 `d48854e` (v7.11: brugere, opdatering, nginx, rettelser) · `d47a920` (Juno fjernet) ·

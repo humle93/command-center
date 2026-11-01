@@ -50,6 +50,28 @@ jobs:
             exit 1
           fi
           echo "Dokumentation OK"
+      # Advarsel, ikke en fejl: billederne i docs/img/ bør genopfriskes, når dashboardet er ændret.
+      # Der sammenlignes commit-tidspunkter (checkout nulstiller fil-tidsstempler), og trinnet
+      # fejler aldrig - det skal minde om scripts/screenshots.py, ikke blokere en release.
+      - name: Screenshots are not older than the dashboard
+        shell: bash
+        run: |
+          set -uo pipefail
+          template="app/templates/dashboard.html"
+          shot_time="$(git log -1 --format=%ct -- docs/img/ || true)"
+          template_time="$(git log -1 --format=%ct -- "$template" || true)"
+          if [ -z "$shot_time" ] || [ -z "$template_time" ]; then
+            echo "Ingen historik for docs/img/ eller $template - springer tjekket over"
+            exit 0
+          fi
+          shot_date="$(date -u -d "@$shot_time" '+%Y-%m-%d')"
+          template_date="$(date -u -d "@$template_time" '+%Y-%m-%d')"
+          echo "$template: $template_date - docs/img/: $shot_date"
+          if [ "$template_time" -gt "$shot_time" ]; then
+            echo "::warning title=Screenshots er ældre end dashboardet::docs/img/ er fra $shot_date, men $template er ændret $template_date. Kør python3 scripts/screenshots.py for at opdatere dem."
+          else
+            echo "Screenshots er ikke ældre end dashboardet"
+          fi
       - run: pip install -r requirements.txt httpx  # httpx: only for FastAPI TestClient in the tests
       - name: install.sh carries the same files as the repo
         shell: bash

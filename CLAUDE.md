@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 1. november 2026 · **Version:** 7.11.0 · **Branch:** `main` · **Seneste commit:** `ed97575`
+**Opdateret:** 1. november 2026 · **Version:** 7.11.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -83,7 +83,8 @@ kørte grønt på `ed97575`. CI tjekker desuden at alle 17 indlejrede filer i `i
 
 ### Commits
 `d48854e` (v7.11: brugere, opdatering, nginx, rettelser) · `d47a920` (Juno fjernet) ·
-`e519a65` (fremdrift) · `df37281` (CI-checks + docs) · `ed97575` (README).
+`e519a65` (fremdrift) · `df37281` (CI-checks + docs) · `ed97575` (README) · `cc2bf30` (dette notat) ·
+`1958ef6` (dokumentationsregel + CI-guard).
 
 ## Sådan undgår du at ødelægge installeren
 
@@ -99,6 +100,17 @@ for f in app/main.py app/templates/dashboard.html app/templates/login.html READM
 
 Markører: `EOF_REQ, EOF_ENVDOT, EOF_MAIN, EOF_HTML, EOF_LOGIN, EOF_RUNSH, EOF_DOCKER, EOF_COMPOSE,
 EOF_SERVICE, EOF_README, EOF_SMOKE, EOF_WINBAT, EOF_RUN, EOF_NGINX, EOF_USERSVC, EOF_RESTART, EOF_UPDATE`.
+
+## Dokumentation (fast regel)
+
+Hver ændring opdaterer **`README.md`** og den relevante fil i `docs/` i samme commit:
+ny funktion → README + manualen; ændret arkitektur/job/rute/tabel → `Command_Center_Dokumentation.md`;
+ny prioritet → `ROADMAP.md`; status → denne fil. Derefter regenereres `install.sh`, fordi README er indlejret.
+
+CI håndhæver det: ændres `app/`, `scripts/`, `deploy/`, `requirements.txt`, `run.sh`, `run.bat`,
+`Dockerfile` eller `docker-compose.yml` uden at `README.md`, `docs/`, `CLAUDE.md` eller `AGENTS.md`
+ogsa er rørt, fejler jobbet med en liste over de ændrede filer. `[skip docs]` i commit-beskeden
+springer tjekket over til rene undtagelser.
 
 ## Kendte begrænsninger
 

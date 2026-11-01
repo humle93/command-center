@@ -112,6 +112,11 @@ CI håndhæver det: ændres `app/`, `scripts/`, `deploy/`, `requirements.txt`, `
 ogsa er rørt, fejler jobbet med en liste over de ændrede filer. `[skip docs]` i commit-beskeden
 springer tjekket over til rene undtagelser.
 
+## Arbejdsform
+
+- Start hver opgave med et tidsestimat (fx "~10 min") og afslut med det faktiske tidsforbrug. Skrider det, sig det straks.
+- Rapportér kun det, der faktisk er kørt: hvilke tests, CI-status, og hvad der ikke kunne verificeres her.
+
 ## Kendte begrænsninger
 
 - Én proces + SQLite + APScheduler: ingen vandret skalering; et job deler event-loop med HTTP.

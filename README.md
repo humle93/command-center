@@ -96,7 +96,9 @@ Ens alarmer dedupliceres inden for `ALERT_DEDUPE_MINUTES`, stille timer (`ALERT_
 udskyder alt under "kritisk" til vinduet slutter, og webhooken signeres efter Standard Webhooks
 (`webhook-id`, `webhook-timestamp`, `webhook-signature: v1,...` = HMAC-SHA256 over
 `id.timestamp.body`). Fanen **Alarmer** viser hvilke kanaler der er sat op, har test-knapper pr.
-kanal og lister fejlede leveringer med årsag og antal forsøg.
+kanal og lister fejlede leveringer med årsag og antal forsøg. Fremdriftskortet dækker alle tunge
+handlinger — crawl med rigtig procent, resten med ærlige skøn (`TASK_ESTIMATES`), nu også
+testalarmer og GitHub-opdatering.
 
 ## Opstart, login og IP (v7.13)
 

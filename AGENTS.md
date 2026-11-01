@@ -22,4 +22,6 @@ den indeholder status, hvad der er ændret, konventioner og roadmap.
 4. **Ingen secrets i repoet.** Nøgler hører i `.env` (gitignored) eller miljøvariabler.
 5. **Dansk UI og dansk dokumentation.** Kodekommentarer og commits må gerne være korte og tekniske.
 6. **Push kun når brugeren beder om det**, og vent på at GitHub Actions er grøn på commiten.
+8. **Fremdriftskortet bliver.** `#cc-task` i dashboardet og `TASK_ESTIMATES` er en fast del af UI'et.
+   Nye tunge handlinger (> ~5 s) skal have en post i `TASK_ESTIMATES`, saa de viser fremdrift.
 7. **Tidsestimater:** skriv et estimat (fx "~10 min") før arbejdet starter, og det faktiske tidsforbrug til sidst. Skrider estimatet, sig det med det samme i stedet for at tie.

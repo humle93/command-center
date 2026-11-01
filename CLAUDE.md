@@ -97,6 +97,13 @@ kørte grønt på `ed97575`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - `/login` viser `last_run_report()`: version/commit, seneste opstart, åbne alarmer, taellinger,
   seneste tjek/crawl, DB-størrelse og klientens IP - uden alarmtekster eller brugernavne.
 
+### Fremdrift (beholdes)
+- Fremdriftskortet i dashboardet (`#cc-task`, `ccTaskStart/ccRender/ccTaskDone`, `ccPollCrawl`) er en
+  fast del af UI'et - fjern det ikke. `crawl_progress()` giver rigtig procent for crawl, mens
+  `TASK_ESTIMATES` giver ærlige skøn for de øvrige tunge handlinger.
+- Nye formular-actions der tager mere end ~5 s skal have en `TASK_ESTIMATES`-post (label + seconds),
+  ellers kører de uden fremdrift. Crud-handlinger og `/alarms/resolve` er undtaget.
+
 ### Dokumentation og CI
 - `README.md`, manualen og arkitektur-dokumentet er skrevet om til v7.11; `docs/Command_Center_Install_Script.md`
   er erstattet af en kort, korrekt side (den gamle var en 1.362-linjers kopi af v6.0-scriptet).

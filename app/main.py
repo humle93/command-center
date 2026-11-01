@@ -1539,6 +1539,8 @@ TASK_ESTIMATES = {
     "/api/duplicates": {"label": "Duplikat-analyse", "seconds": 6},
     "/api/redirects": {"label": "Redirect-audit", "seconds": 6},
     "/api/crawl/diff": {"label": "Crawl-sammenligning", "seconds": 6},
+    "/alerts/test": {"label": "Testalarm til kanalerne", "seconds": 12},
+    "/update/apply": {"label": "Opdatering fra GitHub", "seconds": 60},
 }
 
 

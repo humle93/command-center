@@ -199,6 +199,9 @@ main.CRAWL_STATE.update({"running": False, "finished_at": main.now_iso(), "error
 prog = main.crawl_progress()
 check("tasks: finished crawl reports 100 % and no ETA",
       prog["percent"] == 100 and prog["eta_seconds"] is None, prog)
+check("tasks: de nye tunge handlinger har estimater",
+      "/alerts/test" in main.TASK_ESTIMATES and "/update/apply" in main.TASK_ESTIMATES,
+      sorted(main.TASK_ESTIMATES))
 check("tasks: every estimate has a label and a positive duration",
       bool(main.TASK_ESTIMATES)
       and all(v.get("label") and int(v.get("seconds", 0)) > 0 for v in main.TASK_ESTIMATES.values())

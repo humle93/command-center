@@ -111,7 +111,7 @@ APP_VERSION = "7.13.2"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
-    ("7.13.2", "Agent + skill i .agents/: reviewer med repoets regler, kontrakter og faldgruber"),
+    ("7.13.2", "Agent + skill i .agents/ og sidste doede variabler fjernet (sitemap_missing, _up, result)"),
     ("7.13.1", "Oprydning: doede importer og variabler fjernet, Juno-tabelrester droppes naar de er tomme"),
     ("7.13.0", "Login viser IP og en koerselsrapport; opstart skriver version og nyheder"),
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
@@ -1674,7 +1674,6 @@ def site_crawl_sync(start_url: str, max_pages: int = 30):
         avg = round(total_score / pages_saved) if pages_saved else 0
         # sitemap-validering: tjek foerste 50 sitemap-URLs for 404/fejl
         sitemap_broken = []
-        sitemap_missing = 0
         if sitemap_ok:
             try:
                 sm_urls = []
@@ -2129,7 +2128,6 @@ def autopilot_sync():
                 seeds = [r["keyword"] for r in db.execute("SELECT DISTINCT keyword FROM keywords LIMIT 5").fetchall()]
             if not seeds:
                 seeds = ["steampunk costume", "steampunk goggles"]
-            import urllib.parse as _up
             newideas = []
             for seed in seeds[:3]:
                 rr = HTTP.get(
@@ -2200,7 +2198,7 @@ def autopilot_sync():
 
 async def run_autopilot():
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(executor, autopilot_sync)
+    await loop.run_in_executor(executor, autopilot_sync)
     return RedirectResponse("/", status_code=303)
 
 

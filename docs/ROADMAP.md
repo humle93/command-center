@@ -3,6 +3,18 @@
 Status pr. **november 2026 (v7.11)**. Rækkefølgen i "Næste" er den anbefalede prioritering: sikkerhed og
 driftsstabilitet før nye features.
 
+## Dokumentation i repoet
+
+| Fil | Rolle |
+| --- | --- |
+| [`README.md`](../README.md) | Funktioner, installering, opdatering og sikkerhed |
+| [`Command_Center_Bruger_og_Systemmanual.md`](Command_Center_Bruger_og_Systemmanual.md) | Bruger- og systemmanual: faner, moduler, nginx, WP-bro, `.env` |
+| [`Command_Center_Dokumentation.md`](Command_Center_Dokumentation.md) | Arkitektur: ruter, tabeller, jobs og sikkerhedsmodel |
+| [`Command_Center_Install_Script.md`](Command_Center_Install_Script.md) | Installation og `install.sh` |
+| `docs/ROADMAP.md` | Dette dokument: dokumentation, færdigt, næste, senere og endgoal |
+| [`CLAUDE.md`](../CLAUDE.md) | Status/handoff, kendte begrænsninger og næste skridt |
+| [`AGENTS.md`](../AGENTS.md) | Faste regler for agenter (docs i samme commit, test før commit) |
+
 ## Færdigt
 
 | Version | Indhold |
@@ -52,6 +64,37 @@ driftsstabilitet før nye features.
   koster vedligeholdelse — se "Senere".
 - **AI-kvalitet afhænger af ekstern model**: kvalitetsgaten fanger længde/keyword/H2, ikke faktuelle fejl.
 - **Screenshots og visse docs-afsnit** kan være ældre end koden.
+
+## Endgoal
+
+**Command Center skal være steamgears' egen, selvhostede SEO- og driftscentral — ét sted hvor daglig
+drift, teknisk SEO, indholdsproduktion og vækstarbejde bliver overvåget, prioriteret og delvist
+automatiseret, uden abonnementer og uden at data forlader egen server.**
+
+Når målet er nået:
+
+1. **Én indgang til driften.** Cockpit viser uptime, svartid, SSL, opdateringsstatus og åbne alarmer, og
+   hver alarm har en kanal, en modtager og en vej til "løst".
+2. **Teknisk SEO er proaktivt.** Crawl, redirect-audit, duplikater og sitemap kører planlagt, og et nyt
+   problem giver en alarm samme dag — ikke en gennemgang en gang om måneden.
+3. **Indholdet produceres mod et målt marked.** Artikler skrives ud fra faktiske SERP-konkurrenter og den
+   valgte strategi, går gennem kvalitetsgaten og lander som kladde — ikke som automatisk publicering.
+4. **Væksten er systematiseret.** Keywords, positioner, visibility-index og backlink-prospects giver en
+   pipeline fra idé til rangering, med tal der kan følges over tid.
+5. **Systemet er kedeligt at drive.** Selvtest, backup med restore, smoke-test og tydelige logs gør, at
+   fejl opdages af systemet selv — ikke af kunden eller en manuel gennemgang.
+6. **Alt kører på egen server.** FastAPI + SQLite bag nginx/TLS, egne data og egne nøgler. Skalering sker
+   ved at gøre det eksisterende mere sikkert og testet, ikke ved at lægge flere tjenester ovenpå.
+
+Succeskriterium: **en hel uge hvor ingen SEO- eller driftsfejl opdages manuelt**, fordi Command Center
+allerede har fanget, prioriteret og rapporteret dem.
+
+Roadmap-punkterne er ikke tilfældige: **SSRF-beskyttelse, CSRF/session-rotation og offline
+dashboard-assets** gør systemet sikkert og selvstændigt nok til punkt 6; **alarm-routing og -hygiejne,
+backup/restore i UI og job-heartbeat** giver punkt 5; **planlagt crawl med score-alarm og
+crawler-opgraderinger** giver punkt 2; og **content optimizer, keyword-volumen/intent og GSC-/rank-data**
+giver punkt 3 og 4. Rækkefølgen er bevidst: sikkerhed og driftsstabilitet før nye features, fordi et
+system der ikke kan stoles på, ikke kan automatisere noget som helst.
 
 ## Sådan bidrager du
 

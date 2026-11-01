@@ -101,11 +101,31 @@ Artikel-forhåndsvisningen i dashboardet vises med saniteret HTML: kun formateri
 
 ![Monitors](img/cc-monitors.png)
 
+### 9. Alarmer
+
+- Listen over åbne alarmer med type, besked og tid; "Løst" lukker en alarm (`POST /alarms/resolve`)
+- **Kanaler**: hvilke af Telegram/e-mail/ntfy/webhook der er sat op, en testalarm pr. kanal og fejlede leveringer med årsag og antal forsøg (se "Alarmer og kanaler")
+- Alarmer leveres fra køen `alert_outbox`, så en langsom modtager aldrig blokerer UI'et
+
+### 10. Brugere
+
+- Opret og slet brugere, skift adgangskode, og se seneste login samt de seneste forsøg med IP (se "Login og brugere")
+
+### 11. Noter
+
+- Hurtige workflow-noter: skriv en note, se de nyeste og slet enkelte (`/notes/add`, `/notes/delete`). Gemmes i tabellen `notes`
+
+### 12. Moduler
+
+- Slå de 11 funktionsområder fra/til med det samme (se "Moduler" nedenfor)
+
 ---
 
 ## AI Tools
 
-Samlede AI-værktøjer: titel/meta-rewrites, outreach-drafts, artikel-meta og interne link-forslag. Bruger `AIMLAPI_KEY` + `AI_MODEL` (default `google/gemini-3-8-flash`, max_tokens 3000 pga. reasoning-tokens). Månedens forbrug tælles og stoppes ved `AI_MONTHLY_LIMIT`.
+Samlede AI-værktøjer: titel/meta-rewrites, outreach-drafts, artikel-meta, interne link-forslag og AI-synlighed. Bruger `AIMLAPI_KEY` + `AI_MODEL` (default `google/gemini-3-8-flash`, max_tokens 3000 pga. reasoning-tokens). Månedens forbrug tælles og stoppes ved `AI_MONTHLY_LIMIT`.
+
+**AI-synlighed** (fanen *AI*, `/ai/visibility`): stil det spørgsmål en kunde ville stille en AI-assistent (fx "hvor køber jeg steampunk-goggles?"). CC beder modellen om at nævne konkrete butikker og registrerer, om `TRACK_DOMAIN` optræder i svaret — med et uddrag af svaret som dokumentation. Hvert tjek gemmes i `ai_visibility`, så du kan følge, om sitet bliver nævnt i AI-svar over tid. Kræver `AIMLAPI_KEY`.
 
 ## Pro
 
@@ -119,7 +139,7 @@ Slå funktionsområder fra/til: `domains, keywords, ai, monitors, social, links,
 
 - **Kerne**: domains + keywords + ai
 - **Udvidet**: + monitors, social, links, spy
-- **Fuld**: alt inkl. wp_push, telegram, growth
+- **Fuld**: alt inkl. wp_push, telegram, growth og autopilot (WordPress-broen)
 
 Deaktiverede moduler skjuler UI-knapper og stopper cron-jobs (fx kører growth-autopiloten kun når `growth` er til). Ændringer slår igennem med det samme.
 
@@ -163,13 +183,13 @@ Alle routes kræver en indlogget bruger (cookie) - samme session som UI'et. Vigt
 
 ## Environment-variabler (.env)
 
-`CC_HOST`, `CC_PORT`, `CC_PUBLIC_URL`, `CC_FORWARDED_ALLOW_IPS`, `GITHUB_TOKEN`, `GITHUB_REPO`, `AIMLAPI_KEY`, `AI_MODEL`, `WP_URL/USER/APP_PASSWORD`, `TELEGRAM_*`, `SERPAPI_KEY`, `TRACK_DOMAIN`, `PSI_API_KEY`, `SSL_WARN_DAYS`, `LINKCHECK_LIMIT`, `SERPAPI_MONTHLY_LIMIT`, `AI_MONTHLY_LIMIT`, `QUALITY_MIN_WORDS`.
+`CC_HOST`, `CC_PORT`, `CC_PUBLIC_URL`, `CC_FORWARDED_ALLOW_IPS`, `GITHUB_TOKEN`, `GITHUB_REPO`, `UPDATE_AUTO_RESTART`, `UPDATE_RESTART_CMD`, `AIMLAPI_KEY`, `AI_MODEL`, `WP_URL/USER/APP_PASSWORD`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_TO`, `SMTP_TLS`, `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN`, `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_SECRET`, `ALERT_MIN_SEVERITY`, `ALERT_QUIET_HOURS`, `ALERT_DEDUPE_MINUTES`, `SERPAPI_KEY`, `TRACK_DOMAIN`, `PSI_API_KEY`, `SSL_WARN_DAYS`, `LINKCHECK_LIMIT`, `SERPAPI_MONTHLY_LIMIT`, `AI_MONTHLY_LIMIT`, `QUALITY_MIN_WORDS`.
 
 Rigtige miljøvariabler vinder over `.env`. `.env` læses før appens konfiguration, og inline-kommentarer (`KEY=  # note`) fjernes.
 
 ## Drift
 
-- **Cron**: domæne-tjek hver 6. time · keywords 06:00 · autopilot 05:15 · oprydning 04:30 · DB-backup 04:40 · GitHub-tjek 05:00 · Autopilot-bro hver 30. min
+- **Cron**: domæne-tjek hver 6. time · keywords 06:00 · autopilot 05:15 · oprydning 04:30 · DB-backup 04:40 · GitHub-tjek 05:00 · Autopilot-bro hver 30. min · alarmkøen (`alert_outbox`) leveres hvert minut
 - **Backup**: `app/backups/cc-daglig-*.db` (14 gemmes) og `cc-pre-update-*.db` før hver opdatering
 - **Health**: `/health` returnerer 503 ved kritisk DB/disk-tilstand og viser månedens API-forbrug
 - **Tests**: `python3 tests/test_v8_features.py` og `bash tests/ci_check.sh` (boot, alle sider, auth, WordPress-bro og link-audit)

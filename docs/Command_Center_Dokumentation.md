@@ -51,10 +51,11 @@ install.sh                 # selvstændig installer (indeholder kopier af filern
 Tabeller i grupper:
 
 - **Overvågning**: `domains`, `check_history`, `monitors`, `health_history`, `alarms`
+- **Alarmer og login**: `alert_outbox` (én række pr. kanal), `login_attempts`
 - **SEO**: `seopages`, `crawl_runs`, `keywords`, `keyword_difficulty`, `keyword_ideas`, `content_gap`, `visibility`, `internal_links`
 - **Indhold**: `articles`, `backlink_prospects`, `outreach`
 - **Drift/integrationer**: `socialqueue`, `competitors`, `linkcheck`, `ai_visibility`
-- **System**: `users`, `sessions`, `settings` (nøgle/værdi: moduler, strategi, budget, snapshots, `deployed_commit`, `github_update`)
+- **System**: `users`, `sessions`, `settings` (nøgle/værdi: moduler, strategi, budget, snapshots, `deployed_commit`, `github_update`), `notes` og `_selftest` (resultat af opstarts-selvtesten)
 
 Alle queries er parameteriserede. `settings` bruges til små tilstande (JSON), så nye funktioner ikke kræver migration.
 
@@ -69,6 +70,11 @@ Alle queries er parameteriserede. `settings` bruges til små tilstande (JSON), s
 | DB-backup | 04:40 | 14 kopier pr. tag |
 | GitHub-opdaterings-tjek | 05:00 | `GITHUB_TOKEN` |
 | Autopilot-bro (WordPress) | hvert 30. min | modul `autopilot` + WP-creds |
+| Alarmkø (`alert_outbox`) | hvert minut | — (leverer med dedupe, backoff og stille timer) |
+
+Modulerne (`MODULES` i `app/main.py`, 11 stk.): `domains`, `keywords`, `ai`, `monitors`, `social`,
+`links`, `spy`, `wp_push`, `telegram`, `growth` og `autopilot`. Et slukket modul skjuler UI'et
+(`module_labels` i skabelonen) og springer det tilhørende job over.
 
 ## 6. Crawler og SEO-analyse
 
@@ -178,3 +184,30 @@ men **kun hvis de er tomme** - en tabel med data røres aldrig.
 De 35 `run_in_executor`-kald er bevidst ikke slået sammen til en hjælpefunktion: mønstret varierer
 (await, tildeling, fire-and-forget, `loop2`), og en mekanisk omskrivning ville være kosmetisk churn
 med risiko for at stall'e event-loopet. Det er dokumenteret her, så det ikke bliver "opdaget" igen.
+
+
+## 16. Ruteoversigt
+
+Alle ruter registreres i `app/main.py` med `@app.get`/`@app.post`. Undtagen `/setup`, `/login`,
+`/health` og `/static` kræver de en indlogget bruger (cookie-session, se §3); API-svar til
+`/api/*` er JSON, resten er formular-POST med redirect. `/static` er et mount, og FastAPI tilføjer
+selv `/docs`, `/openapi.json` og `/redoc`. `tests/check_paths.py` rapporterer det aktuelle antal
+ved hvert CI-løb, så tabellen og koden ikke kan glide fra hinanden ubemærket.
+
+| Område | Ruter |
+| --- | --- |
+| Opstart og auth | `GET /setup`, `POST /setup`, `GET /login`, `POST /login`, `GET /logout` |
+| Brugere | `POST /users/add`, `POST /users/delete`, `POST /users/password` |
+| Dashboard | `GET /` |
+| Domæner | `POST /domains/check`, `POST /domains/add`, `POST /domains/delete`, `GET /api/history/{domain_id}` |
+| SEO og crawl | `POST /seo/audit`, `POST /seo/crawl`, `POST /seo/crawl/delete`, `POST /seo/linksuggest`, `POST /seo/rewrite`, `GET /api/crawl/status`, `GET /api/crawl/diff`, `GET /api/sitemap.xml`, `GET /api/redirects`, `GET /api/duplicates` |
+| Keywords | `POST /keywords/add`, `POST /keywords/delete`, `POST /keywords/check`, `POST /keywords/ideas`, `POST /keywords/difficulty`, `GET /api/visibility` |
+| Artikler | `POST /articles/generate`, `POST /articles/push`, `POST /articles/delete`, `POST /articles/autopilot`, `POST /articles/meta`, `POST /articles/score` |
+| Vækst | `POST /backlinks/prospect`, `POST /backlinks/delete`, `POST /outreach/scan`, `POST /serp/discover`, `POST /serp/gap`, `POST /competitors/delete` |
+| Links, social og bro | `POST /links/check`, `POST /social/add`, `POST /social/delete`, `GET /social/export.csv`, `POST /social/to-autopilot`, `POST /autopilot/sync` |
+| Monitors og historik | `POST /monitors/add`, `POST /monitors/delete`, `POST /monitors/check`, `GET /api/health-history` |
+| Alarmer | `POST /alarms/resolve`, `POST /alerts/test`, `GET /api/alerts/status` |
+| AI | `POST /ai/visibility` |
+| Indstillinger og noter | `POST /settings/module`, `POST /settings/strategy`, `POST /notes/add`, `POST /notes/delete` |
+| Drift og opdatering | `GET /health`, `GET /api/update`, `POST /update/check`, `POST /update/apply`, `POST /api/update/check`, `POST /api/update/apply`, `POST /self-update` (alias) |
+

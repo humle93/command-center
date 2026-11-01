@@ -118,10 +118,23 @@ kørte grønt på `ed97575`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - `tests/test_v8_features.py` tjekker at filerne findes, at id matcher filnavn, og at frontmatter er
   gyldig - saa de ikke raadner stille.
 
+### Flettet med fjern-sessionen (v7.13.2)
+- Remote havde to commits fra en anden session; de er flettet ind (merge `b72f3f5`).
+- Deres oprydning fjernede `sitemap_missing = 0`, `import urllib.parse as _up` og `result =`.
+  `sitemap_missing` findes stadig som **kolonnenavn** i SQL og i `migrate_db` - det er ikke den
+  fjernede variabel, saa den skal ikke "genoprettes".
+- `install.sh` er regenereret efter flettet, og pariteten er verificeret (17/17).
+
 ### Dokumentation og CI
 - `README.md`, manualen og arkitektur-dokumentet er skrevet om til v7.11; `docs/Command_Center_Install_Script.md`
   er erstattet af en kort, korrekt side (den gamle var en 1.362-linjers kopi af v6.0-scriptet).
 - `docs/ROADMAP.md` er ny. CI's paritets-trin dækker nu alle 17 indlejrede filer (før 5).
+- `docs/ROADMAP.md` har nu en **dokumentationsoversigt** øverst og et **Endgoal**-afsnit: det
+  langsigtede mål, succeskriteriet og hvilke roadmap-punkter der trækker derhen.
+- Dokumentationen er suppleret med det, der manglede i forhold til koden: **AI-synlighed** og **Noter**
+  i manual/README, fane 9-12 (Alarmer, Brugere, Noter, Moduler) i manualen, fuld tabel- og jobliste
+  (`alert_outbox`, `login_attempts`, `notes`, `_selftest`, alarmkø hvert minut), de 11 moduler og en
+  samlet ruteoversigt i `Command_Center_Dokumentation.md` (§16).
 
 ### Commits
 `d48854e` (v7.11: brugere, opdatering, nginx, rettelser) · `d47a920` (Juno fjernet) ·

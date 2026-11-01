@@ -135,6 +135,13 @@ kørte grønt på `ed97575`. CI tjekker desuden at alle 17 indlejrede filer i `i
   fjernede variabel, saa den skal ikke "genoprettes".
 - `install.sh` er regenereret efter flettet, og pariteten er verificeret (17/17).
 
+### Tider (v7.14.0)
+- Planlagte opslag gemmer `scheduled_at` (lokal) + `scheduled_at_utc`, og `created_at_utc` ved siden af
+  `created_at`. Konvertering kun ved graenserne: `local_to_utc()` / `utc_to_local()`.
+- Ikke-eksisterende sommertid afvises; tvetydig tid giver foerste forekomst (`fold=0`). Testene daekker
+  baade 29/3 og 25/10 2026.
+- Zonen er `CC_TZ` (standard Europe/Copenhagen). Ukendt zone falder tilbage, den crasher ikke.
+
 ### Dokumentation og CI
 - `README.md`, manualen og arkitektur-dokumentet er skrevet om til v7.11; `docs/Command_Center_Install_Script.md`
   er erstattet af en kort, korrekt side (den gamle var en 1.362-linjers kopi af v6.0-scriptet).

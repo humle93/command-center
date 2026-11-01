@@ -186,7 +186,30 @@ De 35 `run_in_executor`-kald er bevidst ikke slået sammen til en hjælpefunktio
 med risiko for at stall'e event-loopet. Det er dokumenteret her, så det ikke bliver "opdaget" igen.
 
 
-## 16. Ruteoversigt
+## 16. Tider: lokal tid og UTC (v7.14)
+
+Tidsstempler skrives fortsat som **lokal tid** (`now_iso()`), fordi UI, jobplanlægningen (APScheduler
+på `Europe/Copenhagen`) og historikken er dansk tid. Det er læsbart, men ikke entydigt: 02:30 findes
+ikke den nat sommertiden starter, og findes to gange den nat den slutter. Derfor gemmes **UTC ved
+siden af** de tider hvor det betyder noget:
+
+| Kolonne | Indhold |
+|---|---|
+| `socialqueue.created_at` + `created_at_utc` | oprettelsestid, lokal + UTC |
+| `socialqueue.scheduled_at` + `scheduled_at_utc` | planlagt udgivelse, lokal + UTC |
+
+Konverteringen sker ved **grænserne**:
+
+- **Ind**: `/social/add` får `scheduled_at` fra et `datetime-local`-felt (lokal tid), kalder
+  `local_to_utc()` og gemmer begge former. En ikke-eksisterende tid afvises med en alarm; en tvetydig
+  tid vælger den **første** forekomst (`fold=0`) — dokumenteret i koden, ikke tilfældigt.
+- **Ud**: UI viser lokal tid, CSV har begge kolonner plus `timezone`, og payloaden til Social
+  Autopilot har `scheduled_at_utc`, `scheduled_at_local` og `timezone`.
+
+Zonen sættes med `CC_TZ`; en ukendt zone falder tilbage til `Europe/Copenhagen` i stedet for at
+crashe opstarten. Gamle rækker backfill'es i `migrate_db()`, hvor den lokale tid fortolkes i `CC_TZ`.
+
+## 17. Ruteoversigt
 
 Alle ruter registreres i `app/main.py` med `@app.get`/`@app.post`. Undtagen `/setup`, `/login`,
 `/health` og `/static` kræver de en indlogget bruger (cookie-session, se §3); API-svar til

@@ -328,6 +328,82 @@ check("oprydning: tomme Juno-tabeller droppes, tabeller med data beholdes",
       "drift" not in names and "gsc_daily" not in names and "gsc_queries" in names and kept == 1,
       (sorted(n for n in names if n.startswith(("drift", "gsc"))), kept))
 
+# --- tider: lokal tid + UTC (v7.14.0) ---
+check("tid: sommertid konverteres korrekt (juli = UTC+2)",
+      main.local_to_utc("2026-07-01T12:00") == "2026-07-01T10:00:00+00:00",
+      main.local_to_utc("2026-07-01T12:00"))
+check("tid: vintertid konverteres korrekt (januar = UTC+1)",
+      main.local_to_utc("2026-01-15T12:00") == "2026-01-15T11:00:00+00:00",
+      main.local_to_utc("2026-01-15T12:00"))
+check("tid: rundtur lokal -> UTC -> lokal er uaendret",
+      main.utc_to_local(main.local_to_utc("2026-07-01T12:00")) == "2026-07-01T12:00:00",
+      main.utc_to_local(main.local_to_utc("2026-07-01T12:00")))
+try:
+    main.local_to_utc("2026-03-29T02:30")
+    nonexistent = False
+except ValueError as e:
+    nonexistent = "sommertid" in str(e)
+check("tid: ikke-eksisterende tid afvises (spring forward 29/3 2026)", nonexistent)
+check("tid: tvetydig tid giver foerste forekomst (25/10 2026)",
+      main.local_to_utc("2026-10-25T02:30") == "2026-10-25T00:30:00+00:00",
+      main.local_to_utc("2026-10-25T02:30"))
+try:
+    main.local_to_utc("i morgen")
+    bad_fmt = False
+except ValueError:
+    bad_fmt = True
+check("tid: ugyldigt format afvises", bad_fmt)
+check("tid: ukendt zone falder tilbage i stedet for at crashe",
+      main.CC_TZ_NAME == "Europe/Copenhagen", main.CC_TZ_NAME)
+
+c2 = TestClient(main.app)
+c2.post("/login", data={"username": "iptest", "password": "iptest-pass"}, follow_redirects=False)
+check("social: testklienten er logget ind", c2.get("/").status_code == 200, c2.get("/").status_code)
+c2.post("/social/add", data={"platform": "Pinterest", "message": "Test opslag",
+                             "scheduled_at": "2026-07-01T12:00"})
+with main.get_db() as db:
+    row = db.execute("SELECT * FROM socialqueue ORDER BY id DESC LIMIT 1").fetchone()
+check("social: planlagt opslag gemmer lokal tid OG UTC",
+      bool(row) and row["scheduled_at"] == "2026-07-01T12:00:00"
+      and row["scheduled_at_utc"] == "2026-07-01T10:00:00+00:00",
+      (row["scheduled_at"], row["scheduled_at_utc"]) if row else None)
+check("social: created_at_utc gemmes ved siden af created_at",
+      bool(row) and (row["created_at_utc"] or "").endswith("+00:00") and bool(row["created_at"]),
+      row["created_at_utc"] if row else None)
+check("social: planlagt opslag faar status Planlagt", bool(row) and row["status"] == "Planlagt",
+      row["status"] if row else None)
+payload = main.social_payload(row, "pinterest", "titel", "body")
+check("social: payload har UTC, lokal tid og zone",
+      payload.get("scheduled_at_utc") == "2026-07-01T10:00:00+00:00"
+      and payload.get("scheduled_at_local") == "2026-07-01T12:00:00"
+      and payload.get("timezone") == main.CC_TZ_NAME, payload)
+check("social: payload uden planlagt tid har ingen tidsfelter",
+      set(main.social_payload({"scheduled_at": "", "scheduled_at_utc": ""}, "x", "t", "b"))
+      == {"channel", "title", "body", "ai_model"})
+with main.get_db() as db:
+    before = db.execute("SELECT COUNT(*) FROM socialqueue").fetchone()[0]
+c2.post("/social/add", data={"platform": "Pinterest", "message": "Sommertid",
+                             "scheduled_at": "2026-03-29T02:30"})
+with main.get_db() as db:
+    after = db.execute("SELECT COUNT(*) FROM socialqueue").fetchone()[0]
+    alarm = db.execute("SELECT message FROM alarms WHERE type='social' ORDER BY id DESC LIMIT 1").fetchone()
+check("social: ugyldig sommertid gemmes IKKE og giver alarm",
+      after == before and bool(alarm) and "sommertid" in alarm["message"],
+      (after, alarm["message"] if alarm else None))
+with main.get_db() as db:
+    db.execute("INSERT INTO socialqueue (platform, message, status, created_at) VALUES (?,?,?,?)",
+               ("Legacy", "gammel raekke", "Klar i ko", "2026-01-15T12:00:00"))
+main.migrate_db()
+with main.get_db() as db:
+    legacy = db.execute("SELECT created_at_utc FROM socialqueue WHERE platform='Legacy'").fetchone()
+check("social: migrering backfiller UTC for gamle raekker",
+      bool(legacy) and legacy["created_at_utc"] == "2026-01-15T11:00:00+00:00",
+      legacy["created_at_utc"] if legacy else None)
+csv_text = c2.get("/social/export.csv").text
+check("social: CSV har UTC-kolonner og zone",
+      "created_at_utc" in csv_text and "scheduled_at_utc" in csv_text and main.CC_TZ_NAME in csv_text,
+      csv_text.splitlines()[0] if csv_text else "")
+
 # --- agent + skill i repoet (v7.13.3) ---
 import glob, re as _re
 agents_dir = os.path.join(ROOT, ".agents")

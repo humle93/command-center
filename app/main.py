@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from datetime import datetime, timezone, timedelta, date
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
+from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
@@ -107,10 +108,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.13.4"
+APP_VERSION = "7.14.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.14.0", "Planlagt tid gemmes som lokal tid + UTC; sommertid afvises i stedet for at gaettes"),
     ("7.13.4", "Agentgrupper rettet til de tre repos: Command Center, Social Autopilot og Android"),
     ("7.13.3", "Fire agenter i tre grupper (app, WordPress-plugin, indhold) + manifest i .agents/"),
     ("7.13.2", "Agent + skill i .agents/ og sidste doede variabler fjernet (sitemap_missing, _up, result)"),
@@ -228,7 +230,10 @@ def init_db():
             platform TEXT NOT NULL,
             message TEXT NOT NULL,
             status TEXT DEFAULT 'Klar i ko',
-            created_at TEXT
+            created_at TEXT,
+            created_at_utc TEXT,
+            scheduled_at TEXT,
+            scheduled_at_utc TEXT
         );
         CREATE TABLE IF NOT EXISTS notes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -424,6 +429,7 @@ def migrate_db():
             "monitors": ["last_value"],
             "users": ["last_login_ip", "last_login_at"],
             "sessions": ["ip"],
+            "socialqueue": ["created_at_utc", "scheduled_at", "scheduled_at_utc"],
         }.items():
             existing = [r[1] for r in db.execute(f"PRAGMA table_info({table})").fetchall()]
             for c in want:
@@ -442,6 +448,19 @@ def migrate_db():
                     db.execute(f"DROP TABLE {retired}")
             except Exception:
                 pass
+        # v7.14: gamle raekker er skrevet i lokal tid - backfill UTC ud fra CC_TZ.
+        try:
+            for r in db.execute(
+                "SELECT id, created_at FROM socialqueue "
+                "WHERE created_at_utc IS NULL AND created_at IS NOT NULL"
+            ).fetchall():
+                try:
+                    db.execute("UPDATE socialqueue SET created_at_utc=? WHERE id=?",
+                               (local_to_utc(r["created_at"]), r["id"]))
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # v7.12: eksisterende installationer faar outbox-tabellen her (init_db rammer kun nye DB'er).
         db.execute("""CREATE TABLE IF NOT EXISTS alert_outbox (
             id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT, alarm_id INTEGER, dedupe_key TEXT,
@@ -920,6 +939,69 @@ def safe_request(url: str, timeout: int = 6):
 
 def now_iso():
     return datetime.now().isoformat(timespec="seconds")
+
+
+# ---------- Tider: lokal tid + UTC ----------
+CC_TZ_NAME = (os.getenv("CC_TZ") or "Europe/Copenhagen").strip()
+try:
+    CC_TZ = ZoneInfo(CC_TZ_NAME)
+except Exception:
+    CC_TZ, CC_TZ_NAME = ZoneInfo("Europe/Copenhagen"), "Europe/Copenhagen"
+
+
+def now_utc_iso():
+    """UTC som ISO-streng - gemmes ved siden af den lokale tid, saa den er entydig."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def local_to_utc(value):
+    """'YYYY-MM-DDTHH:MM[:SS]' i CC_TZ -> ISO-UTC.
+
+    Rejser ValueError ved tom, ugyldig eller ikke-eksisterende tid (sommertid). En tvetydig tid
+    (efteraar, hvor klokken gaar tilbage) giver den foerste forekomst - det er et valg, ikke en
+    tilfaeldighed, og det er derfor tiden ALTID gemmes som UTC ved siden af.
+    """
+    text = (value or "").strip().replace(" ", "T")
+    if not text:
+        raise ValueError("tomt tidspunkt")
+    naive = None
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+        try:
+            naive = datetime.strptime(text, fmt)
+            break
+        except ValueError:
+            continue
+    if naive is None:
+        raise ValueError("forventer YYYY-MM-DDTHH:MM")
+    local = naive.replace(tzinfo=CC_TZ, fold=0)
+    if local.astimezone(timezone.utc).astimezone(CC_TZ).replace(tzinfo=None) != naive:
+        raise ValueError(f"{naive:%Y-%m-%d %H:%M} findes ikke i {CC_TZ_NAME} (sommertid)")
+    return local.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def utc_to_local(value):
+    """ISO-UTC -> 'YYYY-MM-DDTHH:MM:SS' i CC_TZ. Ukendt format returneres uaendret."""
+    if not value:
+        return ""
+    try:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return str(value)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(CC_TZ).replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+def social_payload(post, channel, title, message):
+    """Payload til Social Autopilot. Planlagt tid sendes som UTC + lokal + zone, saa modtageren
+    ikke skal gaette. Opslag uden planlagt tid faar ingen tidsfelter."""
+    body = {"channel": channel, "title": title, "body": message, "ai_model": "command-center"}
+    scheduled_utc = (post["scheduled_at_utc"] if "scheduled_at_utc" in post.keys() else "") if hasattr(post, "keys") else ""
+    if scheduled_utc:
+        body["scheduled_at_utc"] = scheduled_utc
+        body["scheduled_at_local"] = (post["scheduled_at"] if "scheduled_at" in post.keys() else "") or ""
+        body["timezone"] = CC_TZ_NAME
+    return body
 
 
 def add_alarm(db, type_: str, message: str, severity: str = "info"):
@@ -2344,13 +2426,32 @@ async def check_page_links(url: str = Form(...)):
 
 # ---------- Social ko ----------
 @app.post("/social/add")
-async def add_social_post(platform: str = Form(...), message: str = Form(...)):
+async def add_social_post(platform: str = Form(...), message: str = Form(...),
+                          scheduled_at: str = Form("")):
+    """Tilfoejer et opslag. En planlagt tid indtastes i lokal tid, gemmes som lokal + UTC og
+    afvises hvis den ikke findes (sommertid) - ellers ville opslaget blive udgivet forkert."""
     if platform.strip() and message.strip():
+        scheduled_local = scheduled_utc = error = ""
+        if scheduled_at.strip():
+            try:
+                scheduled_utc = local_to_utc(scheduled_at)
+                scheduled_local = utc_to_local(scheduled_utc)
+            except ValueError as e:
+                error = str(e)
         with get_db() as db:
-            db.execute(
-                "INSERT INTO socialqueue (platform, message, created_at) VALUES (?,?,?)",
-                (platform.strip(), message.strip(), now_iso()),
-            )
+            if error:
+                add_alarm(db, "social",
+                          f"Opslag ikke gemt: tidspunktet '{scheduled_at}' blev afvist ({error})",
+                          "advarsel")
+            else:
+                db.execute(
+                    "INSERT INTO socialqueue "
+                    "(platform, message, status, created_at, created_at_utc, scheduled_at, scheduled_at_utc) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (platform.strip(), message.strip(),
+                     "Planlagt" if scheduled_utc else "Klar i ko",
+                     now_iso(), now_utc_iso(), scheduled_local, scheduled_utc),
+                )
     return RedirectResponse("/", status_code=303)
 
 
@@ -2365,10 +2466,16 @@ async def delete_social_post(id: int = Form(...)):
 async def export_social_csv():
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["platform", "message", "status", "created_at"])
+    writer.writerow(["platform", "message", "status", "created_at", "created_at_utc",
+                     "scheduled_at", "scheduled_at_utc", "timezone"])
     with get_db() as db:
-        for row in db.execute("SELECT platform, message, status, created_at FROM socialqueue ORDER BY id").fetchall():
-            writer.writerow([row["platform"], row["message"], row["status"], row["created_at"]])
+        for row in db.execute(
+            "SELECT platform, message, status, created_at, created_at_utc, scheduled_at, scheduled_at_utc "
+            "FROM socialqueue ORDER BY id"
+        ).fetchall():
+            writer.writerow([row["platform"], row["message"], row["status"], row["created_at"],
+                             row["created_at_utc"], row["scheduled_at"], row["scheduled_at_utc"],
+                             CC_TZ_NAME])
     return PlainTextResponse(
         buf.getvalue(),
         media_type="text/csv",
@@ -2477,7 +2584,9 @@ async def autopilot_sync_now():
 async def social_to_autopilot(id: int = Form(...)):
     """Send et opslag fra CC's sociale koe til pluginnet som AI-kladde (godkendes i WordPress)."""
     with get_db() as db:
-        post = db.execute("SELECT platform, message FROM socialqueue WHERE id=?", (id,)).fetchone()
+        post = db.execute(
+            "SELECT platform, message, scheduled_at, scheduled_at_utc FROM socialqueue WHERE id=?", (id,)
+        ).fetchone()
     if not post:
         return RedirectResponse("/", status_code=303)
     channel = sgap_channel(post["platform"])
@@ -2490,7 +2599,7 @@ async def social_to_autopilot(id: int = Form(...)):
     title = message.split("\n", 1)[0][:90]
 
     def send():
-        return sgap_api("POST", "/drafts", json={"channel": channel, "title": title, "body": message, "ai_model": "command-center"})
+        return sgap_api("POST", "/drafts", json=social_payload(post, channel, title, message))
 
     try:
         result = await asyncio.get_running_loop().run_in_executor(executor, send)
@@ -3098,8 +3207,9 @@ async def generate_meta(id: int = Form(...)):
                        (data.get("meta_title", ""), data.get("meta_description", ""), id))
             post = data.get("social_post", "")
             if post:
-                db.execute("INSERT INTO socialqueue (platform, message, created_at) VALUES (?,?,?)",
-                           ("auto: " + art["keyword"], post, now_iso()))
+                db.execute("INSERT INTO socialqueue (platform, message, created_at, created_at_utc) "
+                           "VALUES (?,?,?,?)",
+                           ("auto: " + art["keyword"], post, now_iso(), now_utc_iso()))
     except Exception as e:
         with get_db() as db:
             add_alarm(db, "ai-meta", f"Meta/social-generering fejlede for artikel #{id}: {str(e)[:150]}", "advarsel")
@@ -3562,6 +3672,7 @@ async def dashboard(request: Request):
         "articles": articles,
         "linkchecks": linkchecks,
         "socialqueue": socialqueue,
+        "cc_tz": CC_TZ_NAME,
         "notes": notes,
         "keywords": keywords,
         "alarms": alarms,

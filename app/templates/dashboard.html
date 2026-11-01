@@ -600,6 +600,8 @@
             <form action="/social/add" method="POST" class="space-y-3">
                 <input type="text" name="platform" placeholder="Platform (f.eks. Pinterest, LinkedIn, X)" required class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
                 <textarea name="message" placeholder="Opslagets tekst..." rows="3" required class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm"></textarea>
+                <label class="block text-[10px] text-zinc-500">Planlagt tid i {{ cc_tz }} — tomt felt = send med det samme. Tiden gemmes også som UTC.</label>
+                <input type="datetime-local" name="scheduled_at" class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm text-zinc-300">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Tilføj til kø</button>
             </form>
         </div>
@@ -614,7 +616,7 @@
                     <div class="space-y-1">
                         <span class="inline-block bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded text-[10px]">{{ post.platform }}</span>
                         <p class="text-zinc-300 whitespace-pre-wrap">{{ post.message }}</p>
-                        <p class="text-[10px] text-zinc-500">{{ post.status }}</p>
+                        <p class="text-[10px] text-zinc-500">{{ post.status }}{% if post.scheduled_at %} · planlagt {{ post.scheduled_at|replace('T', ' ') }} lokal ({{ post.scheduled_at_utc }} UTC){% endif %}</p>
                     </div>
                     <div class="flex items-center gap-2">
                         {% if sgap_ready and modules['autopilot'] %}

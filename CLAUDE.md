@@ -116,6 +116,10 @@ kørte grønt på `ed97575`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - `docs/ROADMAP.md` er ny. CI's paritets-trin dækker nu alle 17 indlejrede filer (før 5).
 - `docs/ROADMAP.md` har nu en **dokumentationsoversigt** øverst og et **Endgoal**-afsnit: det
   langsigtede mål, succeskriteriet og hvilke roadmap-punkter der trækker derhen.
+- Dokumentationen er suppleret med det, der manglede i forhold til koden: **AI-synlighed** og **Noter**
+  i manual/README, fane 9-12 (Alarmer, Brugere, Noter, Moduler) i manualen, fuld tabel- og jobliste
+  (`alert_outbox`, `login_attempts`, `notes`, `_selftest`, alarmkø hvert minut), de 11 moduler og en
+  samlet ruteoversigt i `Command_Center_Dokumentation.md` (§16).
 
 ### Commits
 `d48854e` (v7.11: brugere, opdatering, nginx, rettelser) · `d47a920` (Juno fjernet) ·

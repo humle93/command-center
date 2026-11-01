@@ -5295,6 +5295,8 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 - 🔗 **Links** — ekstern linktjek + AI-forslag til interne links
 - 📱 **Social** — opslagskø med CSV-export og "→ Autopilot" (kladde i WordPress-pluginnet)
 - 🩺 **Monitors** — tekst/JSON/pris-overvågning med alarmer ved ændring
+- 🤖 **AI-synlighed** — stil en kundes spørgsmål til AI-modellen og se, om `TRACK_DOMAIN` nævnes i svaret (historik i `ai_visibility`)
+- 📝 **Noter** — hurtige workflow-noter i dashboardet (`/notes/add`, `/notes/delete`)
 - 👤 **Brugere** — opret/slet brugere, skift adgangskode; den sidste bruger kan ikke slettes
 - 🚨 **Alarmer** — SSL-udløb, nedetid, brudte links, fejlede scans, nye GitHub-commits; valgfrit Telegram-push
 - 📈 **Historik** — svartid per domæne, site-health og visibility over tid (Chart.js)

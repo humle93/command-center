@@ -109,7 +109,40 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.12.0"
+APP_VERSION = "7.13.0"
+
+# --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
+NEWEST = [
+    ("7.13.0", "Login viser IP og en koerselsrapport; opstart skriver version og nyheder"),
+    ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
+    ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
+]
+NEWEST_LINE = "Login: IP + sidste koersel i UI'et - opstart printer version og nyheder"
+
+
+def startup_banner(host: str = "", port: int | None = None) -> list:
+    """Linjer der vises ved opstart - samme indhold paa skaermen, i loggen og i /health."""
+    lines = [f"Command Center v{APP_VERSION}"]
+    for ver, text in NEWEST[:3]:
+        lines.append(f"  nyhed {ver}: {text}")
+    if host:
+        lines.append(f"  lytter paa {host}" + (f":{port}" if port else ""))
+    return lines
+
+
+def log_startup(host: str = "", port: int | None = None) -> str:
+    """Skriv version + nyheder ved opstart (stdout, app/data/startup.log og settings)."""
+    text = "\n".join(startup_banner(host, port))
+    print("[cc] " + text.replace("\n", "\n[cc] "), flush=True)
+    try:
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        with open(os.path.join(os.path.dirname(DB_PATH), "startup.log"), "a") as f:
+            f.write(f"{now_iso()} {text}\n\n")
+        with get_db() as db:
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_start', ?)", (now_iso(),))
+    except Exception as e:
+        print("[cc] kunne ikke skrive startup-log:", repr(e), flush=True)
+    return text
 app = FastAPI(title="Command Center Engine", version=APP_VERSION)
 # Git does not keep empty folders, so a fresh clone has no app/static: create it or startup fails.
 os.makedirs(STATIC_DIR, exist_ok=True)
@@ -333,7 +366,15 @@ def init_db():
             user_id INTEGER NOT NULL,
             created_at TEXT,
             last_seen TEXT,
-            expires_at TEXT
+            expires_at TEXT,
+            ip TEXT
+        );
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            ip TEXT,
+            ok INTEGER DEFAULT 0,
+            created_at TEXT
         );
         CREATE TABLE IF NOT EXISTS alert_outbox (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -380,11 +421,16 @@ def migrate_db():
             "seopages": ["content_hash", "redirects"],
             "crawl_runs": ["sitemap_broken", "sitemap_missing"],
             "monitors": ["last_value"],
+            "users": ["last_login_ip", "last_login_at"],
+            "sessions": ["ip"],
         }.items():
             existing = [r[1] for r in db.execute(f"PRAGMA table_info({table})").fetchall()]
             for c in want:
                 if c not in existing:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {c} TEXT")
+        db.execute("""CREATE TABLE IF NOT EXISTS login_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, ip TEXT, ok INTEGER DEFAULT 0, created_at TEXT
+        )""")
         # v7.12: eksisterende installationer faar outbox-tabellen her (init_db rammer kun nye DB'er).
         db.execute("""CREATE TABLE IF NOT EXISTS alert_outbox (
             id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT, alarm_id INTEGER, dedupe_key TEXT,
@@ -518,14 +564,66 @@ def create_user(username: str, password: str) -> int:
         return cur.lastrowid
 
 
-def start_session(user_id: int) -> str:
+def client_ip(request: Request) -> str:
+    """Klientens IP. uvicorn --proxy-headers saetter client.host ud fra X-Forwarded-For;
+    vi laeser headeren selv som reserve (foerste hop) og falder tilbage til socket-adressen."""
+    fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    host = request.client.host if request.client else ""
+    return (fwd or host or "ukendt")[:64]
+
+
+def record_login(ip: str, username: str, ok: bool):
+    """Log hvert login-forsoeg (ok/fejl) med IP - vist under Brugere og brugt i koerselsrapporten."""
+    try:
+        with get_db() as db:
+            db.execute("INSERT INTO login_attempts (username, ip, ok, created_at) VALUES (?,?,?,?)",
+                       ((username or "")[:64], (ip or "")[:64], 1 if ok else 0, now_iso()))
+            db.execute("DELETE FROM login_attempts WHERE created_at < ?",
+                       ((datetime.now() - timedelta(days=30)).isoformat(timespec="seconds"),))
+    except Exception:
+        pass
+
+
+def start_session(user_id: int, ip: str = "") -> str:
     sid = secrets.token_urlsafe(32)
     expires = (datetime.now() + timedelta(seconds=SESSION_MAX_AGE)).isoformat(timespec="seconds")
     with get_db() as db:
         db.execute("DELETE FROM sessions WHERE expires_at < ?", (now_iso(),))
-        db.execute("INSERT INTO sessions (id, user_id, created_at, last_seen, expires_at) VALUES (?,?,?,?,?)",
-                   (_session_key(sid), user_id, now_iso(), now_iso(), expires))
+        db.execute("INSERT INTO sessions (id, user_id, created_at, last_seen, expires_at, ip) VALUES (?,?,?,?,?,?)",
+                   (_session_key(sid), user_id, now_iso(), now_iso(), expires, ip or ""))
     return sid
+
+
+def last_run_report() -> dict:
+    """Kort, ikke-foelsom status til login-siden: version, sidste koersel og taellinger.
+    Ingen alarmtekster eller brugernavne - siden er offentlig."""
+    report = {"version": APP_VERSION, "commit": "", "last_start": "", "generated": now_iso(),
+              "alarms_open": 0, "alarms_critical": 0, "domains": 0, "keywords": 0, "monitors": 0,
+              "last_domain_check": "", "last_crawl": "", "last_login": "", "db_mb": None,
+              "newest": [f"{v}: {t}" for v, t in NEWEST[:2]]}
+    try:
+        report["commit"] = deployed_commit()
+    except Exception:
+        pass
+    try:
+        with get_db() as db:
+            def one(sql, *args):
+                row = db.execute(sql, args).fetchone()
+                return (row[0] if row else None)
+            report["alarms_open"] = one("SELECT COUNT(*) FROM alarms WHERE resolved=0") or 0
+            report["alarms_critical"] = one("SELECT COUNT(*) FROM alarms WHERE resolved=0 AND severity='kritisk'") or 0
+            report["domains"] = one("SELECT COUNT(*) FROM domains") or 0
+            report["keywords"] = one("SELECT COUNT(*) FROM keywords") or 0
+            report["monitors"] = one("SELECT COUNT(*) FROM monitors") or 0
+            report["last_domain_check"] = one("SELECT MAX(last_checked) FROM domains") or ""
+            report["last_crawl"] = one("SELECT MAX(started_at) FROM crawl_runs") or ""
+            report["last_login"] = one("SELECT MAX(created_at) FROM login_attempts WHERE ok=1") or ""
+            row = db.execute("SELECT value FROM settings WHERE key='last_start'").fetchone()
+            report["last_start"] = row["value"] if row and row["value"] else ""
+        report["db_mb"] = round(os.path.getsize(DB_PATH) / 1048576, 1) if os.path.exists(DB_PATH) else None
+    except Exception:
+        pass
+    return report
 
 
 def end_session(sid: str):
@@ -589,7 +687,9 @@ async def auth_middleware(request: Request, call_next):
 async def setup_page(request: Request):
     if user_count() > 0:
         return RedirectResponse("/login", status_code=303)
-    return templates.TemplateResponse("login.html", {"request": request, "mode": "setup", "error": "", "username": ""})
+    return templates.TemplateResponse("login.html", {"request": request, "mode": "setup", "error": "", "username": "",
+                                                     "report": last_run_report(), "client_ip": client_ip(request),
+                                                     "app_version": APP_VERSION})
 
 
 @app.post("/setup")
@@ -613,23 +713,30 @@ async def setup_user(request: Request):
         except sqlite3.IntegrityError:
             err = "Brugernavnet er allerede taget"
     if not user_id:
-        return templates.TemplateResponse("login.html", {"request": request, "mode": "setup",
-                                                         "username": username, "error": err}, status_code=400)
+        return templates.TemplateResponse("login.html", {"request": request, "mode": "setup", "username": username,
+                                                         "error": err, "report": last_run_report(),
+                                                         "client_ip": client_ip(request),
+                                                         "app_version": APP_VERSION}, status_code=400)
+    ip = client_ip(request)
     with get_db() as db:
         add_alarm(db, "brugere", f"Foerste bruger '{username}' oprettet", "info")
-    return session_redirect(request, start_session(user_id))
+        db.execute("UPDATE users SET last_login_ip=?, last_login_at=? WHERE id=?", (ip, now_iso(), user_id))
+    record_login(ip, username, True)
+    return session_redirect(request, start_session(user_id, ip))
 
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
     if user_count() == 0:
         return RedirectResponse("/setup", status_code=303)
-    return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "error": "", "username": ""})
+    return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "error": "", "username": "",
+                                                     "report": last_run_report(), "client_ip": client_ip(request),
+                                                     "app_version": APP_VERSION})
 
 
 @app.post("/login")
 async def login(request: Request):
-    ip = request.client.host if request.client else "ukendt"
+    ip = client_ip(request)
     now = time.time()
     fails, locked_until = _LOGIN_FAILS.get(ip, (0, 0.0))
     if locked_until > now:
@@ -642,13 +749,19 @@ async def login(request: Request):
         user = db.execute("SELECT id, username, password_hash FROM users WHERE username=?", (username,)).fetchone()
     if user and verify_password(password, user["password_hash"]):
         _LOGIN_FAILS.pop(ip, None)
-        return session_redirect(request, start_session(user["id"]))
+        with get_db() as db:
+            db.execute("UPDATE users SET last_login_ip=?, last_login_at=? WHERE id=?", (ip, now_iso(), user["id"]))
+        record_login(ip, username, True)
+        return session_redirect(request, start_session(user["id"], ip))
+    record_login(ip, username, False)
     fails += 1
     _LOGIN_FAILS[ip] = (0, now + _LOGIN_LOCK_SECONDS) if fails >= _LOGIN_MAX_FAILS else (fails, locked_until)
     if len(_LOGIN_FAILS) > 2000:  # undgaa at listen vokser ubegraenset
         _LOGIN_FAILS.clear()
     return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "username": username,
-                                                     "error": "Forkert brugernavn eller adgangskode"}, status_code=401)
+                                                     "error": "Forkert brugernavn eller adgangskode", "ip": ip,
+                                                     "report": last_run_report(), "client_ip": ip,
+                                                     "app_version": APP_VERSION}, status_code=401)
 
 
 @app.get("/logout")
@@ -3415,7 +3528,8 @@ async def dashboard(request: Request):
         strategy_row = db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone()
         check_row = db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone()
         sgap_row = db.execute("SELECT value FROM settings WHERE key='sgap_snapshot'").fetchone()
-        users = db.execute("SELECT id, username, created_at FROM users ORDER BY id").fetchall()
+        users = db.execute("SELECT id, username, created_at, last_login_ip, last_login_at FROM users ORDER BY id").fetchall()
+        login_rows = db.execute("SELECT username, ip, ok, created_at FROM login_attempts ORDER BY id DESC LIMIT 8").fetchall()
         update_row = db.execute("SELECT value FROM settings WHERE key='github_update'").fetchone()
         alert_outbox = {r["state"]: r["n"] for r in
                         db.execute("SELECT state, COUNT(*) AS n FROM alert_outbox GROUP BY state").fetchall()}
@@ -3456,6 +3570,10 @@ async def dashboard(request: Request):
         "task_estimates": TASK_ESTIMATES,
         "current_commit": deployed_commit(),
         "users": users,
+        "login_rows": login_rows,
+        "app_version": APP_VERSION,
+        "newest": NEWEST,
+        "client_ip": client_ip(request),
         "seo_pages": seo_pages,
         "monitors": monitors,
         "ideas": ideas,
@@ -3608,6 +3726,8 @@ async def health():
         "telegram": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "auth": "users",
         "users": user_count(),
+        "newest": [f"{v}: {t}" for v, t in NEWEST[:3]],
+        "started_at": last_run_report().get("last_start", ""),
     }
     return JSONResponse(body, status_code=503 if status == "kritisk" else 200)
 
@@ -3636,6 +3756,10 @@ async def job_check_keywords():
 
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
+    try:
+        log_startup(os.environ.get("CC_HOST", ""), os.environ.get("CC_PORT") and int(os.environ.get("CC_PORT")))
+    except Exception:
+        pass
     try:
         scheduler.add_job(job_check_domains, IntervalTrigger(hours=6), id="domain_checks", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_check_keywords, CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True, max_instances=1, coalesce=True)

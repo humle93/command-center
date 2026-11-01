@@ -150,3 +150,16 @@ netværkskald i request-stien. `job_drain_alerts` kører hvert minut og leverer 
 
 Status findes på `GET /api/alerts/status` (kanaler, kø, problemer) og test på `POST /alerts/test`
 (`channel=all|email|ntfy|webhook|telegram`).
+
+
+## 14. Opstart, login-IP og kørselsrapport (v7.13)
+
+- `NEWEST` (i `app/main.py`) er den ene kilde til "hvad er nyt". `startup_banner()` laver teksten,
+  `log_startup()` skriver den til stdout, `app/data/startup.log` og `settings.last_start`, og
+  `GET /health` udstiller `newest` + `started_at`. Scripts læser `APP_VERSION` og `NEWEST_LINE` med
+  `sed`, saa de ikke kan komme ud af sync med koden.
+- Login-spor: `users.last_login_ip`/`last_login_at`, `sessions.ip` (migreres med `ALTER TABLE`) og
+  `login_attempts(username, ip, ok, created_at)` med 30 dages oprydning. `client_ip()` tager første
+  hop af `X-Forwarded-For` og falder tilbage til socket-adressen.
+- `last_run_report()` giver login-siden et bevidst minimalt overblik (ingen alarmtekster eller
+  brugernavne, fordi `/login` er offentlig).

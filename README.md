@@ -98,6 +98,20 @@ udskyder alt under "kritisk" til vinduet slutter, og webhooken signeres efter St
 `id.timestamp.body`). Fanen **Alarmer** viser hvilke kanaler der er sat op, har test-knapper pr.
 kanal og lister fejlede leveringer med årsag og antal forsøg.
 
+## Opstart, login og IP (v7.13)
+
+Ved hver opstart skriver appen version og de nyeste aendringer til skaermen, til
+`app/data/startup.log` og til `settings.last_start` - og de samme nyheder er med i `GET /health`.
+`run.sh`, `run.bat`, `scripts/restart.sh`, `scripts/update.sh` og `install.sh` viser version + nyheder,
+saa man ikke skal huske hvilken version der kører.
+
+Login logger nu IP: `users.last_login_ip`/`last_login_at`, `sessions.ip` og tabellen `login_attempts`
+(ok/fejl, 30 dage) - vist under fanen **Brugere** sammen med de seneste forsoeg. IP'en hentes fra
+`X-Forwarded-For` (foerste hop) med socket-adressen som reserve, saa den er korrekt bag nginx.
+Login-siden viser en kort **kørselsrapport** uden at man er logget ind: version + commit, seneste
+opstart, åbne alarmer, antal domæner/keywords/monitors, seneste domænetjek og crawl, DB-størrelse og
+din IP - ingen alarmtekster eller brugernavne.
+
 ## Dokumentation
 
 Kodeændringer kræver dokumentation i samme commit: `README.md` plus den relevante fil i `docs/`

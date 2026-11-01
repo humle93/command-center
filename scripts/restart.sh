@@ -24,6 +24,12 @@ esac
 PIDFILE="app/data/cc.pid"
 LOG="nohup.out"
 
+banner() {
+    V="$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' app/main.py 2>/dev/null | head -1)"
+    N="$(sed -n 's/^NEWEST_LINE = "\(.*\)"/\1/p' app/main.py 2>/dev/null | head -1)"
+    echo "   Command Center v${V:-?} - ${N:-se app/data/startup.log}"
+}
+
 restart_systemd_user() {
     systemctl --user cat "$1" > /dev/null 2>&1 || return 1
     systemctl --user restart "$1"
@@ -44,12 +50,14 @@ fi
 for unit in command-center steamgears-command-center; do
     if restart_systemd_user "$unit"; then
         echo "Genstartede systemd --user unit '$unit'."
+        banner
         exit 0
     fi
 done
 
 if restart_systemd_system command-center; then
     echo "Genstartede systemd unit 'command-center'."
+    banner
     exit 0
 fi
 
@@ -70,4 +78,5 @@ fi
 echo "Starter appen igen (log: $LOG)..."
 nohup ./run.sh >> "$LOG" 2>&1 &
 echo "Ny proces startet - foelg opstarten i $LOG"
+banner
 exit 0

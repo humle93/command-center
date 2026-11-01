@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 1. november 2026 · **Version:** 7.12.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 1. november 2026 · **Version:** 7.13.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -87,6 +87,15 @@ kørte grønt på `ed97575`. CI tjekker desuden at alle 17 indlejrede filer i `i
   status som JSON på `GET /api/alerts/status`.
 - Nye tests i `tests/test_v8_features.py` dækker kanalvalg, signatur, dedupe, backoff, stille timer
   og at `add_alarm` ikke laver HTTP.
+
+### Opstart, login-IP og kørselsrapport (v7.13)
+- `NEWEST` + `NEWEST_LINE` i `app/main.py` er kilden til "hvad er nyt". `log_startup()` skriver
+  version + nyheder til stdout, `app/data/startup.log` og `settings.last_start`; `/health` har
+  `newest` og `started_at`. `run.sh`, `run.bat`, `restart.sh`, `update.sh` og `install.sh` viser dem.
+- Login-spor: `users.last_login_ip/last_login_at`, `sessions.ip`, `login_attempts` (30 dage).
+  `client_ip()` bruger X-Forwarded-For (foerste hop) med socket som reserve.
+- `/login` viser `last_run_report()`: version/commit, seneste opstart, åbne alarmer, taellinger,
+  seneste tjek/crawl, DB-størrelse og klientens IP - uden alarmtekster eller brugernavne.
 
 ### Dokumentation og CI
 - `README.md`, manualen og arkitektur-dokumentet er skrevet om til v7.11; `docs/Command_Center_Install_Script.md`

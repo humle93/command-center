@@ -24,7 +24,11 @@ pip install -r requirements.txt
 
 mkdir -p app/data
 echo $$ > app/data/cc.pid   # pidfile: scripts/restart.sh kan genstarte en app startet med ./run.sh
-echo "⚡ Starter Command Center v7.11..."
+VERSION="$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' app/main.py | head -1)"
+NEWEST="$(sed -n 's/^NEWEST_LINE = "\(.*\)"/\1/p' app/main.py | head -1)"
+echo "⚡ Starter Command Center v${VERSION:-?}..."
+[ -n "$NEWEST" ] && echo "   Nyheder:  $NEWEST"
+echo "   (version + alle nyheder skrives ogsaa til app/data/startup.log ved opstart)"
 echo "   Lokalt:   http://127.0.0.1:$PORT"
 if [ -n "$PUBLIC" ]; then
     echo "   Offentlig: $PUBLIC   (via nginx -> http://$HOST:$PORT)"

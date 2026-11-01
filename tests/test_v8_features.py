@@ -268,6 +268,49 @@ with main.get_db() as db:
     n = db.execute("SELECT COUNT(*) FROM alert_outbox").fetchone()[0]
 check("alerts: add_alarm kun koer (ingen blokerende HTTP i request-stien)", n == 1, n)
 
+# --- opstart, login-IP og koerselsrapport (v7.13) ---
+banner = "\n".join(main.startup_banner("0.0.0.0", 8000))
+check("startup: banneret har version, nyheder og lytteadresse",
+      main.APP_VERSION in banner and "nyhed 7.13.0" in banner and "lytter paa 0.0.0.0:8000" in banner, banner[:120])
+check("startup: NEWEST_LINE er én linje scripts kan laese",
+      bool(main.NEWEST_LINE) and "\n" not in main.NEWEST_LINE, main.NEWEST_LINE)
+
+with main.get_db() as db:
+    db.execute("DELETE FROM login_attempts"); db.execute("DELETE FROM sessions"); db.execute("DELETE FROM users")
+b = TestClient(main.app)
+b.post("/setup", data={"username": "iptest", "password": "iptest-pass", "confirm": "iptest-pass"},
+       follow_redirects=False, headers={"x-forwarded-for": "203.0.113.9, 10.0.0.1"})
+with main.get_db() as db:
+    usr = db.execute("SELECT last_login_ip FROM users WHERE username='iptest'").fetchone()
+    ses = db.execute("SELECT ip FROM sessions ORDER BY rowid DESC LIMIT 1").fetchone()
+    okn = db.execute("SELECT COUNT(*) FROM login_attempts WHERE ok=1").fetchone()[0]
+check("login: IP gemmes paa bruger, session og i loggen",
+      usr and usr["last_login_ip"] == "203.0.113.9" and ses and ses["ip"] == "203.0.113.9" and okn == 1,
+      (usr and dict(usr), ses and dict(ses), okn))
+
+b.post("/login", data={"username": "iptest", "password": "helt-forkert"}, follow_redirects=False,
+       headers={"x-forwarded-for": "198.51.100.7"})
+with main.get_db() as db:
+    fail = db.execute("SELECT ip, ok FROM login_attempts ORDER BY id DESC LIMIT 1").fetchone()
+check("login: fejlede forsoeg logges med IP", fail and fail["ip"] == "198.51.100.7" and fail["ok"] == 0,
+      fail and dict(fail))
+
+b.get("/logout")
+r = b.get("/login", headers={"x-forwarded-for": "203.0.113.9"})
+check("login-side: viser version, IP og koerselsrapport",
+      r.status_code == 200 and main.APP_VERSION in r.text and "Din IP" in r.text
+      and "Seneste opstart" in r.text and "203.0.113.9" in r.text, r.text[:160])
+
+main.log_startup("127.0.0.1", 8000)      # lifespan koerer ikke i TestClient uden context manager
+rep = main.last_run_report()
+check("report: version, taellinger, tidsstempler og db-stoerrelse",
+      rep["version"] == main.APP_VERSION and rep["alarms_open"] >= 0 and rep["db_mb"] is not None
+      and rep["last_start"] and rep["newest"], rep)
+
+hb = TestClient(main.app).get("/health").json()
+check("health: nyheder og opstartstid er med",
+      hb.get("newest") and len(hb["newest"]) >= 1 and "started_at" in hb, (hb.get("newest"), hb.get("started_at")))
+
 srv.shutdown()
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)
 print("ALL PASS" if not FAILED else f"{len(FAILED)} FAILED")

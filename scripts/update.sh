@@ -90,3 +90,8 @@ for _ in $(seq 1 60); do
 done
 echo "⚠️  Appen svarede ikke inden 60 s. Se logs: journalctl --user -u command-center (eller nohup.out)" >&2
 exit 6
+
+# CC_BANNER: version + nyheder efter en gennemfoert opdatering
+V="$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' app/main.py 2>/dev/null | head -1)"
+N="$(sed -n 's/^NEWEST_LINE = "\(.*\)"/\1/p' app/main.py 2>/dev/null | head -1)"
+echo "   Version:     v${V:-?} - ${N:-se app/data/startup.log}"

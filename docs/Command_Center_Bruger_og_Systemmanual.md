@@ -217,3 +217,18 @@ automatisk igen med stigende interval i op til fem forsøg.
 
 E-mail kræver en app-adgangskode (Google/Fastmail), ikke din normale adgangskode.
 Webhooken kan verificeres med `webhook-signature`-headeren, hvis modtageren kender hemmeligheden.
+
+
+## Opstart, login-IP og kørselsrapport (v7.13)
+
+Ved opstart printer appen version og de nyeste ændringer. Samme tekst havner i `app/data/startup.log`,
+og `run.sh`, `run.bat`, `scripts/restart.sh`, `scripts/update.sh` og `install.sh` viser versionen, så
+du altid kan se hvad der kører.
+
+Login registrerer IP'en bag hvert forsøg: under fanen **Brugere** ser du seneste login pr. bruger
+(IP + tid) og de sidste otte forsøg, inkl. fejlede. Bag nginx kræver det, at `CC_FORWARDED_ALLOW_IPS`
+matcher proxyens adresse (standard `127.0.0.1`), ellers vises proxyens IP.
+
+Login-siden viser en kort kørselsrapport, før du logger ind: version og commit, seneste opstart, åbne
+alarmer, antal domæner/keywords/monitors, seneste domænetjek og crawl, database-størrelse og din IP.
+Rapporten indeholder bevidst ikke alarmtekster eller brugernavne.

@@ -37,13 +37,14 @@
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.11 PRO</span></h1>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v{{ app_version }} PRO</span></h1>
             <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
             <form action="/update/apply" method="POST" onsubmit="return confirm('Hent og installér nyeste version fra GitHub? Der laves en DB-backup først, og appen skal genstartes bagefter.')"><button class="text-xs text-zinc-400 hover:text-emerald-400">⬆️ Opdatér</button></form>
             <a href="/health" class="text-xs text-emerald-400">Systemstatus</a>
             {% if current_user %}<span class="text-xs text-zinc-500">👤 {{ current_user.username }}</span>
+            {% if client_ip %}<span class="text-xs text-zinc-600" title="Din IP">{{ client_ip }}</span>{% endif %}
             <a href="/logout" class="text-xs text-zinc-500 hover:text-rose-400">Log ud</a>{% endif %}
         </div>
     </div>
@@ -854,6 +855,25 @@
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Brugere ({{ users|length }})</h2>
             <p class="text-xs text-zinc-500 mb-3">Adgang sker med brugernavn + adgangskode (PBKDF2-SHA256). Den foerste bruger blev oprettet ved foerste besoeg — opret gerne en ekstra, saa du ikke laaser dig ude.</p>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3">
+                    <div class="text-[11px] uppercase tracking-wider text-zinc-500 mb-2">Seneste login pr. bruger</div>
+                    {% for u in users %}
+                    <div class="text-[11px] flex justify-between gap-2"><span>{{ u['username'] }}</span><span class="text-zinc-500">{{ u['last_login_ip'] or '—' }} · {{ (u['last_login_at'] or '')[0:16] }}</span></div>
+                    {% endfor %}
+                </div>
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3">
+                    <div class="text-[11px] uppercase tracking-wider text-zinc-500 mb-2">Login-forsøg (seneste 8)</div>
+                    {% for r in login_rows %}
+                    <div class="text-[11px] flex justify-between gap-2">
+                        <span class="{{ 'text-emerald-400' if r['ok'] else 'text-rose-300' }}">{{ r['username'] or '?' }}</span>
+                        <span class="text-zinc-500">{{ r['ip'] }} · {{ r['created_at'][5:16] }}</span>
+                    </div>
+                    {% else %}
+                    <div class="text-[11px] text-zinc-500">Ingen endnu.</div>
+                    {% endfor %}
+                </div>
+            </div>
             <div class="space-y-2">
                 {% for u in users %}
                 <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs flex justify-between items-center">

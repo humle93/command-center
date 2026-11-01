@@ -18,7 +18,7 @@ EOF_REQ
 
 echo "📄 .env.example..."
 cat << 'EOF_ENVDOT' > "$PROJECT_DIR/.env.example"
-# Command Center v7.12 - kopier til .env og udfyld
+# Command Center v7.13 - kopier til .env og udfyld
 # Login: der er ingen token. Foerste besoeg i browseren opretter din bruger (/setup),
 # derefter logger du ind med brugernavn + adgangskode. Brugere styres under fanen "Brugere".
 # Hvor run.sh lytter. 127.0.0.1 = kun denne maskine; 0.0.0.0 = ogsaa fra netvaerket (kraever TLS/proxy).
@@ -193,7 +193,40 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.12.0"
+APP_VERSION = "7.13.0"
+
+# --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
+NEWEST = [
+    ("7.13.0", "Login viser IP og en koerselsrapport; opstart skriver version og nyheder"),
+    ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
+    ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
+]
+NEWEST_LINE = "Login: IP + sidste koersel i UI'et - opstart printer version og nyheder"
+
+
+def startup_banner(host: str = "", port: int | None = None) -> list:
+    """Linjer der vises ved opstart - samme indhold paa skaermen, i loggen og i /health."""
+    lines = [f"Command Center v{APP_VERSION}"]
+    for ver, text in NEWEST[:3]:
+        lines.append(f"  nyhed {ver}: {text}")
+    if host:
+        lines.append(f"  lytter paa {host}" + (f":{port}" if port else ""))
+    return lines
+
+
+def log_startup(host: str = "", port: int | None = None) -> str:
+    """Skriv version + nyheder ved opstart (stdout, app/data/startup.log og settings)."""
+    text = "\n".join(startup_banner(host, port))
+    print("[cc] " + text.replace("\n", "\n[cc] "), flush=True)
+    try:
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        with open(os.path.join(os.path.dirname(DB_PATH), "startup.log"), "a") as f:
+            f.write(f"{now_iso()} {text}\n\n")
+        with get_db() as db:
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_start', ?)", (now_iso(),))
+    except Exception as e:
+        print("[cc] kunne ikke skrive startup-log:", repr(e), flush=True)
+    return text
 app = FastAPI(title="Command Center Engine", version=APP_VERSION)
 # Git does not keep empty folders, so a fresh clone has no app/static: create it or startup fails.
 os.makedirs(STATIC_DIR, exist_ok=True)
@@ -417,7 +450,15 @@ def init_db():
             user_id INTEGER NOT NULL,
             created_at TEXT,
             last_seen TEXT,
-            expires_at TEXT
+            expires_at TEXT,
+            ip TEXT
+        );
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            ip TEXT,
+            ok INTEGER DEFAULT 0,
+            created_at TEXT
         );
         CREATE TABLE IF NOT EXISTS alert_outbox (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -464,11 +505,16 @@ def migrate_db():
             "seopages": ["content_hash", "redirects"],
             "crawl_runs": ["sitemap_broken", "sitemap_missing"],
             "monitors": ["last_value"],
+            "users": ["last_login_ip", "last_login_at"],
+            "sessions": ["ip"],
         }.items():
             existing = [r[1] for r in db.execute(f"PRAGMA table_info({table})").fetchall()]
             for c in want:
                 if c not in existing:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {c} TEXT")
+        db.execute("""CREATE TABLE IF NOT EXISTS login_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, ip TEXT, ok INTEGER DEFAULT 0, created_at TEXT
+        )""")
         # v7.12: eksisterende installationer faar outbox-tabellen her (init_db rammer kun nye DB'er).
         db.execute("""CREATE TABLE IF NOT EXISTS alert_outbox (
             id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT, alarm_id INTEGER, dedupe_key TEXT,
@@ -602,14 +648,66 @@ def create_user(username: str, password: str) -> int:
         return cur.lastrowid
 
 
-def start_session(user_id: int) -> str:
+def client_ip(request: Request) -> str:
+    """Klientens IP. uvicorn --proxy-headers saetter client.host ud fra X-Forwarded-For;
+    vi laeser headeren selv som reserve (foerste hop) og falder tilbage til socket-adressen."""
+    fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    host = request.client.host if request.client else ""
+    return (fwd or host or "ukendt")[:64]
+
+
+def record_login(ip: str, username: str, ok: bool):
+    """Log hvert login-forsoeg (ok/fejl) med IP - vist under Brugere og brugt i koerselsrapporten."""
+    try:
+        with get_db() as db:
+            db.execute("INSERT INTO login_attempts (username, ip, ok, created_at) VALUES (?,?,?,?)",
+                       ((username or "")[:64], (ip or "")[:64], 1 if ok else 0, now_iso()))
+            db.execute("DELETE FROM login_attempts WHERE created_at < ?",
+                       ((datetime.now() - timedelta(days=30)).isoformat(timespec="seconds"),))
+    except Exception:
+        pass
+
+
+def start_session(user_id: int, ip: str = "") -> str:
     sid = secrets.token_urlsafe(32)
     expires = (datetime.now() + timedelta(seconds=SESSION_MAX_AGE)).isoformat(timespec="seconds")
     with get_db() as db:
         db.execute("DELETE FROM sessions WHERE expires_at < ?", (now_iso(),))
-        db.execute("INSERT INTO sessions (id, user_id, created_at, last_seen, expires_at) VALUES (?,?,?,?,?)",
-                   (_session_key(sid), user_id, now_iso(), now_iso(), expires))
+        db.execute("INSERT INTO sessions (id, user_id, created_at, last_seen, expires_at, ip) VALUES (?,?,?,?,?,?)",
+                   (_session_key(sid), user_id, now_iso(), now_iso(), expires, ip or ""))
     return sid
+
+
+def last_run_report() -> dict:
+    """Kort, ikke-foelsom status til login-siden: version, sidste koersel og taellinger.
+    Ingen alarmtekster eller brugernavne - siden er offentlig."""
+    report = {"version": APP_VERSION, "commit": "", "last_start": "", "generated": now_iso(),
+              "alarms_open": 0, "alarms_critical": 0, "domains": 0, "keywords": 0, "monitors": 0,
+              "last_domain_check": "", "last_crawl": "", "last_login": "", "db_mb": None,
+              "newest": [f"{v}: {t}" for v, t in NEWEST[:2]]}
+    try:
+        report["commit"] = deployed_commit()
+    except Exception:
+        pass
+    try:
+        with get_db() as db:
+            def one(sql, *args):
+                row = db.execute(sql, args).fetchone()
+                return (row[0] if row else None)
+            report["alarms_open"] = one("SELECT COUNT(*) FROM alarms WHERE resolved=0") or 0
+            report["alarms_critical"] = one("SELECT COUNT(*) FROM alarms WHERE resolved=0 AND severity='kritisk'") or 0
+            report["domains"] = one("SELECT COUNT(*) FROM domains") or 0
+            report["keywords"] = one("SELECT COUNT(*) FROM keywords") or 0
+            report["monitors"] = one("SELECT COUNT(*) FROM monitors") or 0
+            report["last_domain_check"] = one("SELECT MAX(last_checked) FROM domains") or ""
+            report["last_crawl"] = one("SELECT MAX(started_at) FROM crawl_runs") or ""
+            report["last_login"] = one("SELECT MAX(created_at) FROM login_attempts WHERE ok=1") or ""
+            row = db.execute("SELECT value FROM settings WHERE key='last_start'").fetchone()
+            report["last_start"] = row["value"] if row and row["value"] else ""
+        report["db_mb"] = round(os.path.getsize(DB_PATH) / 1048576, 1) if os.path.exists(DB_PATH) else None
+    except Exception:
+        pass
+    return report
 
 
 def end_session(sid: str):
@@ -673,7 +771,9 @@ async def auth_middleware(request: Request, call_next):
 async def setup_page(request: Request):
     if user_count() > 0:
         return RedirectResponse("/login", status_code=303)
-    return templates.TemplateResponse("login.html", {"request": request, "mode": "setup", "error": "", "username": ""})
+    return templates.TemplateResponse("login.html", {"request": request, "mode": "setup", "error": "", "username": "",
+                                                     "report": last_run_report(), "client_ip": client_ip(request),
+                                                     "app_version": APP_VERSION})
 
 
 @app.post("/setup")
@@ -697,23 +797,30 @@ async def setup_user(request: Request):
         except sqlite3.IntegrityError:
             err = "Brugernavnet er allerede taget"
     if not user_id:
-        return templates.TemplateResponse("login.html", {"request": request, "mode": "setup",
-                                                         "username": username, "error": err}, status_code=400)
+        return templates.TemplateResponse("login.html", {"request": request, "mode": "setup", "username": username,
+                                                         "error": err, "report": last_run_report(),
+                                                         "client_ip": client_ip(request),
+                                                         "app_version": APP_VERSION}, status_code=400)
+    ip = client_ip(request)
     with get_db() as db:
         add_alarm(db, "brugere", f"Foerste bruger '{username}' oprettet", "info")
-    return session_redirect(request, start_session(user_id))
+        db.execute("UPDATE users SET last_login_ip=?, last_login_at=? WHERE id=?", (ip, now_iso(), user_id))
+    record_login(ip, username, True)
+    return session_redirect(request, start_session(user_id, ip))
 
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
     if user_count() == 0:
         return RedirectResponse("/setup", status_code=303)
-    return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "error": "", "username": ""})
+    return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "error": "", "username": "",
+                                                     "report": last_run_report(), "client_ip": client_ip(request),
+                                                     "app_version": APP_VERSION})
 
 
 @app.post("/login")
 async def login(request: Request):
-    ip = request.client.host if request.client else "ukendt"
+    ip = client_ip(request)
     now = time.time()
     fails, locked_until = _LOGIN_FAILS.get(ip, (0, 0.0))
     if locked_until > now:
@@ -726,13 +833,19 @@ async def login(request: Request):
         user = db.execute("SELECT id, username, password_hash FROM users WHERE username=?", (username,)).fetchone()
     if user and verify_password(password, user["password_hash"]):
         _LOGIN_FAILS.pop(ip, None)
-        return session_redirect(request, start_session(user["id"]))
+        with get_db() as db:
+            db.execute("UPDATE users SET last_login_ip=?, last_login_at=? WHERE id=?", (ip, now_iso(), user["id"]))
+        record_login(ip, username, True)
+        return session_redirect(request, start_session(user["id"], ip))
+    record_login(ip, username, False)
     fails += 1
     _LOGIN_FAILS[ip] = (0, now + _LOGIN_LOCK_SECONDS) if fails >= _LOGIN_MAX_FAILS else (fails, locked_until)
     if len(_LOGIN_FAILS) > 2000:  # undgaa at listen vokser ubegraenset
         _LOGIN_FAILS.clear()
     return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "username": username,
-                                                     "error": "Forkert brugernavn eller adgangskode"}, status_code=401)
+                                                     "error": "Forkert brugernavn eller adgangskode", "ip": ip,
+                                                     "report": last_run_report(), "client_ip": ip,
+                                                     "app_version": APP_VERSION}, status_code=401)
 
 
 @app.get("/logout")
@@ -3499,7 +3612,8 @@ async def dashboard(request: Request):
         strategy_row = db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone()
         check_row = db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone()
         sgap_row = db.execute("SELECT value FROM settings WHERE key='sgap_snapshot'").fetchone()
-        users = db.execute("SELECT id, username, created_at FROM users ORDER BY id").fetchall()
+        users = db.execute("SELECT id, username, created_at, last_login_ip, last_login_at FROM users ORDER BY id").fetchall()
+        login_rows = db.execute("SELECT username, ip, ok, created_at FROM login_attempts ORDER BY id DESC LIMIT 8").fetchall()
         update_row = db.execute("SELECT value FROM settings WHERE key='github_update'").fetchone()
         alert_outbox = {r["state"]: r["n"] for r in
                         db.execute("SELECT state, COUNT(*) AS n FROM alert_outbox GROUP BY state").fetchall()}
@@ -3540,6 +3654,10 @@ async def dashboard(request: Request):
         "task_estimates": TASK_ESTIMATES,
         "current_commit": deployed_commit(),
         "users": users,
+        "login_rows": login_rows,
+        "app_version": APP_VERSION,
+        "newest": NEWEST,
+        "client_ip": client_ip(request),
         "seo_pages": seo_pages,
         "monitors": monitors,
         "ideas": ideas,
@@ -3692,6 +3810,8 @@ async def health():
         "telegram": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "auth": "users",
         "users": user_count(),
+        "newest": [f"{v}: {t}" for v, t in NEWEST[:3]],
+        "started_at": last_run_report().get("last_start", ""),
     }
     return JSONResponse(body, status_code=503 if status == "kritisk" else 200)
 
@@ -3720,6 +3840,10 @@ async def job_check_keywords():
 
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
+    try:
+        log_startup(os.environ.get("CC_HOST", ""), os.environ.get("CC_PORT") and int(os.environ.get("CC_PORT")))
+    except Exception:
+        pass
     try:
         scheduler.add_job(job_check_domains, IntervalTrigger(hours=6), id="domain_checks", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_check_keywords, CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True, max_instances=1, coalesce=True)
@@ -3785,13 +3909,14 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.11 PRO</span></h1>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v{{ app_version }} PRO</span></h1>
             <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
             <form action="/update/apply" method="POST" onsubmit="return confirm('Hent og installér nyeste version fra GitHub? Der laves en DB-backup først, og appen skal genstartes bagefter.')"><button class="text-xs text-zinc-400 hover:text-emerald-400">⬆️ Opdatér</button></form>
             <a href="/health" class="text-xs text-emerald-400">Systemstatus</a>
             {% if current_user %}<span class="text-xs text-zinc-500">👤 {{ current_user.username }}</span>
+            {% if client_ip %}<span class="text-xs text-zinc-600" title="Din IP">{{ client_ip }}</span>{% endif %}
             <a href="/logout" class="text-xs text-zinc-500 hover:text-rose-400">Log ud</a>{% endif %}
         </div>
     </div>
@@ -4602,6 +4727,25 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Brugere ({{ users|length }})</h2>
             <p class="text-xs text-zinc-500 mb-3">Adgang sker med brugernavn + adgangskode (PBKDF2-SHA256). Den foerste bruger blev oprettet ved foerste besoeg — opret gerne en ekstra, saa du ikke laaser dig ude.</p>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3">
+                    <div class="text-[11px] uppercase tracking-wider text-zinc-500 mb-2">Seneste login pr. bruger</div>
+                    {% for u in users %}
+                    <div class="text-[11px] flex justify-between gap-2"><span>{{ u['username'] }}</span><span class="text-zinc-500">{{ u['last_login_ip'] or '—' }} · {{ (u['last_login_at'] or '')[0:16] }}</span></div>
+                    {% endfor %}
+                </div>
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3">
+                    <div class="text-[11px] uppercase tracking-wider text-zinc-500 mb-2">Login-forsøg (seneste 8)</div>
+                    {% for r in login_rows %}
+                    <div class="text-[11px] flex justify-between gap-2">
+                        <span class="{{ 'text-emerald-400' if r['ok'] else 'text-rose-300' }}">{{ r['username'] or '?' }}</span>
+                        <span class="text-zinc-500">{{ r['ip'] }} · {{ r['created_at'][5:16] }}</span>
+                    </div>
+                    {% else %}
+                    <div class="text-[11px] text-zinc-500">Ingen endnu.</div>
+                    {% endfor %}
+                </div>
+            </div>
             <div class="space-y-2">
                 {% for u in users %}
                 <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs flex justify-between items-center">
@@ -4899,6 +5043,10 @@ cat << 'EOF_LOGIN' > "$PROJECT_DIR/app/templates/login.html"
       .error { margin: 0 0 6px; padding: 9px 11px; font-size: 12px; color: #fda4af;
                background: rgba(244,63,94,.09); border: 1px solid rgba(244,63,94,.35); border-radius: 10px; }
       .foot { margin: 16px 0 0; font-size: 11px; color: #71717a; text-align: center; }
+      .report { margin: 20px 0 0; padding: 12px 14px; background: #09090b; border: 1px solid #27272a; border-radius: 12px; }
+      .report .row { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; padding: 3px 0; color: #a1a1aa; }
+      .report .row b { color: #e4e4e7; font-weight: 600; text-align: right; }
+      .report .row b.warn { color: #fbbf24; }
     </style>
 </head>
 <body>
@@ -4924,6 +5072,19 @@ cat << 'EOF_LOGIN' > "$PROJECT_DIR/app/templates/login.html"
         {% endif %}
         <button type="submit">{{ 'Opret bruger og log ind' if mode == 'setup' else 'Log ind' }}</button>
     </form>
+    {% if report %}
+    <div class="report">
+      <div class="row"><span>Version</span><b>v{{ report.version }}{% if report.commit %} · {{ report.commit[:7] }}{% endif %}</b></div>
+      <div class="row"><span>Seneste opstart</span><b>{{ (report.last_start or '—')[0:16] }}</b></div>
+      <div class="row"><span>Åbne alarmer</span><b{% if report.alarms_open %} class="warn"{% endif %}>{{ report.alarms_open }}{% if report.alarms_critical %} ({{ report.alarms_critical }} kritiske){% endif %}</b></div>
+      <div class="row"><span>Domæner / keywords / monitors</span><b>{{ report.domains }} / {{ report.keywords }} / {{ report.monitors }}</b></div>
+      <div class="row"><span>Seneste domænetjek</span><b>{{ (report.last_domain_check or '—')[0:16] }}</b></div>
+      <div class="row"><span>Seneste crawl</span><b>{{ (report.last_crawl or '—')[0:16] }}</b></div>
+      <div class="row"><span>Database</span><b>{{ report.db_mb ~ ' MB' if report.db_mb is not none else '—' }}</b></div>
+      <div class="row"><span>Din IP</span><b>{{ client_ip }}</b></div>
+      <div class="row"><span>Nyheder</span><b>{{ report.newest[0] if report.newest else '—' }}</b></div>
+    </div>
+    {% endif %}
     <p class="foot">Adgangskoder gemmes som PBKDF2-SHA256-hash. Sessionen varer 30 dage.</p>
 </div>
 </body>
@@ -4958,7 +5119,11 @@ pip install -r requirements.txt
 
 mkdir -p app/data
 echo $$ > app/data/cc.pid   # pidfile: scripts/restart.sh kan genstarte en app startet med ./run.sh
-echo "⚡ Starter Command Center v7.11..."
+VERSION="$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' app/main.py | head -1)"
+NEWEST="$(sed -n 's/^NEWEST_LINE = "\(.*\)"/\1/p' app/main.py | head -1)"
+echo "⚡ Starter Command Center v${VERSION:-?}..."
+[ -n "$NEWEST" ] && echo "   Nyheder:  $NEWEST"
+echo "   (version + alle nyheder skrives ogsaa til app/data/startup.log ved opstart)"
 echo "   Lokalt:   http://127.0.0.1:$PORT"
 if [ -n "$PUBLIC" ]; then
     echo "   Offentlig: $PUBLIC   (via nginx -> http://$HOST:$PORT)"
@@ -5197,6 +5362,20 @@ udskyder alt under "kritisk" til vinduet slutter, og webhooken signeres efter St
 `id.timestamp.body`). Fanen **Alarmer** viser hvilke kanaler der er sat op, har test-knapper pr.
 kanal og lister fejlede leveringer med årsag og antal forsøg.
 
+## Opstart, login og IP (v7.13)
+
+Ved hver opstart skriver appen version og de nyeste aendringer til skaermen, til
+`app/data/startup.log` og til `settings.last_start` - og de samme nyheder er med i `GET /health`.
+`run.sh`, `run.bat`, `scripts/restart.sh`, `scripts/update.sh` og `install.sh` viser version + nyheder,
+saa man ikke skal huske hvilken version der kører.
+
+Login logger nu IP: `users.last_login_ip`/`last_login_at`, `sessions.ip` og tabellen `login_attempts`
+(ok/fejl, 30 dage) - vist under fanen **Brugere** sammen med de seneste forsoeg. IP'en hentes fra
+`X-Forwarded-For` (foerste hop) med socket-adressen som reserve, saa den er korrekt bag nginx.
+Login-siden viser en kort **kørselsrapport** uden at man er logget ind: version + commit, seneste
+opstart, åbne alarmer, antal domæner/keywords/monitors, seneste domænetjek og crawl, DB-størrelse og
+din IP - ingen alarmtekster eller brugernavne.
+
 ## Dokumentation
 
 Kodeændringer kræver dokumentation i samme commit: `README.md` plus den relevante fil i `docs/`
@@ -5248,6 +5427,12 @@ esac
 PIDFILE="app/data/cc.pid"
 LOG="nohup.out"
 
+banner() {
+    V="$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' app/main.py 2>/dev/null | head -1)"
+    N="$(sed -n 's/^NEWEST_LINE = "\(.*\)"/\1/p' app/main.py 2>/dev/null | head -1)"
+    echo "   Command Center v${V:-?} - ${N:-se app/data/startup.log}"
+}
+
 restart_systemd_user() {
     systemctl --user cat "$1" > /dev/null 2>&1 || return 1
     systemctl --user restart "$1"
@@ -5268,12 +5453,14 @@ fi
 for unit in command-center steamgears-command-center; do
     if restart_systemd_user "$unit"; then
         echo "Genstartede systemd --user unit '$unit'."
+        banner
         exit 0
     fi
 done
 
 if restart_systemd_system command-center; then
     echo "Genstartede systemd unit 'command-center'."
+    banner
     exit 0
 fi
 
@@ -5294,6 +5481,7 @@ fi
 echo "Starter appen igen (log: $LOG)..."
 nohup ./run.sh >> "$LOG" 2>&1 &
 echo "Ny proces startet - foelg opstarten i $LOG"
+banner
 exit 0
 EOF_RESTART
 cat << 'EOF_UPDATE' > scripts/update.sh
@@ -5389,6 +5577,11 @@ for _ in $(seq 1 60); do
 done
 echo "⚠️  Appen svarede ikke inden 60 s. Se logs: journalctl --user -u command-center (eller nohup.out)" >&2
 exit 6
+
+# CC_BANNER: version + nyheder efter en gennemfoert opdatering
+V="$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' app/main.py 2>/dev/null | head -1)"
+N="$(sed -n 's/^NEWEST_LINE = "\(.*\)"/\1/p' app/main.py 2>/dev/null | head -1)"
+echo "   Version:     v${V:-?} - ${N:-se app/data/startup.log}"
 EOF_UPDATE
 cat << 'EOF_SMOKE' > "$PROJECT_DIR/scripts/smoke_test.sh"
 #!/bin/bash
@@ -5439,7 +5632,13 @@ python -m pip install -r requirements.txt
 set "LAN="
 for /f "tokens=2 delims=:" %%i in ('ipconfig ^| findstr /c:"IPv4"') do if not defined LAN set "LAN=%%i"
 if defined LAN set "LAN=%LAN: =%"
-echo Starter Command Center v7.11 (Windows)...
+set "VERSION="
+for /f "tokens=2 delims==" %%v in ('findstr /b "APP_VERSION" app\main.py') do set "VERSION=%%v"
+set "VERSION=%VERSION: =%"
+set "VERSION=%VERSION:"=%"
+echo Starter Command Center v%VERSION% (Windows)...
+echo    Nyheder (fra app/main.py):
+findstr /b "NEWEST_LINE" app\main.py
 echo    Lokalt:   http://127.0.0.1:%PORT%
 if defined CC_PUBLIC_URL echo    Offentlig: %CC_PUBLIC_URL%   (via nginx -^> http://%HOST%:%PORT%)
 if defined LAN echo    Netvaerk: http://%LAN%:%PORT%   (naas kun med CC_HOST=0.0.0.0)
@@ -5475,7 +5674,11 @@ pip install -r requirements.txt
 
 mkdir -p app/data
 echo $$ > app/data/cc.pid   # pidfile: scripts/restart.sh kan genstarte en app startet med ./run.sh
-echo "⚡ Starter Command Center v7.11..."
+VERSION="$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' app/main.py | head -1)"
+NEWEST="$(sed -n 's/^NEWEST_LINE = "\(.*\)"/\1/p' app/main.py | head -1)"
+echo "⚡ Starter Command Center v${VERSION:-?}..."
+[ -n "$NEWEST" ] && echo "   Nyheder:  $NEWEST"
+echo "   (version + alle nyheder skrives ogsaa til app/data/startup.log ved opstart)"
 echo "   Lokalt:   http://127.0.0.1:$PORT"
 if [ -n "$PUBLIC" ]; then
     echo "   Offentlig: $PUBLIC   (via nginx -> http://$HOST:$PORT)"
@@ -5500,7 +5703,10 @@ EOF_RUN
 chmod +x "$PROJECT_DIR/run.sh"
 if curl -s -o /dev/null --max-time 3 "http://127.0.0.1:${CC_PORT:-8000}/health" 2>/dev/null; then echo "🔎 App koerer allerede - koerer smoke-test:"; bash "$PROJECT_DIR/scripts/smoke_test.sh" || true; fi
 LAN_IP=$({ hostname -I 2>/dev/null | awk '{print $1}'; ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") print $(i + 1)}'; } | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
-echo "✨ Installation klar!"
+CC_VER=$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' "$PROJECT_DIR/app/main.py" 2>/dev/null | head -1)
+CC_NEW=$(sed -n 's/^NEWEST_LINE = "\(.*\)"/\1/p' "$PROJECT_DIR/app/main.py" 2>/dev/null | head -1)
+echo "✨ Installation klar!  (Command Center v${CC_VER:-?})"
+echo "   Nyheder:    ${CC_NEW:-se app/data/startup.log efter foerste start}"
 echo "   Start:      cd $PROJECT_DIR && ./run.sh"
 echo "   Adresse:    http://127.0.0.1:${CC_PORT:-8000}   (LAN: http://${LAN_IP:-<din-ip>}:${CC_PORT:-8000} naar CC_HOST=0.0.0.0)"
 echo "   Login:      opret din bruger ved foerste besoeg - ingen token"

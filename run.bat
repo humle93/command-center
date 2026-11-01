@@ -15,7 +15,13 @@ python -m pip install -r requirements.txt
 set "LAN="
 for /f "tokens=2 delims=:" %%i in ('ipconfig ^| findstr /c:"IPv4"') do if not defined LAN set "LAN=%%i"
 if defined LAN set "LAN=%LAN: =%"
-echo Starter Command Center v7.11 (Windows)...
+set "VERSION="
+for /f "tokens=2 delims==" %%v in ('findstr /b "APP_VERSION" app\main.py') do set "VERSION=%%v"
+set "VERSION=%VERSION: =%"
+set "VERSION=%VERSION:"=%"
+echo Starter Command Center v%VERSION% (Windows)...
+echo    Nyheder (fra app/main.py):
+findstr /b "NEWEST_LINE" app\main.py
 echo    Lokalt:   http://127.0.0.1:%PORT%
 if defined CC_PUBLIC_URL echo    Offentlig: %CC_PUBLIC_URL%   (via nginx -^> http://%HOST%:%PORT%)
 if defined LAN echo    Netvaerk: http://%LAN%:%PORT%   (naas kun med CC_HOST=0.0.0.0)

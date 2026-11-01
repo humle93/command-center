@@ -28,6 +28,10 @@
       .error { margin: 0 0 6px; padding: 9px 11px; font-size: 12px; color: #fda4af;
                background: rgba(244,63,94,.09); border: 1px solid rgba(244,63,94,.35); border-radius: 10px; }
       .foot { margin: 16px 0 0; font-size: 11px; color: #71717a; text-align: center; }
+      .report { margin: 20px 0 0; padding: 12px 14px; background: #09090b; border: 1px solid #27272a; border-radius: 12px; }
+      .report .row { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; padding: 3px 0; color: #a1a1aa; }
+      .report .row b { color: #e4e4e7; font-weight: 600; text-align: right; }
+      .report .row b.warn { color: #fbbf24; }
     </style>
 </head>
 <body>
@@ -53,6 +57,19 @@
         {% endif %}
         <button type="submit">{{ 'Opret bruger og log ind' if mode == 'setup' else 'Log ind' }}</button>
     </form>
+    {% if report %}
+    <div class="report">
+      <div class="row"><span>Version</span><b>v{{ report.version }}{% if report.commit %} · {{ report.commit[:7] }}{% endif %}</b></div>
+      <div class="row"><span>Seneste opstart</span><b>{{ (report.last_start or '—')[0:16] }}</b></div>
+      <div class="row"><span>Åbne alarmer</span><b{% if report.alarms_open %} class="warn"{% endif %}>{{ report.alarms_open }}{% if report.alarms_critical %} ({{ report.alarms_critical }} kritiske){% endif %}</b></div>
+      <div class="row"><span>Domæner / keywords / monitors</span><b>{{ report.domains }} / {{ report.keywords }} / {{ report.monitors }}</b></div>
+      <div class="row"><span>Seneste domænetjek</span><b>{{ (report.last_domain_check or '—')[0:16] }}</b></div>
+      <div class="row"><span>Seneste crawl</span><b>{{ (report.last_crawl or '—')[0:16] }}</b></div>
+      <div class="row"><span>Database</span><b>{{ report.db_mb ~ ' MB' if report.db_mb is not none else '—' }}</b></div>
+      <div class="row"><span>Din IP</span><b>{{ client_ip }}</b></div>
+      <div class="row"><span>Nyheder</span><b>{{ report.newest[0] if report.newest else '—' }}</b></div>
+    </div>
+    {% endif %}
     <p class="foot">Adgangskoder gemmes som PBKDF2-SHA256-hash. Sessionen varer 30 dage.</p>
 </div>
 </body>

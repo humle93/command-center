@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 1. november 2026 · **Version:** 7.13.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 1. november 2026 · **Version:** 7.14.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -22,7 +22,7 @@ bash scripts/update.sh --check      # GitHub-opdatering (kraever GITHUB_TOKEN i 
 ```
 
 Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/workflows/ci.yml`)
-kørte grønt på `ed97575`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
+kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
 
@@ -141,6 +141,7 @@ kørte grønt på `ed97575`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - Ikke-eksisterende sommertid afvises; tvetydig tid giver foerste forekomst (`fold=0`). Testene daekker
   baade 29/3 og 25/10 2026.
 - Zonen er `CC_TZ` (standard Europe/Copenhagen). Ukendt zone falder tilbage, den crasher ikke.
+
 ### Idempotens paa Autopilot-broen (v7.14.1)
 - `/social/to-autopilot` laaser raekken med `social_claim()` **foer** kaldet: status bliver
   `sender til autopilot`, og et dobbeltklik eller genforsoeg rammer `rowcount = 0` og sender intet.
@@ -148,6 +149,7 @@ kørte grønt på `ed97575`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - Svar fra WordPress (4xx/5xx) slipper raekken tilbage til sin gamle status, saa den kan sendes igen.
   Timeout/`ConnectionError` goer det modsatte: status bliver `sendt? (svar udeblev)` + alarm, fordi vi
   ikke ved om kladden blev oprettet. Gentagen sending er vaerre end en manuel kontrol.
+
 - Status-konstanterne er `SOCIAL_SENT` / `SOCIAL_SENDING` / `SOCIAL_UNCERTAIN`; `social_claim` er den
   eneste skriver af laasen, saa en ny kaldevej skal bruge den i stedet for selv at saette status.
 - Tests: `tests/test_v8_features.py` (tre POSTs mod en fake sgap-server = én kladde, og laasen kan kun

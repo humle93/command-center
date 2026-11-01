@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=%h/command-center
-# Lader .env-vaerdier som GITHUB_TOKEN og BRIDGE_POLL_MINUTES blive rigtige miljoevariabler
+# Lader .env-vaerdier som GITHUB_TOKEN og AIMLAPI_KEY blive rigtige miljoevariabler
 # (appen laeser selv de fleste, men dette er den paalidelige vej). "-" = ok hvis filen mangler.
 EnvironmentFile=-%h/command-center/.env
 # 127.0.0.1 + proxy-headers: nginx paa samme maskine sender X-Forwarded-Proto/For.

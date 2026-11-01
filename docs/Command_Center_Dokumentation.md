@@ -42,7 +42,6 @@ install.sh                 # selvstændig installer (indeholder kopier af filern
 | Cookie | `cc_session`, HttpOnly, SameSite=Lax, `Secure` når scheme er https |
 | Første bruger | `/setup` — kun åben når `users` er tom |
 | Rate limit | 5 fejl pr. IP = 10 min lås (bounded dict) |
-| Maskin-adgang | `JUNO_TOKEN` + `X-CC-Token` giver **kun** `/api/*` (POST begrænset til bridge-push) |
 | UI-adgang | Middleware sætter `request.state.user`; ikke-loggede sendes til `/setup` eller `/login` |
 
 `APP_TOKEN` er fjernet. Sessioner slettes ved logout, bruger-sletning og adgangskode-skift (bortset fra den aktuelle session).
@@ -54,7 +53,7 @@ Tabeller i grupper:
 - **Overvågning**: `domains`, `check_history`, `monitors`, `health_history`, `alarms`
 - **SEO**: `seopages`, `crawl_runs`, `keywords`, `keyword_difficulty`, `keyword_ideas`, `content_gap`, `visibility`, `internal_links`
 - **Indhold**: `articles`, `backlink_prospects`, `outreach`
-- **Drift/integrationer**: `gsc_daily`, `gsc_queries`, `drift`, `socialqueue`, `competitors`, `linkcheck`, `ai_visibility`
+- **Drift/integrationer**: `socialqueue`, `competitors`, `linkcheck`, `ai_visibility`
 - **System**: `users`, `sessions`, `settings` (nøgle/værdi: moduler, strategi, budget, snapshots, `deployed_commit`, `github_update`)
 
 Alle queries er parameteriserede. `settings` bruges til små tilstande (JSON), så nye funktioner ikke kræver migration.
@@ -70,7 +69,6 @@ Alle queries er parameteriserede. `settings` bruges til små tilstande (JSON), s
 | DB-backup | 04:40 | 14 kopier pr. tag |
 | GitHub-opdaterings-tjek | 05:00 | `GITHUB_TOKEN` |
 | Autopilot-bro (WordPress) | hvert 30. min | modul `autopilot` + WP-creds |
-| Pull-bro (bridge/pending) | hvert `BRIDGE_POLL_MINUTES` | modul `bridge` + `GITHUB_TOKEN` |
 
 ## 6. Crawler og SEO-analyse
 
@@ -109,7 +107,7 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 
 - Adgangskoder: PBKDF2-SHA256 (240k iterationer), salt pr. bruger
 - Sessioner: tilfældig 256-bit id, kun `sha256(id)` i DB, HttpOnly + SameSite
-- Token-sammenligning: `secrets.compare_digest` (både session og `JUNO_TOKEN`)
+- Token-sammenligning: `secrets.compare_digest` (sessioner)
 - HTML fra AI/SERP saniteres før `|safe` i skabelonen
 - Netværkskald: alle med timeout; budget-guard stopper betalte API'er
 - Kendte, ikke-lukkede punkter (se ROADMAP): udgående requests kan pege på private IP'er (SSRF-flade), Telegram-kald sker inde i en åben DB-transaktion, og der er ingen CSRF-token (SameSite dækker cross-site POST)

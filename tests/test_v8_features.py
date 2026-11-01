@@ -175,6 +175,12 @@ check("update: restart script exists for the pidfile/systemd path",
       os.path.exists(os.path.join(ROOT, "scripts", "restart.sh"))
       and os.path.exists(os.path.join(ROOT, "scripts", "update.sh")))
 
+# --- Juno er fjernet helt: ingen maskin-noegle, ingen bridge-endpoints ---
+check("auth: no machine token or Juno bridge left",
+      not hasattr(main, "JUNO_TOKEN") and not hasattr(main, "is_juno")
+      and not any("/api/bridge" in getattr(r, "path", "") for r in main.app.routes),
+      [getattr(r, "path", "") for r in main.app.routes if "/api/bridge" in getattr(r, "path", "")])
+
 srv.shutdown()
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)
 print("ALL PASS" if not FAILED else f"{len(FAILED)} FAILED")

@@ -157,22 +157,6 @@
                 {% endfor %}
             </div>
         </div>
-
-        {% if drift_rows %}
-        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
-            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Daglig drift (pushet fra Juno)</h2>
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-                {% for d in drift_rows[:3] %}
-                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs">
-                    <div class="text-zinc-500">{{ d.checked_at[:16] }}</div>
-                    <div class="mt-1">🛒 Ordrer: <span class="font-bold">{{ d.orders }}</span> · {{ 'DKK %.2f'|format(d.revenue or 0) }}</div>
-                    <div>Woo: <span class="{{ 'text-emerald-400' if d.woo_status == 'ok' else 'text-rose-400' }}">{{ d.woo_status }}</span> · Checkout: <span class="{{ 'text-emerald-400' if d.checkout_status == 'ok' else 'text-rose-400' }}">{{ d.checkout_status }}</span></div>
-                    {% if d.notes %}<div class="text-zinc-500 mt-1">{{ d.notes }}</div>{% endif %}
-                </div>
-                {% endfor %}
-            </div>
-        </div>
-        {% endif %}
     </section>
 
     <!-- SEO SCANNER -->
@@ -811,7 +795,7 @@
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">Moduler</h2>
             <p class="text-xs text-zinc-500 mb-4">Slå funktioner til/fra. Slukkede moduler kører ikke automatisk og viser ikke knapper i API-kald.</p>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {% set module_labels = {"domains": "🌐 Domæne-tjek", "keywords": "🎯 Keyword-tjek", "ai": "🤖 AI (artikler/rewrite)", "monitors": "🩺 Monitors", "social": "📱 Social-kø", "links": "🔗 Linktjek", "bridge": "🌉 Pull-bro", "spy": "🕷️ Spy/konkurrenter", "wp_push": "📝 WordPress-push", "telegram": "📬 Telegram", "growth": "🌱 Growth-autopilot", "autopilot": "⚙️ Autopilot-bro (WordPress)"} %}
+                {% set module_labels = {"domains": "🌐 Domæne-tjek", "keywords": "🎯 Keyword-tjek", "ai": "🤖 AI (artikler/rewrite)", "monitors": "🩺 Monitors", "social": "📱 Social-kø", "links": "🔗 Linktjek", "spy": "🕷️ Spy/konkurrenter", "wp_push": "📝 WordPress-push", "telegram": "📬 Telegram", "growth": "🌱 Growth-autopilot", "autopilot": "⚙️ Autopilot-bro (WordPress)"} %}
                 {% for m, label in module_labels.items() %}
                 <div class="flex items-center justify-between bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2">
                     <span class="text-xs text-zinc-300">{{ label }}</span>

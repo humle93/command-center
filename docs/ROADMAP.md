@@ -23,7 +23,7 @@ driftsstabilitet før nye features.
 | 2 | **Alarm-hygiejne** | Samme fejl alarmerer igen hver 6. time/hver time (domæne nede, monitor) og spammer Telegram. Dedup på `(type, message)` indtil alarmen resolves, plus "quiet hours" | S |
 | 3 | **Telegram ud af DB-transaktionen** | `add_alarm()` kalder Telegram synkront inde i en åben skrive-transaktion (op til 8 s lås). Læg notifikationer på en kø/worker | S |
 | 4 | **CSRF + session-rotation** | Der er ingen CSRF-token (SameSite dækker det meste), og sessionen roterer ikke ved login. Token pr. formular + ny session ved login/logout | S |
-| 5 | **Tests for auth-middleware og jobs** | Rate-limit, `/setup`-lukning, JUNO-begrænsninger og job-guards er kun dækket indirekte | S |
+| 5 | **Tests for auth-middleware og jobs** | Rate-limit, `/setup`-lukning, API-sessioner og job-guards er kun dækket indirekte | S |
 | 6 | **Offline dashboard** | Tailwind, Alpine.js og Chart.js hentes fra CDN. Bundl dem lokalt (eller byg Tailwind-stylesheet) så UI'et også virker uden internet | M |
 | 7 | **Monthly budget-visning i UI** | Forbruget findes i `/health`, men vises ikke i dashboardet | S |
 | 8 | **Backup/restore i UI** | Backups findes på disk; en liste + "gendan"-knap med bekræftelse gør rollback mulig uden SSH | M |

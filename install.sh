@@ -21,8 +21,6 @@ cat << 'EOF_ENVDOT' > "$PROJECT_DIR/.env.example"
 # Command Center v7.11 - kopier til .env og udfyld
 # Login: der er ingen token. Foerste besoeg i browseren opretter din bruger (/setup),
 # derefter logger du ind med brugernavn + adgangskode. Brugere styres under fanen "Brugere".
-# Maskin-noegle til /api/* (bridge-push fra Juno). Valgfri - lad den vaere tom hvis ubrugt.
-JUNO_TOKEN=
 # Hvor run.sh lytter. 127.0.0.1 = kun denne maskine; 0.0.0.0 = ogsaa fra netvaerket (kraever TLS/proxy).
 CC_HOST=127.0.0.1
 CC_PORT=8000
@@ -56,10 +54,9 @@ QUALITY_MIN_WORDS=400
 # Tuninge
 SSL_WARN_DAYS=30
 LINKCHECK_LIMIT=25
-# GitHub pull-bro + selv-opdatering (Juno committer bridge-filer, CC henter selv)
+# GitHub-opdatering (henter kun projektets filer)
 GITHUB_TOKEN=
 GITHUB_REPO=humle93/command-center
-BRIDGE_POLL_MINUTES=60
 EOF_ENVDOT
 
 echo "📄 app/main.py..."
@@ -113,7 +110,7 @@ def load_dotenv(path=None):
     """Laes .env FOER konfigurationen nedenfor - rigtige miljoevariabler vinder.
 
     Inline-kommentarer (`KEY=   # note`) fjernes ogsaa naar python-dotenv bruges, saa en
-    kommentar fra .env-skabelonen ikke ender som vaerdi (fx et JUNO_TOKEN bestaaende af tekst)."""
+    kommentar fra .env-skabelonen ikke ender som vaerdi (fx et GITHUB_TOKEN bestaaende af tekst)."""
     path = path or os.path.join(os.path.dirname(BASE_DIR), ".env")
     if not os.path.exists(path):
         return
@@ -137,10 +134,8 @@ def load_dotenv(path=None):
 load_dotenv()
 
 # --- Konfiguration via miljoevariabler / .env ---
-JUNO_TOKEN = os.environ.get("JUNO_TOKEN", "").strip()        # maskin-noegle til /api/* (valgfri)
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()     # GitHub-token: pull-bro + selv-opdatering
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()     # GitHub-token: opdatering fra GitHub
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "humle93/command-center").strip()
-BRIDGE_POLL_MINUTES = int(os.environ.get("BRIDGE_POLL_MINUTES", "60"))  # hvor ofte CC henter bridge-filer
 AIMLAPI_KEY = os.environ.get("AIMLAPI_KEY", "").strip()      # AI-artikelgenerator (gemini via aimlapi)
 AI_MODEL = os.environ.get("AI_MODEL", "google/gemini-3-8-flash")
 WP_URL = os.environ.get("WP_URL", "").strip()                # fx https://steamgears.eu
@@ -259,30 +254,6 @@ def init_db():
             severity TEXT DEFAULT 'info',
             resolved INTEGER DEFAULT 0,
             created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS gsc_daily (
-            day TEXT PRIMARY KEY,
-            clicks INTEGER,
-            impressions INTEGER,
-            ctr REAL,
-            avg_position REAL
-        );
-        CREATE TABLE IF NOT EXISTS gsc_queries (
-            day TEXT NOT NULL,
-            query TEXT NOT NULL,
-            clicks INTEGER,
-            impressions INTEGER,
-            position REAL,
-            PRIMARY KEY (day, query)
-        );
-        CREATE TABLE IF NOT EXISTS drift (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            checked_at TEXT,
-            orders INTEGER,
-            revenue REAL,
-            woo_status TEXT,
-            checkout_status TEXT,
-            notes TEXT
         );
         CREATE TABLE IF NOT EXISTS seopages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -446,8 +417,6 @@ def create_indexes():
     with get_db() as db:
         for stmt in [
             "CREATE INDEX IF NOT EXISTS idx_seopages_run ON seopages(run_id)",
-            "CREATE INDEX IF NOT EXISTS idx_gsc_daily_day ON gsc_daily(day)",
-            "CREATE INDEX IF NOT EXISTS idx_gsc_q ON gsc_queries(query)",
             "CREATE INDEX IF NOT EXISTS idx_alarms_open ON alarms(resolved, id)",
             "CREATE INDEX IF NOT EXISTS idx_hist_domain ON check_history(domain_id, id)",
             "CREATE INDEX IF NOT EXISTS idx_health_time ON health_history(checked_at)",
@@ -461,7 +430,7 @@ def create_indexes():
 _safe(create_indexes)
 
 
-MODULES = ["domains", "keywords", "ai", "monitors", "social", "links", "bridge", "spy", "wp_push", "telegram", "growth", "autopilot"]
+MODULES = ["domains", "keywords", "ai", "monitors", "social", "links", "spy", "wp_push", "telegram", "growth", "autopilot"]
 
 
 _MODULE_CACHE = {"at": 0.0, "states": {}}
@@ -507,10 +476,9 @@ def cleanup_old_data():
         db.execute("DELETE FROM keyword_ideas WHERE created_at < ?", (cutoff(180),))
 
 
-# ---------- Auth: brugere, sessioner og Juno-token ----------
+# ---------- Auth: brugere og sessioner ----------
 # Dashboardet har rigtige brugere: brugernavn + adgangskode (PBKDF2-SHA256 med salt pr. bruger).
 # Foerste besoeg opretter den foerste bruger via /setup - der er ingen delt token i .env.
-# JUNO_TOKEN findes stadig som maskin-noegle, men giver KUN adgang til /api/* (bridge-push fra Juno).
 SESSION_COOKIE = "cc_session"
 SESSION_MAX_AGE = 60 * 60 * 24 * 30        # 30 dage
 PBKDF2_ITERATIONS = 240_000
@@ -611,14 +579,8 @@ def current_user(request: Request):
 
 
 def is_authed(request: Request) -> bool:
-    """Er kaldet lavet af en logget-ind bruger? (Juno-token haandteres af middlewaren.)"""
+    """Er kaldet lavet af en logget-ind bruger?"""
     return bool(getattr(request.state, "user", None))
-
-
-def is_juno(request: Request) -> bool:
-    """Juno-adgang: separat maskin-noegle, gyldig KUN for /api/*-endpoints."""
-    supplied = request.headers.get("x-cc-token") or ""
-    return bool(JUNO_TOKEN) and secrets.compare_digest(supplied, JUNO_TOKEN)
 
 
 @app.middleware("http")
@@ -633,12 +595,6 @@ async def auth_middleware(request: Request, call_next):
     if request.state.user:
         return await call_next(request)
     if path.startswith("/api/"):
-        if is_juno(request):
-            juno_forbidden = ("/api/bridge", "/api/duplicates", "/api/visibility", "/api/health-history")
-            if request.method != "GET" and any(path.startswith(fp) for fp in juno_forbidden) \
-                    and path not in ("/api/bridge/gsc", "/api/bridge/drift"):
-                return JSONResponse({"error": "juno-token: kun GET eller bridge-push"}, status_code=403)
-            return await call_next(request)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return RedirectResponse("/setup" if user_count() == 0 else "/login", status_code=303)
 
@@ -1441,7 +1397,7 @@ def discover_competitors_sync(keyword: str):
                 if len(found) >= 5:
                     break
         if not found:
-            raise RuntimeError("Ingen resultater (DuckDuckGo blokerede muligvis - proev igen eller brug Juno/SerpAPI)")
+            raise RuntimeError("Ingen resultater (DuckDuckGo blokerede muligvis - proev igen eller brug SerpAPI)")
         with get_db() as db:
             for domain, url in found:
                 info = crawl_competitor(url)
@@ -2212,84 +2168,6 @@ async def resolve_alarm(id: int = Form(...)):
     with get_db() as db:
         db.execute("UPDATE alarms SET resolved=1 WHERE id=?", (id,))
     return RedirectResponse("/", status_code=303)
-
-
-# ---------- Juno-broer (ekstern push af data) ----------
-def ingest_gsc_data(db, data):
-    days = data.get("daily", [])
-    queries = data.get("queries", [])
-    for d in days:
-        db.execute(
-            "INSERT INTO gsc_daily (day, clicks, impressions, ctr, avg_position) VALUES (?,?,?,?,?) "
-            "ON CONFLICT(day) DO UPDATE SET clicks=excluded.clicks, impressions=excluded.impressions, "
-            "ctr=excluded.ctr, avg_position=excluded.avg_position",
-            (d.get("day"), d.get("clicks", 0), d.get("impressions", 0), d.get("ctr", 0), d.get("position", 0)),
-        )
-    for q in queries:
-        db.execute(
-            "INSERT INTO gsc_queries (day, query, clicks, impressions, position) VALUES (?,?,?,?,?) "
-            "ON CONFLICT(day, query) DO UPDATE SET clicks=excluded.clicks, "
-            "impressions=excluded.impressions, position=excluded.position",
-            (data.get("date", date.today().isoformat()), q.get("query", ""), q.get("clicks", 0),
-             q.get("impressions", 0), q.get("position", 0)),
-        )
-    return len(days), len(queries)
-
-
-@app.post("/api/bridge/gsc")
-async def bridge_gsc(request: Request):
-    data = await request.json()
-    if not isinstance(data.get("daily", []), list):
-        raise HTTPException(400, "daily skal vaere en liste")
-    with get_db() as db:
-        days, queries = ingest_gsc_data(db, data)
-    return {"ok": True, "days": days, "queries": queries}
-
-
-def ingest_drift_data(db, data):
-    db.execute(
-        "INSERT INTO drift (checked_at, orders, revenue, woo_status, checkout_status, notes) VALUES (?,?,?,?,?,?)",
-        (now_iso(), data.get("orders"), data.get("revenue"), data.get("woo_status", "ok"),
-         data.get("checkout_status", "ok"), data.get("notes", "")),
-    )
-    if data.get("woo_status") not in (None, "ok", ""):
-        add_alarm(db, "drift", f"Woo-status: {data.get('woo_status')}", "kritisk")
-
-
-@app.post("/api/bridge/drift")
-async def bridge_drift(request: Request):
-    data = await request.json()
-    with get_db() as db:
-        ingest_drift_data(db, data)
-    return {"ok": True}
-
-
-# ---------- Pull-bro: CC henter selv fra GitHub (ingen tunnel noedvendig) ----------
-def pull_bridge_sync():
-    if not GITHUB_TOKEN or not module_on("bridge"):
-        return
-    try:
-        headers = {"Authorization": "Bearer " + GITHUB_TOKEN, "Accept": "application/vnd.github+json"}
-        r = HTTP.get(f"https://api.github.com/repos/{GITHUB_REPO}/contents/bridge/pending", headers=headers, timeout=15)
-        if r.status_code != 200:
-            return
-        for item in r.json():
-            name = item.get("name", "")
-            if not name.endswith(".json"):
-                continue
-            rr = HTTP.get(item.get("url"), headers={"Authorization": "Bearer " + GITHUB_TOKEN, "Accept": "application/vnd.github.raw"}, timeout=15)
-            try:
-                data = jsonlib.loads(rr.text)
-            except Exception:
-                continue
-            with get_db() as db:
-                if name.startswith("gsc-"):
-                    ingest_gsc_data(db, data)
-                elif name.startswith("drift-"):
-                    ingest_drift_data(db, data)
-            HTTP.delete(item.get("url"), headers={"Authorization": "Bearer " + GITHUB_TOKEN}, timeout=15)
-    except Exception:
-        pass
 
 
 # ---------- v7.9 Stabilitet: DB-backup + opstarts-selvtest ----------
@@ -3194,12 +3072,6 @@ async def dashboard(request: Request):
         notes = db.execute("SELECT * FROM notes ORDER BY id DESC LIMIT 10").fetchall()
         keywords = db.execute("SELECT * FROM keywords ORDER BY position IS NULL, position").fetchall()
         alarms = db.execute("SELECT * FROM alarms WHERE resolved=0 ORDER BY id DESC LIMIT 20").fetchall()
-        gsc_days = db.execute("SELECT * FROM gsc_daily ORDER BY day DESC LIMIT 14").fetchall()
-        gsc_queries = db.execute(
-            "SELECT query, SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(position) AS pos "
-            "FROM gsc_queries GROUP BY query ORDER BY clicks DESC LIMIT 10"
-        ).fetchall()
-        drift_rows = db.execute("SELECT * FROM drift ORDER BY id DESC LIMIT 7").fetchall()
         ideas = db.execute("SELECT * FROM keyword_ideas ORDER BY id DESC LIMIT 30").fetchall()
         gaps = db.execute("SELECT * FROM content_gap ORDER BY id DESC LIMIT 5").fetchall()
         outreach_rows = db.execute("SELECT DISTINCT email FROM outreach ORDER BY id DESC LIMIT 30").fetchall()
@@ -3237,9 +3109,6 @@ async def dashboard(request: Request):
         "notes": notes,
         "keywords": keywords,
         "alarms": alarms,
-        "gsc_days": gsc_days,
-        "gsc_queries": gsc_queries,
-        "drift_rows": drift_rows,
         "ai_enabled": bool(AIMLAPI_KEY),
         "wp_enabled": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "serpapi_enabled": bool(SERPAPI_KEY),
@@ -3430,7 +3299,6 @@ async def lifespan(app_: FastAPI):
         scheduler.add_job(job_check_keywords, CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_growth_autopilot, CronTrigger(hour=5, minute=15), id="growth_autopilot", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(cleanup_old_data, CronTrigger(hour=4, minute=30), id="cleanup", replace_existing=True, max_instances=1, coalesce=True)
-        scheduler.add_job(pull_bridge_sync, IntervalTrigger(minutes=BRIDGE_POLL_MINUTES), id="pull_bridge", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_backup_db, CronTrigger(hour=4, minute=40), id="db_backup", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_update_check, CronTrigger(hour=5, minute=0), id="update_check", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_sgap_sync, IntervalTrigger(minutes=30), id="sgap_sync", replace_existing=True, max_instances=1, coalesce=True)
@@ -3610,22 +3478,6 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                 {% endfor %}
             </div>
         </div>
-
-        {% if drift_rows %}
-        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
-            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Daglig drift (pushet fra Juno)</h2>
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-                {% for d in drift_rows[:3] %}
-                <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs">
-                    <div class="text-zinc-500">{{ d.checked_at[:16] }}</div>
-                    <div class="mt-1">🛒 Ordrer: <span class="font-bold">{{ d.orders }}</span> · {{ 'DKK %.2f'|format(d.revenue or 0) }}</div>
-                    <div>Woo: <span class="{{ 'text-emerald-400' if d.woo_status == 'ok' else 'text-rose-400' }}">{{ d.woo_status }}</span> · Checkout: <span class="{{ 'text-emerald-400' if d.checkout_status == 'ok' else 'text-rose-400' }}">{{ d.checkout_status }}</span></div>
-                    {% if d.notes %}<div class="text-zinc-500 mt-1">{{ d.notes }}</div>{% endif %}
-                </div>
-                {% endfor %}
-            </div>
-        </div>
-        {% endif %}
     </section>
 
     <!-- SEO SCANNER -->
@@ -4264,7 +4116,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">Moduler</h2>
             <p class="text-xs text-zinc-500 mb-4">Slå funktioner til/fra. Slukkede moduler kører ikke automatisk og viser ikke knapper i API-kald.</p>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {% set module_labels = {"domains": "🌐 Domæne-tjek", "keywords": "🎯 Keyword-tjek", "ai": "🤖 AI (artikler/rewrite)", "monitors": "🩺 Monitors", "social": "📱 Social-kø", "links": "🔗 Linktjek", "bridge": "🌉 Pull-bro", "spy": "🕷️ Spy/konkurrenter", "wp_push": "📝 WordPress-push", "telegram": "📬 Telegram", "growth": "🌱 Growth-autopilot", "autopilot": "⚙️ Autopilot-bro (WordPress)"} %}
+                {% set module_labels = {"domains": "🌐 Domæne-tjek", "keywords": "🎯 Keyword-tjek", "ai": "🤖 AI (artikler/rewrite)", "monitors": "🩺 Monitors", "social": "📱 Social-kø", "links": "🔗 Linktjek", "spy": "🕷️ Spy/konkurrenter", "wp_push": "📝 WordPress-push", "telegram": "📬 Telegram", "growth": "🌱 Growth-autopilot", "autopilot": "⚙️ Autopilot-bro (WordPress)"} %}
                 {% for m, label in module_labels.items() %}
                 <div class="flex items-center justify-between bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2">
                     <span class="text-xs text-zinc-300">{{ label }}</span>
@@ -4640,7 +4492,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=%h/command-center
-# Lader .env-vaerdier som GITHUB_TOKEN og BRIDGE_POLL_MINUTES blive rigtige miljoevariabler
+# Lader .env-vaerdier som GITHUB_TOKEN og AIMLAPI_KEY blive rigtige miljoevariabler
 # (appen laeser selv de fleste, men dette er den paalidelige vej). "-" = ok hvis filen mangler.
 EnvironmentFile=-%h/command-center/.env
 # 127.0.0.1 + proxy-headers: nginx paa samme maskine sender X-Forwarded-Proto/For.
@@ -4661,14 +4513,14 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 
 ## Nyheder i v7.11
 
-- **Brugere i stedet for token-login** — første besøg opretter din bruger (`/setup`), derefter logger du ind med brugernavn + adgangskode (PBKDF2-SHA256, salt pr. bruger, 30 dages HttpOnly-session). Fanen **Brugere** opretter/sletter brugere og skifter adgangskode. `APP_TOKEN` findes ikke længere; `JUNO_TOKEN` er nu kun en maskin-nøgle til `/api/*`.
+- **Brugere i stedet for token-login** — første besøg opretter din bruger (`/setup`), derefter logger du ind med brugernavn + adgangskode (PBKDF2-SHA256, salt pr. bruger, 30 dages HttpOnly-session). Fanen **Brugere** opretter/sletter brugere og skifter adgangskode. `APP_TOKEN` findes ikke længere, og der er ingen maskin-nøgle - al adgang kræver en bruger.
 - **Opdatering fra GitHub** — Cockpit viser installeret commit vs. seneste commit på `main`, tjekker selv kl. 05:00, og "Opdater" laver DB-backup og henter kun projektets filer. Den gamle "hent install.sh og kør den"-vej er fjernet.
 - **nginx / Ultra.cc** — `deploy/nginx-command-center.conf`, `deploy/command-center.user.service` og proxy-header-understøttelse, så appen bliver på `127.0.0.1` bag nginx med korrekte Secure-cookies og rigtig klient-IP.
 - **Rettelser fra kodegennemgang** — saniteret artikel-HTML (XSS), `.env` læses før konfigurationen, pris-monitors registrerer ændringer igen, crawl-diff virker (to crawls gemmes), `/monitors/add` giver ikke længere 500, HTTPS-advarslen rammer rigtigt, plus mindre korrekthedsrettelser.
 
 ## Funktioner
 
-- 🎛️ **Cockpit** — domæneovervågning (uptime, svartid, SSL), drift-kort fra Juno-broen, opdaterings-panel og alarmer
+- 🎛️ **Cockpit** — domæneovervågning (uptime, svartid, SSL), opdaterings-panel og alarmer
 - 🔍 **SEO Scanner** — deep audit af enkelt side (20+ vægtede kontroller inkl. focus keyword, læsbarhed, mixed content, schema, OG/Twitter) + **site-crawl** med score per side, robots.txt/sitemap-tjek og crawl-diff mod forrige crawl
 - ✍️ **Artikler** — AI-generering (Gemini via aimlapi) eller skabelon, **push til WordPress som udkast**, **fakta-prompt med SerpAPI-konkurrentanalyse**, autopilot (idé → artikel → WP-kladde) og **kvalitetsgate** før publicering
 - 🎯 **SEO-strategi** — AdSense / Affiliate / Backlink-vækst styrer AI-artiklernes stil + længde og autopilotens arbejde, med automatisk pre-flight-checkliste
@@ -4681,7 +4533,6 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 - 👤 **Brugere** — opret/slet brugere, skift adgangskode; den sidste bruger kan ikke slettes
 - 🚨 **Alarmer** — SSL-udløb, nedetid, brudte links, fejlede scans, nye GitHub-commits; valgfrit Telegram-push
 - 📈 **Historik** — svartid per domæne, site-health og visibility over tid (Chart.js)
-- 🌉 **Juno-broer** — `POST /api/bridge/gsc` og `/api/bridge/drift` med `X-CC-Token`
 
 ## Login & opsætning
 
@@ -4713,7 +4564,7 @@ Panelet i Cockpit sammenligner installeret commit med seneste commit på `main`:
 - **Opdater** (`POST /update/apply`) — tager en `pre-update`-backup af databasen, henter commit-tarballen og skriver **kun** projektets filer (`app/`, `scripts/`, `deploy/`, requirements, start-scripts, `install.sh`, Dockerfile, compose, `.env.example`). `.env`, databasen og `..`-stier røres ikke.
 - **Alt i ét hug**: er `requirements.txt` ændret, køres `pip install -r` automatisk, og appen **genstarter sig selv** ~1,5 s efter svaret (systemd-unit, ellers `scripts/restart.sh` med pidfile + `run.sh`). Fjern fluebenet "genstart" i panelet, eller sæt `UPDATE_AUTO_RESTART=0`, for at genstarte manuelt. `UPDATE_RESTART_CMD` overstyrer kommandoen (fx din egen supervisor).
 - **Fra terminalen**: `bash scripts/update.sh` gør hele kæden (tjek → filer → requirements → genstart) og venter til `/health` svarer igen; `--check` tjekker kun, `--no-restart` springer genstarten over. `bash scripts/restart.sh` genstarter uden at opdatere.
-- Status som JSON: `GET /api/update` (inkl. `restart_mode` og `auto_restart`). Kræver `GITHUB_TOKEN` (privat repo) og `JUNO_TOKEN` for scriptet. `/self-update` findes stadig som alias for `/update/apply`.
+- Status som JSON: `GET /api/update` (inkl. `restart_mode` og `auto_restart`). Kræver `GITHUB_TOKEN` (privat repo). `/self-update` findes stadig som alias for `/update/apply`.
 
 ## Steamgears Autopilot-bro (WordPress-plugin 7.5+)
 
@@ -4741,12 +4592,11 @@ skriver alle filer (inkl. `deploy/nginx-command-center.conf` og `deploy/command-
 - **Cron**: domæne-tjek hver 6. time, keyword-tjek 06:00, autopilot 05:15, oprydning 04:30, DB-backup 04:40, GitHub-tjek 05:00, Autopilot-bro hver 30. min
 - **Backup**: `app/backups/cc-daglig-*.db` (14 gemmes) + `cc-pre-update-*.db` før hver opdatering
 - **Health**: `/health` (200, eller 503 ved kritisk DB/disk-tilstand) viser også månedens API-forbrug
-- **Tests**: `python3 tests/test_v8_features.py` (enhedstests), `bash tests/ci_check.sh` (boot + alle sider + auth + bridge + link-audit)
+- **Tests**: `python3 tests/test_v8_features.py` (enhedstests), `bash tests/ci_check.sh` (boot + alle sider + auth + WordPress-bro + link-audit)
 
 ## Sikkerhed
 
 - **Brugere**: PBKDF2-SHA256 med salt pr. bruger; sessioner er HttpOnly-cookies (30 dage) gemt som `sha256(id)` i databasen, så en DB-kopi ikke giver adgang. Skift af adgangskode logger dine andre sessioner ud.
-- **JUNO_TOKEN** er en separat maskin-nøgle til `/api/*` (header `X-CC-Token`), ikke til mennesker.
 - **Cookie/HTTPS**: cookien sættes `Secure` når appen ser https (kræver `X-Forwarded-Proto` bag proxy — se nginx-afsnittet).
 - **API-budget**: SerpAPI og aimlapi tælles pr. måned og stoppes ved loftet (`SERPAPI_MONTHLY_LIMIT`, `AI_MONTHLY_LIMIT`), med alarm ved 80 % og 100 %.
 - Default binding er 127.0.0.1 — sæt aldrig `0.0.0.0` uden reverse proxy + TLS.
@@ -4837,14 +4687,12 @@ exit 0
 EOF_RESTART
 cat << 'EOF_UPDATE' > scripts/update.sh
 #!/bin/bash
-# Opdaterer Command Center fra GitHub: tjek -> filsynk (med backup) -> requirements -> genstart.
-# Appens update-endpoints bruges, saa logikken findes kun ét sted.
+# Opdaterer Command Center fra GitHub: tjek -> filer (med DB-backup) -> requirements -> genstart.
+# Koerer appens opdateringsfunktioner direkte i venv'en, saa der kraves hverken token eller login.
 #
-#   bash scripts/update.sh              # opdater + genstart, vent til appen svarer
+#   bash scripts/update.sh              # opdater + genstart, vent til /health svarer
 #   bash scripts/update.sh --no-restart # opdater, men genstart selv bagefter
 #   bash scripts/update.sh --check      # kun tjek, skriv intet
-#
-# Kraever JUNO_TOKEN i .env (maskin-noegle til /api/*).
 set -u
 cd "$(dirname "$0")/.."
 
@@ -4856,13 +4704,16 @@ MODE="apply"
 case "${1:-}" in
     --no-restart) MODE="apply-no-restart" ;;
     --check) MODE="check" ;;
-    -h|--help)
-        sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
-        exit 0
-        ;;
+    -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     "") ;;
     *) echo "Ukendt argument: $1 (brug --check, --no-restart eller -h)" >&2; exit 64 ;;
 esac
+
+PY="./venv/bin/python"
+if [ ! -x "$PY" ]; then
+    echo "❌ venv mangler ($PY) - start appen en gang med ./run.sh foerst." >&2
+    exit 2
+fi
 
 HOST="${CC_HOST:-127.0.0.1}"
 PORT="${CC_PORT:-8000}"
@@ -4871,62 +4722,52 @@ case "$HOST" in
     *) PROBE="$HOST" ;;
 esac
 BASE="http://$PROBE:$PORT"
-TOKEN="${JUNO_TOKEN:-}"
 
-PY="./venv/bin/python"
-[ -x "$PY" ] || PY="python3"
-field() {
-    printf '%s' "$1" | "$PY" -c 'import json,sys;print(json.load(sys.stdin).get(sys.argv[1]))' "$2" 2>/dev/null
+# Et felt ud af JSON paa stdin ("None" -> tom)
+field() { "$PY" -c 'import json,sys;d=json.load(sys.stdin);v=d.get(sys.argv[1]);print("" if v is None else v)' "$1"; }
+count() { "$PY" -c 'import json,sys;print(len(json.load(sys.stdin).get(sys.argv[1]) or []))' "$1"; }
+req_line() {
+    "$PY" -c 'import json,sys;d=json.load(sys.stdin).get("requirements_install") or {};print(("OK" if d.get("ok") else "FEJL")+": "+(d.get("output") or "")[:200])'
 }
 
-if [ -z "$TOKEN" ]; then
-    echo "❌ JUNO_TOKEN mangler i .env - update-endpoints kraever maskin-noeglen." >&2
-    exit 2
-fi
-if ! curl -sf -o /dev/null --max-time 5 -H "X-CC-Token: $TOKEN" "$BASE/api/update"; then
-    echo "❌ Appen svarer ikke paa $BASE - start den foerst (./run.sh)." >&2
-    exit 3
-fi
+echo "→ Tjekker GitHub..."
+CHECK="$("$PY" -c 'import json;from app import main;print(json.dumps(main.update_check_sync(), ensure_ascii=False))')"
+[ -n "$CHECK" ] || { echo "❌ Tomt svar fra tjekket." >&2; exit 3; }
 
-echo "→ Tjekker GitHub mod $BASE..."
-CHECK="$(curl -s --max-time 120 -X POST -H "X-CC-Token: $TOKEN" "$BASE/api/update/check")"
-[ -n "$CHECK" ] || { echo "❌ Tomt svar fra /api/update/check" >&2; exit 4; }
-echo "   installeret: $(field "$CHECK" current)"
-echo "   nyeste:      $(field "$CHECK" latest)  $(field "$CHECK" message)"
-if [ "$(field "$CHECK" ok)" != "True" ]; then
-    echo "❌ Tjekket fejlede: $(field "$CHECK" error)" >&2
+echo "   installeret: $(printf '%s' "$CHECK" | field current)"
+echo "   nyeste:      $(printf '%s' "$CHECK" | field latest)  $(printf '%s' "$CHECK" | field message)"
+if [ "$(printf '%s' "$CHECK" | field ok)" != "True" ]; then
+    echo "❌ Tjekket fejlede: $(printf '%s' "$CHECK" | field error)" >&2
     exit 4
 fi
-if [ "$(field "$CHECK" behind)" != "True" ]; then
+if [ "$(printf '%s' "$CHECK" | field behind)" != "True" ]; then
     echo "✅ Du kører nyeste version."
     exit 0
 fi
-
 if [ "$MODE" = "check" ]; then
     echo "⬆️  Ny version tilgængelig."
     exit 0
 fi
 
-RESTART=1
-[ "$MODE" = "apply-no-restart" ] && RESTART=0
 echo "→ Henter og skriver filer (DB-backup foerst, requirements installeres hvis de er aendret)..."
-RESULT="$(curl -s --max-time 600 -X POST -H "X-CC-Token: $TOKEN" "$BASE/api/update/apply?restart=$RESTART")"
-[ -n "$RESULT" ] || { echo "❌ Tomt svar fra /api/update/apply" >&2; exit 5; }
+RESULT="$("$PY" -c 'import json;from app import main;print(json.dumps(main.update_apply_sync(), ensure_ascii=False))')"
+[ -n "$RESULT" ] || { echo "❌ Tomt svar fra opdateringen." >&2; exit 5; }
 
-echo "   ok:           $(field "$RESULT" ok)"
-echo "   filer:        $(printf '%s' "$RESULT" | "$PY" -c 'import json,sys;print(len(json.load(sys.stdin).get("files") or []))' 2>/dev/null)"
-echo "   requirements: $(printf '%s' "$RESULT" | "$PY" -c 'import json,sys;d=json.load(sys.stdin).get("requirements_install") or {};print(("OK" if d.get("ok") else "FEJL")+": "+(d.get("output") or "")[:200])' 2>/dev/null)"
-if [ "$(field "$RESULT" ok)" != "True" ]; then
-    echo "❌ Opdateringen fejlede: $(field "$RESULT" error)" >&2
+echo "   ok:           $(printf '%s' "$RESULT" | field ok)"
+echo "   filer:        $(printf '%s' "$RESULT" | count files)"
+echo "   requirements: $(printf '%s' "$RESULT" | req_line)"
+if [ "$(printf '%s' "$RESULT" | field ok)" != "True" ]; then
+    echo "❌ Opdateringen fejlede: $(printf '%s' "$RESULT" | field error)" >&2
     exit 5
 fi
-echo "   genstart:     $(printf '%s' "$RESULT" | "$PY" -c 'import json,sys;r=json.load(sys.stdin).get("restart") or {};print(("planlagt ("+str(r.get("mode"))+")") if r.get("scheduled") else "IKKE planlagt: "+str(r.get("reason")))' 2>/dev/null)"
 
-if [ "$RESTART" = "0" ]; then
+if [ "$MODE" = "apply-no-restart" ]; then
     echo "✅ Filer opdateret. Genstart selv: bash scripts/restart.sh"
     exit 0
 fi
 
+echo "→ Genstarter..."
+bash scripts/restart.sh || { echo "❌ Genstart fejlede - se logs." >&2; exit 6; }
 echo "→ Venter paa at appen svarer igen..."
 for _ in $(seq 1 60); do
     sleep 1

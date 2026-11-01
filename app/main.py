@@ -47,7 +47,7 @@ def load_dotenv(path=None):
     """Laes .env FOER konfigurationen nedenfor - rigtige miljoevariabler vinder.
 
     Inline-kommentarer (`KEY=   # note`) fjernes ogsaa naar python-dotenv bruges, saa en
-    kommentar fra .env-skabelonen ikke ender som vaerdi (fx et JUNO_TOKEN bestaaende af tekst)."""
+    kommentar fra .env-skabelonen ikke ender som vaerdi (fx et GITHUB_TOKEN bestaaende af tekst)."""
     path = path or os.path.join(os.path.dirname(BASE_DIR), ".env")
     if not os.path.exists(path):
         return
@@ -71,10 +71,8 @@ def load_dotenv(path=None):
 load_dotenv()
 
 # --- Konfiguration via miljoevariabler / .env ---
-JUNO_TOKEN = os.environ.get("JUNO_TOKEN", "").strip()        # maskin-noegle til /api/* (valgfri)
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()     # GitHub-token: pull-bro + selv-opdatering
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()     # GitHub-token: opdatering fra GitHub
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "humle93/command-center").strip()
-BRIDGE_POLL_MINUTES = int(os.environ.get("BRIDGE_POLL_MINUTES", "60"))  # hvor ofte CC henter bridge-filer
 AIMLAPI_KEY = os.environ.get("AIMLAPI_KEY", "").strip()      # AI-artikelgenerator (gemini via aimlapi)
 AI_MODEL = os.environ.get("AI_MODEL", "google/gemini-3-8-flash")
 WP_URL = os.environ.get("WP_URL", "").strip()                # fx https://steamgears.eu
@@ -193,30 +191,6 @@ def init_db():
             severity TEXT DEFAULT 'info',
             resolved INTEGER DEFAULT 0,
             created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS gsc_daily (
-            day TEXT PRIMARY KEY,
-            clicks INTEGER,
-            impressions INTEGER,
-            ctr REAL,
-            avg_position REAL
-        );
-        CREATE TABLE IF NOT EXISTS gsc_queries (
-            day TEXT NOT NULL,
-            query TEXT NOT NULL,
-            clicks INTEGER,
-            impressions INTEGER,
-            position REAL,
-            PRIMARY KEY (day, query)
-        );
-        CREATE TABLE IF NOT EXISTS drift (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            checked_at TEXT,
-            orders INTEGER,
-            revenue REAL,
-            woo_status TEXT,
-            checkout_status TEXT,
-            notes TEXT
         );
         CREATE TABLE IF NOT EXISTS seopages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -380,8 +354,6 @@ def create_indexes():
     with get_db() as db:
         for stmt in [
             "CREATE INDEX IF NOT EXISTS idx_seopages_run ON seopages(run_id)",
-            "CREATE INDEX IF NOT EXISTS idx_gsc_daily_day ON gsc_daily(day)",
-            "CREATE INDEX IF NOT EXISTS idx_gsc_q ON gsc_queries(query)",
             "CREATE INDEX IF NOT EXISTS idx_alarms_open ON alarms(resolved, id)",
             "CREATE INDEX IF NOT EXISTS idx_hist_domain ON check_history(domain_id, id)",
             "CREATE INDEX IF NOT EXISTS idx_health_time ON health_history(checked_at)",
@@ -395,7 +367,7 @@ def create_indexes():
 _safe(create_indexes)
 
 
-MODULES = ["domains", "keywords", "ai", "monitors", "social", "links", "bridge", "spy", "wp_push", "telegram", "growth", "autopilot"]
+MODULES = ["domains", "keywords", "ai", "monitors", "social", "links", "spy", "wp_push", "telegram", "growth", "autopilot"]
 
 
 _MODULE_CACHE = {"at": 0.0, "states": {}}
@@ -441,10 +413,9 @@ def cleanup_old_data():
         db.execute("DELETE FROM keyword_ideas WHERE created_at < ?", (cutoff(180),))
 
 
-# ---------- Auth: brugere, sessioner og Juno-token ----------
+# ---------- Auth: brugere og sessioner ----------
 # Dashboardet har rigtige brugere: brugernavn + adgangskode (PBKDF2-SHA256 med salt pr. bruger).
 # Foerste besoeg opretter den foerste bruger via /setup - der er ingen delt token i .env.
-# JUNO_TOKEN findes stadig som maskin-noegle, men giver KUN adgang til /api/* (bridge-push fra Juno).
 SESSION_COOKIE = "cc_session"
 SESSION_MAX_AGE = 60 * 60 * 24 * 30        # 30 dage
 PBKDF2_ITERATIONS = 240_000
@@ -545,14 +516,8 @@ def current_user(request: Request):
 
 
 def is_authed(request: Request) -> bool:
-    """Er kaldet lavet af en logget-ind bruger? (Juno-token haandteres af middlewaren.)"""
+    """Er kaldet lavet af en logget-ind bruger?"""
     return bool(getattr(request.state, "user", None))
-
-
-def is_juno(request: Request) -> bool:
-    """Juno-adgang: separat maskin-noegle, gyldig KUN for /api/*-endpoints."""
-    supplied = request.headers.get("x-cc-token") or ""
-    return bool(JUNO_TOKEN) and secrets.compare_digest(supplied, JUNO_TOKEN)
 
 
 @app.middleware("http")
@@ -567,12 +532,6 @@ async def auth_middleware(request: Request, call_next):
     if request.state.user:
         return await call_next(request)
     if path.startswith("/api/"):
-        if is_juno(request):
-            juno_forbidden = ("/api/bridge", "/api/duplicates", "/api/visibility", "/api/health-history")
-            if request.method != "GET" and any(path.startswith(fp) for fp in juno_forbidden) \
-                    and path not in ("/api/bridge/gsc", "/api/bridge/drift"):
-                return JSONResponse({"error": "juno-token: kun GET eller bridge-push"}, status_code=403)
-            return await call_next(request)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return RedirectResponse("/setup" if user_count() == 0 else "/login", status_code=303)
 
@@ -1375,7 +1334,7 @@ def discover_competitors_sync(keyword: str):
                 if len(found) >= 5:
                     break
         if not found:
-            raise RuntimeError("Ingen resultater (DuckDuckGo blokerede muligvis - proev igen eller brug Juno/SerpAPI)")
+            raise RuntimeError("Ingen resultater (DuckDuckGo blokerede muligvis - proev igen eller brug SerpAPI)")
         with get_db() as db:
             for domain, url in found:
                 info = crawl_competitor(url)
@@ -2146,84 +2105,6 @@ async def resolve_alarm(id: int = Form(...)):
     with get_db() as db:
         db.execute("UPDATE alarms SET resolved=1 WHERE id=?", (id,))
     return RedirectResponse("/", status_code=303)
-
-
-# ---------- Juno-broer (ekstern push af data) ----------
-def ingest_gsc_data(db, data):
-    days = data.get("daily", [])
-    queries = data.get("queries", [])
-    for d in days:
-        db.execute(
-            "INSERT INTO gsc_daily (day, clicks, impressions, ctr, avg_position) VALUES (?,?,?,?,?) "
-            "ON CONFLICT(day) DO UPDATE SET clicks=excluded.clicks, impressions=excluded.impressions, "
-            "ctr=excluded.ctr, avg_position=excluded.avg_position",
-            (d.get("day"), d.get("clicks", 0), d.get("impressions", 0), d.get("ctr", 0), d.get("position", 0)),
-        )
-    for q in queries:
-        db.execute(
-            "INSERT INTO gsc_queries (day, query, clicks, impressions, position) VALUES (?,?,?,?,?) "
-            "ON CONFLICT(day, query) DO UPDATE SET clicks=excluded.clicks, "
-            "impressions=excluded.impressions, position=excluded.position",
-            (data.get("date", date.today().isoformat()), q.get("query", ""), q.get("clicks", 0),
-             q.get("impressions", 0), q.get("position", 0)),
-        )
-    return len(days), len(queries)
-
-
-@app.post("/api/bridge/gsc")
-async def bridge_gsc(request: Request):
-    data = await request.json()
-    if not isinstance(data.get("daily", []), list):
-        raise HTTPException(400, "daily skal vaere en liste")
-    with get_db() as db:
-        days, queries = ingest_gsc_data(db, data)
-    return {"ok": True, "days": days, "queries": queries}
-
-
-def ingest_drift_data(db, data):
-    db.execute(
-        "INSERT INTO drift (checked_at, orders, revenue, woo_status, checkout_status, notes) VALUES (?,?,?,?,?,?)",
-        (now_iso(), data.get("orders"), data.get("revenue"), data.get("woo_status", "ok"),
-         data.get("checkout_status", "ok"), data.get("notes", "")),
-    )
-    if data.get("woo_status") not in (None, "ok", ""):
-        add_alarm(db, "drift", f"Woo-status: {data.get('woo_status')}", "kritisk")
-
-
-@app.post("/api/bridge/drift")
-async def bridge_drift(request: Request):
-    data = await request.json()
-    with get_db() as db:
-        ingest_drift_data(db, data)
-    return {"ok": True}
-
-
-# ---------- Pull-bro: CC henter selv fra GitHub (ingen tunnel noedvendig) ----------
-def pull_bridge_sync():
-    if not GITHUB_TOKEN or not module_on("bridge"):
-        return
-    try:
-        headers = {"Authorization": "Bearer " + GITHUB_TOKEN, "Accept": "application/vnd.github+json"}
-        r = HTTP.get(f"https://api.github.com/repos/{GITHUB_REPO}/contents/bridge/pending", headers=headers, timeout=15)
-        if r.status_code != 200:
-            return
-        for item in r.json():
-            name = item.get("name", "")
-            if not name.endswith(".json"):
-                continue
-            rr = HTTP.get(item.get("url"), headers={"Authorization": "Bearer " + GITHUB_TOKEN, "Accept": "application/vnd.github.raw"}, timeout=15)
-            try:
-                data = jsonlib.loads(rr.text)
-            except Exception:
-                continue
-            with get_db() as db:
-                if name.startswith("gsc-"):
-                    ingest_gsc_data(db, data)
-                elif name.startswith("drift-"):
-                    ingest_drift_data(db, data)
-            HTTP.delete(item.get("url"), headers={"Authorization": "Bearer " + GITHUB_TOKEN}, timeout=15)
-    except Exception:
-        pass
 
 
 # ---------- v7.9 Stabilitet: DB-backup + opstarts-selvtest ----------
@@ -3128,12 +3009,6 @@ async def dashboard(request: Request):
         notes = db.execute("SELECT * FROM notes ORDER BY id DESC LIMIT 10").fetchall()
         keywords = db.execute("SELECT * FROM keywords ORDER BY position IS NULL, position").fetchall()
         alarms = db.execute("SELECT * FROM alarms WHERE resolved=0 ORDER BY id DESC LIMIT 20").fetchall()
-        gsc_days = db.execute("SELECT * FROM gsc_daily ORDER BY day DESC LIMIT 14").fetchall()
-        gsc_queries = db.execute(
-            "SELECT query, SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(position) AS pos "
-            "FROM gsc_queries GROUP BY query ORDER BY clicks DESC LIMIT 10"
-        ).fetchall()
-        drift_rows = db.execute("SELECT * FROM drift ORDER BY id DESC LIMIT 7").fetchall()
         ideas = db.execute("SELECT * FROM keyword_ideas ORDER BY id DESC LIMIT 30").fetchall()
         gaps = db.execute("SELECT * FROM content_gap ORDER BY id DESC LIMIT 5").fetchall()
         outreach_rows = db.execute("SELECT DISTINCT email FROM outreach ORDER BY id DESC LIMIT 30").fetchall()
@@ -3171,9 +3046,6 @@ async def dashboard(request: Request):
         "notes": notes,
         "keywords": keywords,
         "alarms": alarms,
-        "gsc_days": gsc_days,
-        "gsc_queries": gsc_queries,
-        "drift_rows": drift_rows,
         "ai_enabled": bool(AIMLAPI_KEY),
         "wp_enabled": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "serpapi_enabled": bool(SERPAPI_KEY),
@@ -3364,7 +3236,6 @@ async def lifespan(app_: FastAPI):
         scheduler.add_job(job_check_keywords, CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_growth_autopilot, CronTrigger(hour=5, minute=15), id="growth_autopilot", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(cleanup_old_data, CronTrigger(hour=4, minute=30), id="cleanup", replace_existing=True, max_instances=1, coalesce=True)
-        scheduler.add_job(pull_bridge_sync, IntervalTrigger(minutes=BRIDGE_POLL_MINUTES), id="pull_bridge", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_backup_db, CronTrigger(hour=4, minute=40), id="db_backup", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_update_check, CronTrigger(hour=5, minute=0), id="update_check", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_sgap_sync, IntervalTrigger(minutes=30), id="sgap_sync", replace_existing=True, max_instances=1, coalesce=True)

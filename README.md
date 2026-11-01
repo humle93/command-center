@@ -1,5 +1,7 @@
 # Command Center v7.11 PRO
 
+[![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
+
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
 
@@ -28,6 +30,15 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 - 👤 **Brugere** — opret/slet brugere, skift adgangskode; den sidste bruger kan ikke slettes
 - 🚨 **Alarmer** — SSL-udløb, nedetid, brudte links, fejlede scans, nye GitHub-commits; valgfrit Telegram-push
 - 📈 **Historik** — svartid per domæne, site-health og visibility over tid (Chart.js)
+
+## Skærmbilleder
+
+![Cockpit](docs/img/cc-cockpit.png)
+
+Cockpit med opdaterings-panel og alarmer. Login-siden og alle 14 faner ligger i `docs/img/`
+(`cc-login.png`, `cc-cockpit.png` … `cc-notes.png`); billederne er fra v7.8-UI'et, og
+`python3 scripts/screenshots.py` opdaterer dem til den version du kører — se
+[manualens afsnit om screenshots](docs/Command_Center_Bruger_og_Systemmanual.md#opdater-screenshots).
 
 ## Login & opsætning
 

@@ -18,7 +18,7 @@ EOF_REQ
 
 echo "📄 .env.example..."
 cat << 'EOF_ENVDOT' > "$PROJECT_DIR/.env.example"
-# Command Center v7.11 - kopier til .env og udfyld
+# Command Center v7.12 - kopier til .env og udfyld
 # Login: der er ingen token. Foerste besoeg i browseren opretter din bruger (/setup),
 # derefter logger du ind med brugernavn + adgangskode. Brugere styres under fanen "Brugere".
 # Hvor run.sh lytter. 127.0.0.1 = kun denne maskine; 0.0.0.0 = ogsaa fra netvaerket (kraever TLS/proxy).
@@ -193,7 +193,7 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.11.0"
+APP_VERSION = "7.12.0"
 app = FastAPI(title="Command Center Engine", version=APP_VERSION)
 # Git does not keep empty folders, so a fresh clone has no app/static: create it or startup fails.
 os.makedirs(STATIC_DIR, exist_ok=True)
@@ -5185,6 +5185,17 @@ skriver alle filer (inkl. `deploy/nginx-command-center.conf` og `deploy/command-
 - **Backup**: `app/backups/cc-daglig-*.db` (14 gemmes) + `cc-pre-update-*.db` før hver opdatering
 - **Health**: `/health` (200, eller 503 ved kritisk DB/disk-tilstand) viser også månedens API-forbrug
 - **Tests**: `python3 tests/test_v8_features.py` (enhedstests), `bash tests/ci_check.sh` (boot + alle sider + auth + WordPress-bro + link-audit)
+
+## Alarmer (v7.12)
+
+Alarmer går til flere kanaler: **Telegram**, **e-mail** (SMTP), **ntfy** og en **signeret webhook**.
+De sendes ikke inline — de skrives i køen `alert_outbox` og leveres af et job med backoff
+(30 s → 2 min → 10 min → 1 t, maks. 5 forsøg), så en langsom modtager aldrig blokerer appen.
+Ens alarmer dedupliceres inden for `ALERT_DEDUPE_MINUTES`, stille timer (`ALERT_QUIET_HOURS=23-7`)
+udskyder alt under "kritisk" til vinduet slutter, og webhooken signeres efter Standard Webhooks
+(`webhook-id`, `webhook-timestamp`, `webhook-signature: v1,...` = HMAC-SHA256 over
+`id.timestamp.body`). Fanen **Alarmer** viser hvilke kanaler der er sat op, har test-knapper pr.
+kanal og lister fejlede leveringer med årsag og antal forsøg.
 
 ## Dokumentation
 

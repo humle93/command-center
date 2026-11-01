@@ -114,6 +114,8 @@ kørte grønt på `ed97575`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - `README.md`, manualen og arkitektur-dokumentet er skrevet om til v7.11; `docs/Command_Center_Install_Script.md`
   er erstattet af en kort, korrekt side (den gamle var en 1.362-linjers kopi af v6.0-scriptet).
 - `docs/ROADMAP.md` er ny. CI's paritets-trin dækker nu alle 17 indlejrede filer (før 5).
+- `docs/ROADMAP.md` har nu en **dokumentationsoversigt** øverst og et **Endgoal**-afsnit: det
+  langsigtede mål, succeskriteriet og hvilke roadmap-punkter der trækker derhen.
 
 ### Commits
 `d48854e` (v7.11: brugere, opdatering, nginx, rettelser) · `d47a920` (Juno fjernet) ·

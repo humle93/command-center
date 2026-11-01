@@ -5426,8 +5426,8 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 ![Cockpit](docs/img/cc-cockpit.png)
 
 Cockpit med opdaterings-panel og alarmer. Login-siden og alle 14 faner ligger i `docs/img/`
-(`cc-login.png`, `cc-cockpit.png` … `cc-notes.png`); billederne er fra v7.8-UI'et, og
-`python3 scripts/screenshots.py` opdaterer dem til den version du kører — se
+(`cc-login.png`, `cc-cockpit.png` … `cc-notes.png`); billederne er taget med
+`python3 scripts/screenshots.py` mod den kørende app, og samme kommando opdaterer dem — se
 [manualens afsnit om screenshots](docs/Command_Center_Bruger_og_Systemmanual.md#opdater-screenshots).
 
 ## Login & opsætning
@@ -5556,7 +5556,7 @@ og handoff, `AGENTS.md` er de korte regler for agenter.
 - Dashboardet henter Tailwind, Alpine.js og Chart.js fra CDN (login-siden er helt selvstændig). Uden internetadgang ser dashboardet stadig ud, men uden styling/interaktivitet.
 - Opdatering kræver `GITHUB_TOKEN`; ændringer i `requirements.txt` rapporteres men installeres først ved næste `./run.sh`.
 - `install.sh` indeholder kopier af projektets filer (CI tjekker at de matcher); ret derfor altid kildefilerne og kør regen, ikke installeren.
-- Screenshots i `docs/img/` er fra v7.8-UI'et — kør `python3 scripts/screenshots.py` for at opdatere dem til den kørende version.
+- Screenshots i `docs/img/` er taget med `python3 scripts/screenshots.py` mod v7.13.x-UI'et; kør scriptet igen efter større UI-ændringer.
 EOF_README
 
 echo "📄 scripts/smoke_test.sh..."

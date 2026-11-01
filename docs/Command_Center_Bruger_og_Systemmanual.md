@@ -4,7 +4,7 @@ Selv-hostet SEO- og drifts-center til steamgears.eu (FastAPI + SQLite). Alt kør
 
 ![Cockpit](img/cc-cockpit.png)
 
-> Screenshots i `docs/img/` er fra v7.8-UI'et. Funktionaliteten er den samme, men login er nu brugerbaseret, og Cockpit har fået et opdaterings-panel. Vil du have billederne opdateret til den version du kører, så kør `python3 scripts/screenshots.py` mod appen (se "Opdater screenshots" nedenfor).
+> Screenshots i `docs/img/` er taget med `scripts/screenshots.py` mod den kørende version (v7.13.x-UI'et). Kør scriptet igen, når UI'et ændrer sig (se "Opdater screenshots" nedenfor).
 
 ---
 

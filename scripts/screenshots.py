@@ -175,9 +175,14 @@ def main() -> int:
         print("FEJL: %s" % exc, file=sys.stderr)
         return 1
     except PlaywrightError as exc:
-        print("FEJL: Browseren stoppede under optagelsen: %s" % str(exc).splitlines()[0], file=sys.stderr)
+        detail = str(exc).splitlines()[0]
+        print("FEJL: Browseren stoppede under optagelsen: %s" % detail, file=sys.stderr)
         if written:
             print("%d billede(r) blev skrevet foer fejlen." % len(written), file=sys.stderr)
+        if "has been closed" in detail and not os.environ.get("FONTCONFIG_FILE"):
+            print("Tip: crasher browseren straks paa dashboardet (FATAL: SkFontMgr_FontConfigInterface),"
+                  " mangler der fontconfig. Saet FONTCONFIG_FILE til en fonts.conf med mindst én font.",
+                  file=sys.stderr)
         return 1
 
     print("\n%d billede(r) skrevet til %s" % (len(written), out_dir))

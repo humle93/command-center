@@ -151,6 +151,12 @@ kørte grønt på `ed97575`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - Playwright er **ikke** i `requirements.txt` (kun dette script bruger det):
   `pip install playwright && python3 -m playwright install chromium`.
 - Fane-listen i `TABS` skal foelge nav-knapperne i `app/templates/dashboard.html`.
+- Chromium crashede foerst paa dashboardet i denne VM - det er **miljoeet, ikke appen**: der findes
+  intet `/etc/fonts`, saa Skia aborterer med `FATAL: SkFontMgr_FontConfigInterface.cpp:163 Not
+  implemented` (SIGTRAP). Loesning: lav en `fonts.conf` med `<dir>` (DejaVu/Noto) + `<cachedir>` og
+  saet `FONTCONFIG_FILE`/`FONTCONFIG_PATH`. Derefter kan alle 14 faner fotograferes headless.
+- Mangler der en emoji-font i det saet, bliver emoji i UI'et tomme kasser paa billederne. Det er kun
+  kosmetisk - layout og tekst er korrekt.
 
 ### Dokumentation og CI
 - `README.md`, manualen og arkitektur-dokumentet er skrevet om til v7.11; `docs/Command_Center_Install_Script.md`
@@ -210,7 +216,7 @@ springer tjekket over til rene undtagelser.
 - Efter Juno-fjernelsen: ingen GSC-data, og `drift`/`gsc_*`-tabeller kan stadig ligge tomme i en
   eksisterende `center.db` (intet læser eller skriver dem).
 - Systemd-genstartsstien er ikke testet i denne VM (ingen systemd); pidfile-stien er verificeret.
-- `docs/img/`-screenshots er fra v7.8; `python3 scripts/screenshots.py` opdaterer dem (kræver Playwright + Chromium, som ikke er en del af appens requirements).
+- `docs/img/`-screenshots er opdateret med `scripts/screenshots.py` (kræver Playwright + Chromium, som ikke er en del af appens requirements); headless Chromium skal have en `FONTCONFIG_FILE`, se Screenshot-script ovenfor.
 - Opdatering kræver `GITHUB_TOKEN`; et rigtigt tarball-download er ikke afprøvet her.
 
 ## Roadmap (kort — detaljer i `docs/ROADMAP.md`)

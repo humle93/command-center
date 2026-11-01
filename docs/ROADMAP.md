@@ -50,7 +50,7 @@ driftsstabilitet før nye features.
 - **2FA (TOTP)** for brugere, som eksponerer dashboardet mod internettet
 - **Docker-healthcheck + Compose-secrets** i stedet for `.env` i containeren
 - **i18n**: UI-tekster er danske og hardcodede i skabelonerne
-- **Screenshot-opdatering** af `docs/img/` (matcher ikke v7.11-UI) — værktøjet er på plads (`scripts/screenshots.py`), der mangler kun en kørsel mod en kørende app
+- **Screenshot-opdatering** af `docs/img/` — ✅ opdateret med `scripts/screenshots.py` mod v7.13.x-UI'et; kør den igen efter større UI-ændringer
 - **install.sh-afvikling**: undgå de indlejrede filkopier (fx udgiv en zip/tarball eller brug GitHub-opdateringen til første install)
 - **Ekstern overvågning**: valgfri heartbeat til Uptime Kuma/healthchecks.io
 - **SERP-udgiftsprognose**: vis estimeret forbrug for resten af måneden baseret på kørende keywords

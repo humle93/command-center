@@ -57,5 +57,5 @@ driftsstabilitet før nye features.
 
 1. Ret kildefilerne (ikke `install.sh`), og kør:
    `python3 tests/test_v8_features.py && bash tests/ci_check.sh`
-2. Opdater `README.md` og relevante docs i samme ændring — og denne roadmap, hvis noget flytter sig
+2. Opdater `README.md` og relevante docs i samme ændring — og denne roadmap, hvis noget flytter sig **→ v7.12: SMTP, ntfy og signeret webhook + dedupe + stille timer er på plads; mangler Apprise, maintenance windows og digest.**
 3. Ny funktion? Tilføj en test i `tests/test_v8_features.py` (in-process) eller `tests/ci_check.sh` (boot/HTTP)

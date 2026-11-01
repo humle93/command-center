@@ -43,6 +43,27 @@ WP_APP_PASSWORD=
 # Alarmer via Telegram-bot (valgfrit)
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
+# Alarmer: e-mail via SMTP (port 587 = STARTTLS, 465 = SMTP_TLS=ssl). Brug app-adgangskode.
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USER=
+SMTP_PASS=
+SMTP_FROM=
+SMTP_TO=
+SMTP_TLS=starttls
+# Alarmer: ntfy (selvhostet eller ntfy.sh) - emne er i praksis en adgangskode paa ntfy.sh
+NTFY_URL=https://ntfy.sh
+NTFY_TOPIC=
+NTFY_TOKEN=
+# Alarmer: webhook (POST JSON + Standard Webhooks-signatur). Secret: whsec_<base64>
+ALERT_WEBHOOK_URL=
+ALERT_WEBHOOK_SECRET=
+# info | advarsel | kritisk - alarmer under niveauet sendes ikke
+ALERT_MIN_SEVERITY=info
+# Stille timer, fx 23-7 (kun kritiske alarmer slipper igennem; resten udskydes, ikke tabt)
+ALERT_QUIET_HOURS=
+# Ens alarmer inden for dette antal minutter sendes kun én gang
+ALERT_DEDUPE_MINUTES=180
 # Keyword-positioner via SerpAPI
 SERPAPI_KEY=
 TRACK_DOMAIN=steamgears.eu
@@ -95,6 +116,9 @@ import json as jsonlib
 import subprocess
 import sys
 import tarfile
+import base64
+import smtplib
+from email.message import EmailMessage
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data", "center.db")
@@ -148,6 +172,26 @@ TRACK_DOMAIN = os.environ.get("TRACK_DOMAIN", "steamgears.eu").strip()
 SSL_WARN_DAYS = int(os.environ.get("SSL_WARN_DAYS", "30"))
 LINKCHECK_LIMIT = int(os.environ.get("LINKCHECK_LIMIT", "25"))
 PSI_API_KEY = os.environ.get("PSI_API_KEY", "").strip()   # Google PageSpeed API (gratis noegle)
+
+# --- Alarmer: kanaler (v7.12) ---
+# Alarmer sendes aldrig inline: de skrives i alert_outbox og leveres af et job med backoff.
+# Kilder: smtplib (465 = implicit TLS, 587 = STARTTLS), ntfy publish-API (Title/Priority/Tags)
+# og Standard Webhooks (webhook-id/-timestamp/-signature, HMAC-SHA256 over "id.timestamp.body").
+SMTP_HOST = os.environ.get("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587") or 587)
+SMTP_USER = os.environ.get("SMTP_USER", "").strip()
+SMTP_PASS = os.environ.get("SMTP_PASS", "").strip()
+SMTP_FROM = os.environ.get("SMTP_FROM", "").strip() or SMTP_USER
+SMTP_TO = os.environ.get("SMTP_TO", "").strip()
+SMTP_TLS = os.environ.get("SMTP_TLS", "starttls").strip().lower()   # starttls | ssl | none
+NTFY_URL = os.environ.get("NTFY_URL", "https://ntfy.sh").strip().rstrip("/")
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
+NTFY_TOKEN = os.environ.get("NTFY_TOKEN", "").strip()
+ALERT_WEBHOOK_URL = os.environ.get("ALERT_WEBHOOK_URL", "").strip()
+ALERT_WEBHOOK_SECRET = os.environ.get("ALERT_WEBHOOK_SECRET", "").strip()
+ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower()
+ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
+ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
 APP_VERSION = "7.11.0"
 app = FastAPI(title="Command Center Engine", version=APP_VERSION)
@@ -375,6 +419,23 @@ def init_db():
             last_seen TEXT,
             expires_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS alert_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT,
+            alarm_id INTEGER,
+            dedupe_key TEXT,
+            channel TEXT NOT NULL,
+            severity TEXT,
+            subject TEXT,
+            body TEXT,
+            payload TEXT,
+            attempts INTEGER DEFAULT 0,
+            next_attempt_at TEXT,
+            state TEXT DEFAULT 'pending',
+            last_error TEXT,
+            created_at TEXT,
+            sent_at TEXT
+        );
         """)
 
 
@@ -408,6 +469,13 @@ def migrate_db():
             for c in want:
                 if c not in existing:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {c} TEXT")
+        # v7.12: eksisterende installationer faar outbox-tabellen her (init_db rammer kun nye DB'er).
+        db.execute("""CREATE TABLE IF NOT EXISTS alert_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT, alarm_id INTEGER, dedupe_key TEXT,
+            channel TEXT NOT NULL, severity TEXT, subject TEXT, body TEXT, payload TEXT,
+            attempts INTEGER DEFAULT 0, next_attempt_at TEXT, state TEXT DEFAULT 'pending',
+            last_error TEXT, created_at TEXT, sent_at TEXT
+        )""")
 
 
 _safe(migrate_db)
@@ -422,6 +490,8 @@ def create_indexes():
             "CREATE INDEX IF NOT EXISTS idx_health_time ON health_history(checked_at)",
             "CREATE INDEX IF NOT EXISTS idx_crawl_time ON crawl_runs(started_at)",
             "CREATE INDEX IF NOT EXISTS kw_ideas_kw ON keyword_ideas(keyword)",
+            "CREATE INDEX IF NOT EXISTS idx_outbox_due ON alert_outbox(state, next_attempt_at)",
+            "CREATE INDEX IF NOT EXISTS idx_outbox_dedupe ON alert_outbox(dedupe_key, created_at)",
         ]:
             db.execute(stmt)
         db.execute("ANALYZE")
@@ -813,11 +883,16 @@ def now_iso():
 
 
 def add_alarm(db, type_: str, message: str, severity: str = "info"):
-    db.execute(
+    cur = db.execute(
         "INSERT INTO alarms (type, message, severity, created_at) VALUES (?, ?, ?, ?)",
         (type_, message, severity, now_iso()),
     )
-    notify_telegram(f"[{severity.upper()}] {type_}: {message}")
+    # Ingen netvaerkskald her: alarmer koeres i alert_outbox og leveres af et job med backoff,
+    # saa en langsom SMTP/HTTP-modtager eller ntfy ikke blokerer requesten (v7.12).
+    try:
+        enqueue_alert(db, type_, message, severity, alarm_id=cur.lastrowid)
+    except Exception as e:
+        print("[cc] kunne ikke koere alarm:", repr(e), flush=True)
 
 
 def notify_telegram(text: str):
@@ -832,6 +907,250 @@ def notify_telegram(text: str):
         return True
     except Exception:
         return False
+
+
+# ---------- Alarmer: kanaler, outbox, dedupe (v7.12) ----------
+SEVERITY_RANK = {"info": 1, "advarsel": 2, "warning": 2, "kritisk": 3, "critical": 3}
+ALERT_BACKOFF = [30, 120, 600, 3600]   # sekunder foer forsoeg 2..5 - derefter 'failed'
+CHANNEL_LABELS = {"telegram": "Telegram", "email": "E-mail", "ntfy": "ntfy", "webhook": "Webhook"}
+
+
+def alert_channels() -> dict:
+    """Hvilke kanaler er konfigureret lige nu (laeses ved kald, saa .env-aendringer virker)."""
+    try:
+        telegram_on = module_on("telegram")
+    except Exception:
+        telegram_on = True
+    return {
+        "telegram": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID) and telegram_on,
+        "email": bool(SMTP_HOST and SMTP_TO and SMTP_FROM),
+        "ntfy": bool(NTFY_URL and NTFY_TOPIC),
+        "webhook": bool(ALERT_WEBHOOK_URL),
+    }
+
+
+def alert_severity_rank(severity: str) -> int:
+    return SEVERITY_RANK.get((severity or "").strip().lower(), 1)
+
+
+def _parse_quiet_hours(spec: str):
+    m = re.match(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$", spec or "")
+    if not m:
+        return None
+    start, end = int(m.group(1)), int(m.group(2))
+    if not (0 <= start <= 23 and 0 <= end <= 24):
+        return None
+    return start, end
+
+
+def in_quiet_hours(moment: datetime | None = None) -> bool:
+    window = _parse_quiet_hours(ALERT_QUIET_HOURS)
+    if not window:
+        return False
+    hour = (moment or datetime.now()).hour
+    start, end = window
+    if start == end:
+        return False
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end          # fx 23-7 gaar over midnat
+
+
+def quiet_hours_end_iso(moment: datetime | None = None) -> str:
+    """Naeste tidspunkt hvor stille timer slutter - saa en udskudt alarm ikke tabes."""
+    moment = moment or datetime.now()
+    window = _parse_quiet_hours(ALERT_QUIET_HOURS) or (0, 0)
+    end = window[1] % 24
+    target = moment.replace(hour=end, minute=0, second=0, microsecond=0)
+    if target <= moment:
+        target += timedelta(days=1)
+    return target.isoformat(timespec="seconds")
+
+
+def alert_dedupe_key(type_: str, message: str) -> str:
+    return hashlib.sha256(f"{type_}|{message}".strip().lower().encode()).hexdigest()[:32]
+
+
+def enqueue_alert(db, type_: str, message: str, severity: str = "info",
+                  alarm_id: int | None = None, force: bool = False) -> list:
+    """Skriv alarmen i outboxen paa hver konfigureret kanal. Returnerer de koerte kanaler."""
+    if not force and alert_severity_rank(severity) < alert_severity_rank(ALERT_MIN_SEVERITY):
+        return []
+    key = alert_dedupe_key(type_, message)
+    if not force:
+        since = (datetime.now() - timedelta(minutes=max(ALERT_DEDUPE_MINUTES, 1))).isoformat(timespec="seconds")
+        seen = db.execute(
+            "SELECT 1 FROM alert_outbox WHERE dedupe_key=? AND state IN ('pending','sent') AND created_at>=? LIMIT 1",
+            (key, since),
+        ).fetchone()
+        if seen:
+            return []                       # samme alarm er allerede koert inden for vinduet
+    channels = [c for c, on in alert_channels().items() if on]
+    if not channels:
+        return []
+    subject = f"[{severity.upper()}] {type_}"
+    body = f"{type_}: {message}"
+    payload = jsonlib.dumps({"type": type_, "severity": severity, "message": message, "created_at": now_iso()})
+    event_id = secrets.token_urlsafe(18)    # samme id paa alle forsoeg = idempotens-noegle
+    stamp = now_iso()
+    for channel in channels:
+        db.execute(
+            "INSERT INTO alert_outbox (event_id, alarm_id, dedupe_key, channel, severity, subject, body, payload,"
+            " attempts, next_attempt_at, state, created_at) VALUES (?,?,?,?,?,?,?,?,0,?,'pending',?)",
+            (event_id, alarm_id, key, channel, severity, subject, body, payload, stamp, stamp),
+        )
+    return channels
+
+
+def _send_telegram_alert(subject: str, body: str, severity: str) -> tuple:
+    if notify_telegram(f"{subject}\n{body}"):
+        return True, ""
+    return False, "Telegram er ikke konfigureret eller afviste beskeden"
+
+
+def _send_email_alert(subject: str, body: str, severity: str) -> tuple:
+    if not (SMTP_HOST and SMTP_TO and SMTP_FROM):
+        return False, "SMTP_HOST / SMTP_FROM / SMTP_TO mangler"
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = SMTP_FROM
+    msg["To"] = SMTP_TO
+    msg.set_content(body + f"\n\n--\nCommand Center {APP_VERSION}")
+    try:
+        if SMTP_TLS == "ssl":
+            server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15)
+        else:
+            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15)
+        with server as s:
+            s.ehlo()
+            if SMTP_TLS == "starttls":
+                s.starttls(context=ssl.create_default_context())
+                s.ehlo()
+            if SMTP_USER:
+                s.login(SMTP_USER, SMTP_PASS)
+            s.send_message(msg)
+        return True, ""
+    except (smtplib.SMTPException, OSError, TimeoutError) as e:
+        return False, str(e)[:200]
+
+
+def _send_ntfy_alert(subject: str, body: str, severity: str) -> tuple:
+    if not (NTFY_URL and NTFY_TOPIC):
+        return False, "NTFY_URL / NTFY_TOPIC mangler"
+    rank = alert_severity_rank(severity)
+    headers = {
+        "Title": subject,
+        "Priority": "5" if rank >= 3 else ("4" if rank == 2 else "3"),
+        "Tags": "rotating_light" if rank >= 3 else ("warning" if rank == 2 else "information_source"),
+    }
+    if NTFY_TOKEN:
+        headers["Authorization"] = f"Bearer {NTFY_TOKEN}"
+    try:
+        r = HTTP.post(f"{NTFY_URL}/{NTFY_TOPIC}", data=body.encode("utf-8"), headers=headers, timeout=10)
+        r.raise_for_status()
+        return True, ""
+    except Exception as e:
+        return False, str(e)[:200]
+
+
+def _webhook_secret_bytes() -> bytes:
+    raw = (ALERT_WEBHOOK_SECRET or "").strip()
+    if raw.startswith("whsec_"):
+        try:
+            return base64.b64decode(raw[len("whsec_"):])
+        except Exception:
+            pass
+    return raw.encode()
+
+
+def _send_webhook_alert(event_id: str, subject: str, body: str, severity: str, payload: str = "") -> tuple:
+    if not ALERT_WEBHOOK_URL:
+        return False, "ALERT_WEBHOOK_URL mangler"
+    stamp = str(int(time.time()))
+    data = jsonlib.dumps({
+        "type": "alert",
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "data": {"event_id": event_id, "severity": severity, "subject": subject,
+                 "message": body, "source": "command-center", "version": APP_VERSION},
+    }).encode()
+    headers = {"Content-Type": "application/json", "webhook-id": event_id,
+               "webhook-timestamp": stamp, "User-Agent": f"CommandCenter/{APP_VERSION}"}
+    secret = _webhook_secret_bytes()
+    if secret:
+        sig = base64.b64encode(
+            hmac.new(secret, f"{event_id}.{stamp}.".encode() + data, hashlib.sha256).digest()
+        ).decode()
+        headers["webhook-signature"] = f"v1,{sig}"
+    try:
+        r = HTTP.post(ALERT_WEBHOOK_URL, data=data, headers=headers, timeout=15, allow_redirects=False)
+        if 200 <= r.status_code < 300:
+            return True, ""
+        if r.status_code == 410:
+            return False, "HTTP 410 - modtageren er nedlagt (slaa webhooken fra)"
+        return False, f"HTTP {r.status_code}"
+    except Exception as e:
+        return False, str(e)[:200]
+
+
+def deliver_alert_row(row) -> tuple:
+    channel = row["channel"]
+    if channel == "telegram":
+        return _send_telegram_alert(row["subject"], row["body"], row["severity"])
+    if channel == "email":
+        return _send_email_alert(row["subject"], row["body"], row["severity"])
+    if channel == "ntfy":
+        return _send_ntfy_alert(row["subject"], row["body"], row["severity"])
+    if channel == "webhook":
+        return _send_webhook_alert(row["event_id"], row["subject"], row["body"], row["severity"], row["payload"])
+    return False, f"ukendt kanal: {channel}"
+
+
+def drain_alert_outbox(limit: int = 25, ignore_quiet: bool = False) -> dict:
+    """Lever ventende alarmer. Fejl proeves igen med backoff; efter 5 forsoeg markeres 'failed'."""
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT * FROM alert_outbox WHERE state='pending' AND (next_attempt_at IS NULL OR next_attempt_at<=?) "
+            "ORDER BY id LIMIT ?", (now_iso(), limit),
+        ).fetchall()
+    sent = failed = deferred = 0
+    for row in rows:
+        if not ignore_quiet and in_quiet_hours() and alert_severity_rank(row["severity"]) < 3:
+            with get_db() as db:            # udskyd til stille timer slutter - alarmen tabes ikke
+                db.execute("UPDATE alert_outbox SET next_attempt_at=? WHERE id=?", (quiet_hours_end_iso(), row["id"]))
+            deferred += 1
+            continue
+        ok, err = deliver_alert_row(row)
+        with get_db() as db:
+            if ok:
+                db.execute("UPDATE alert_outbox SET state='sent', sent_at=?, last_error=NULL WHERE id=?",
+                           (now_iso(), row["id"]))
+                sent += 1
+            else:
+                attempts = (row["attempts"] or 0) + 1
+                if attempts > len(ALERT_BACKOFF):
+                    db.execute("UPDATE alert_outbox SET attempts=?, state='failed', last_error=? WHERE id=?",
+                               (attempts, err, row["id"]))
+                else:
+                    delay = ALERT_BACKOFF[attempts - 1]
+                    nxt = (datetime.now() + timedelta(seconds=delay)).isoformat(timespec="seconds")
+                    db.execute("UPDATE alert_outbox SET attempts=?, last_error=?, next_attempt_at=? WHERE id=?",
+                               (attempts, err, nxt, row["id"]))
+                failed += 1
+    return {"checked": len(rows), "sent": sent, "failed": failed, "deferred": deferred}
+
+
+def alert_test_sync(channel: str = "all") -> dict:
+    """Send en testalarm med det samme (ignorerer dedupe, minimumsniveau og stille timer)."""
+    message = f"Testalarm fra Command Center {APP_VERSION}"
+    with get_db() as db:
+        queued = enqueue_alert(db, "test", message, "info", force=True)
+        if channel and channel != "all":
+            if channel not in CHANNEL_LABELS:
+                return {"error": f"ukendt kanal: {channel}", "channels": queued}
+            db.execute("DELETE FROM alert_outbox WHERE dedupe_key=? AND channel<>?",
+                       (alert_dedupe_key("test", message), channel))
+            queued = [channel]
+    return {"channels": queued, **drain_alert_outbox(ignore_quiet=True)}
 
 
 # ---------- Domene-tjek ----------
@@ -2223,6 +2542,36 @@ async def check_keywords():
 
 
 # ---------- Alarmer ----------
+@app.post("/alerts/test")
+async def alerts_test(channel: str = Form("all")):
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(executor, alert_test_sync, channel)
+    with get_db() as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_alert_test', ?)",
+                   (jsonlib.dumps({"at": now_iso(), "result": result}),))
+    return RedirectResponse("/", status_code=303)
+
+
+@app.get("/api/alerts/status")
+async def alerts_status():
+    with get_db() as db:
+        counts = {r["state"]: r["n"] for r in
+                  db.execute("SELECT state, COUNT(*) AS n FROM alert_outbox GROUP BY state").fetchall()}
+        problems = db.execute(
+            "SELECT channel, subject, attempts, last_error, created_at FROM alert_outbox "
+            "WHERE last_error IS NOT NULL AND state IN ('pending','failed') ORDER BY id DESC LIMIT 10"
+        ).fetchall()
+    return JSONResponse({
+        "channels": alert_channels(),
+        "min_severity": ALERT_MIN_SEVERITY,
+        "quiet_hours": ALERT_QUIET_HOURS,
+        "quiet_now": in_quiet_hours(),
+        "dedupe_minutes": ALERT_DEDUPE_MINUTES,
+        "outbox": counts,
+        "problems": [dict(p) for p in problems],
+    })
+
+
 @app.post("/alarms/resolve")
 async def resolve_alarm(id: int = Form(...)):
     with get_db() as db:
@@ -3152,6 +3501,12 @@ async def dashboard(request: Request):
         sgap_row = db.execute("SELECT value FROM settings WHERE key='sgap_snapshot'").fetchone()
         users = db.execute("SELECT id, username, created_at FROM users ORDER BY id").fetchall()
         update_row = db.execute("SELECT value FROM settings WHERE key='github_update'").fetchone()
+        alert_outbox = {r["state"]: r["n"] for r in
+                        db.execute("SELECT state, COUNT(*) AS n FROM alert_outbox GROUP BY state").fetchall()}
+        alert_problems = db.execute(
+            "SELECT channel, subject, attempts, last_error FROM alert_outbox "
+            "WHERE last_error IS NOT NULL AND state IN ('pending','failed') ORDER BY id DESC LIMIT 5"
+        ).fetchall()
     active_key = (strategy_row["value"] if strategy_row else None) or DEFAULT_STRATEGY
     if active_key not in STRATEGIES:
         active_key = DEFAULT_STRATEGY
@@ -3173,6 +3528,11 @@ async def dashboard(request: Request):
         "wp_enabled": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "serpapi_enabled": bool(SERPAPI_KEY),
         "telegram_enabled": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+        "alert_channels": alert_channels(),
+        "alert_settings": {"min_severity": ALERT_MIN_SEVERITY, "quiet_hours": ALERT_QUIET_HOURS,
+                           "dedupe_minutes": ALERT_DEDUPE_MINUTES},
+        "alert_outbox": alert_outbox,
+        "alert_problems": alert_problems,
         "current_user": getattr(request.state, "user", None),
         "update_state": update_state,
         "update_token": bool(GITHUB_TOKEN),
@@ -3344,6 +3704,11 @@ async def job_check_domains():
     await loop.run_in_executor(executor, check_all_domains_sync)
 
 
+async def job_drain_alerts():
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(executor, drain_alert_outbox)
+
+
 async def job_check_keywords():
     if not module_on("keywords"):
         return
@@ -3363,6 +3728,7 @@ async def lifespan(app_: FastAPI):
         scheduler.add_job(job_backup_db, CronTrigger(hour=4, minute=40), id="db_backup", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_update_check, CronTrigger(hour=5, minute=0), id="update_check", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_sgap_sync, IntervalTrigger(minutes=30), id="sgap_sync", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_drain_alerts, IntervalTrigger(minutes=1), id="alert_outbox", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.start()
         try:
             executor.submit(startup_selftest_sync)  # v7.9: selvtest ved hver opstart (efter self-update/install)
@@ -4038,6 +4404,39 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                 <p class="text-xs text-zinc-500">Ingen åbne alarmer. 🎉</p>
                 {% endfor %}
             </div>
+        </div>
+
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Kanaler</h2>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+                {% for key, label in [('telegram','Telegram'), ('email','E-mail'), ('ntfy','ntfy'), ('webhook','Webhook')] %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs flex items-center justify-between">
+                    <span class="text-zinc-300">{{ label }}</span>
+                    {% if alert_channels[key] %}<span class="text-emerald-400">● klar</span>{% else %}<span class="text-zinc-500">○ ikke sat</span>{% endif %}
+                </div>
+                {% endfor %}
+            </div>
+            <p class="text-[11px] text-zinc-500 mb-3">
+                Minimumsniveau: <b>{{ alert_settings.min_severity }}</b> · dedupe {{ alert_settings.dedupe_minutes }} min
+                {% if alert_settings.quiet_hours %}· stille timer {{ alert_settings.quiet_hours }} (kun kritiske går igennem){% endif %}
+                {% if alert_outbox %}· {{ alert_outbox.get('pending', 0) }} i kø, {{ alert_outbox.get('sent', 0) }} sendt, {{ alert_outbox.get('failed', 0) }} fejlet{% endif %}
+            </p>
+            <div class="flex flex-wrap gap-2">
+                {% for key, label in [('all','Test alle'), ('email','Test e-mail'), ('ntfy','Test ntfy'), ('webhook','Test webhook'), ('telegram','Test Telegram')] %}
+                <form action="/alerts/test" method="POST">
+                    <input type="hidden" name="channel" value="{{ key }}">
+                    <button class="text-[11px] border px-3 py-1 rounded-lg {% if key == 'all' %}bg-emerald-500/10 text-emerald-400 border-emerald-500/30{% else %}bg-zinc-800 text-zinc-300 border-zinc-700{% endif %}">{{ label }}</button>
+                </form>
+                {% endfor %}
+            </div>
+            <p class="text-[11px] text-zinc-600 mt-3">Sæt kanalerne i <code>.env</code> (SMTP_*, NTFY_*, ALERT_WEBHOOK_URL) og genstart. Alarmer sendes fra en kø med genforsoeg, så en langsom modtager ikke blokerer appen.</p>
+            {% if alert_problems %}
+            <div class="mt-3 space-y-1">
+                {% for p in alert_problems %}
+                <div class="text-[11px] text-rose-300">{{ p.channel }}: {{ p.subject }} — {{ p.last_error }} ({{ p.attempts }} forsøg)</div>
+                {% endfor %}
+            </div>
+            {% endif %}
         </div>
     </section>
 

@@ -657,6 +657,39 @@
                 {% endfor %}
             </div>
         </div>
+
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Kanaler</h2>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+                {% for key, label in [('telegram','Telegram'), ('email','E-mail'), ('ntfy','ntfy'), ('webhook','Webhook')] %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs flex items-center justify-between">
+                    <span class="text-zinc-300">{{ label }}</span>
+                    {% if alert_channels[key] %}<span class="text-emerald-400">● klar</span>{% else %}<span class="text-zinc-500">○ ikke sat</span>{% endif %}
+                </div>
+                {% endfor %}
+            </div>
+            <p class="text-[11px] text-zinc-500 mb-3">
+                Minimumsniveau: <b>{{ alert_settings.min_severity }}</b> · dedupe {{ alert_settings.dedupe_minutes }} min
+                {% if alert_settings.quiet_hours %}· stille timer {{ alert_settings.quiet_hours }} (kun kritiske går igennem){% endif %}
+                {% if alert_outbox %}· {{ alert_outbox.get('pending', 0) }} i kø, {{ alert_outbox.get('sent', 0) }} sendt, {{ alert_outbox.get('failed', 0) }} fejlet{% endif %}
+            </p>
+            <div class="flex flex-wrap gap-2">
+                {% for key, label in [('all','Test alle'), ('email','Test e-mail'), ('ntfy','Test ntfy'), ('webhook','Test webhook'), ('telegram','Test Telegram')] %}
+                <form action="/alerts/test" method="POST">
+                    <input type="hidden" name="channel" value="{{ key }}">
+                    <button class="text-[11px] border px-3 py-1 rounded-lg {% if key == 'all' %}bg-emerald-500/10 text-emerald-400 border-emerald-500/30{% else %}bg-zinc-800 text-zinc-300 border-zinc-700{% endif %}">{{ label }}</button>
+                </form>
+                {% endfor %}
+            </div>
+            <p class="text-[11px] text-zinc-600 mt-3">Sæt kanalerne i <code>.env</code> (SMTP_*, NTFY_*, ALERT_WEBHOOK_URL) og genstart. Alarmer sendes fra en kø med genforsoeg, så en langsom modtager ikke blokerer appen.</p>
+            {% if alert_problems %}
+            <div class="mt-3 space-y-1">
+                {% for p in alert_problems %}
+                <div class="text-[11px] text-rose-300">{{ p.channel }}: {{ p.subject }} — {{ p.last_error }} ({{ p.attempts }} forsøg)</div>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
     </section>
 
     <!-- AI TOOLS -->

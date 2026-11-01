@@ -129,3 +129,24 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 - **v7.8** — SEO-strategi-vælger med pre-flight-tjek
 - **v7.7** — Growth Pack (autopilot, backlink-prospector, keyword-ideer, visibility)
 - **v7.5–7.6** — pull-bro, selv-opdatering (senere erstattet), performance (WAL, pooling, gzip)
+
+
+## 13. Alarmer og outbox (v7.12)
+
+`add_alarm()` skriver alarmen i `alarms` og kalder `enqueue_alert()`, som lægger én række pr.
+konfigureret kanal i `alert_outbox` (telegram, email, ntfy, webhook). Der laves ingen
+netværkskald i request-stien. `job_drain_alerts` kører hvert minut og leverer ventende rækker:
+
+- **Dedupe:** nøgle = `sha256(type|message)`; en identisk alarm inden for `ALERT_DEDUPE_MINUTES`
+  køres ikke igen (uanset kanal).
+- **Stille timer:** `in_quiet_hours()` læser `ALERT_QUIET_HOURS` (fx `23-7`, også over midnat).
+  Alt under "kritisk" udskydes til `quiet_hours_end_iso()` — det tabes ikke.
+- **Backoff:** `ALERT_BACKOFF = [30, 120, 600, 3600]`; efter 5 forsøg markeres rækken `failed`
+  med `last_error`, og fejlen vises i UI'et.
+- **Webhook:** POST med `webhook-id` (samme på alle forsøg = idempotens), `webhook-timestamp` og
+  `webhook-signature: v1,<base64 HMAC-SHA256>` over `"{id}.{timestamp}.{body}"`, secret som
+  `whsec_<base64>` (Standard Webhooks). 2xx = leveret, 410 = modtageren er nedlagt.
+- **E-mail:** `smtplib` med `SMTP_TLS=starttls` (587) eller `ssl` (465), 15 s timeout, app-adgangskode.
+
+Status findes på `GET /api/alerts/status` (kanaler, kø, problemer) og test på `POST /alerts/test`
+(`channel=all|email|ntfy|webhook|telegram`).

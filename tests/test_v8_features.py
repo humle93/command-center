@@ -1,6 +1,7 @@
 """In-process tests for the v8-plan features: quality gate, API budget guard, /health.
 Usage: python3 tests/test_v8_features.py   (from the repo root, requirements installed)"""
-import os, sys, shutil, threading, json, io, tarfile, tempfile
+import os, sys, shutil, threading, json, io, tarfile, tempfile, base64, hmac, hashlib
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -22,6 +23,13 @@ WORDS = "brass goggles " * 40
 
 class Ok(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
+    hits = []
+    def do_POST(self):
+        n = int(self.headers.get("content-length") or 0)
+        body = self.rfile.read(n)
+        Ok.hits.append({"path": self.path, "body": body, "headers": dict(self.headers)})
+        self.send_response(500 if self.path.startswith("/hookfail") else 200)
+        self.send_header("content-length", "0"); self.end_headers()
     def do_GET(self):
         pages = {
             "/": "<html><head><title>Hjem</title></head><body><h1>Hjem</h1><p>" + WORDS + '</p><a href="/a">a</a></body></html>',
@@ -195,6 +203,70 @@ check("tasks: every estimate has a label and a positive duration",
       bool(main.TASK_ESTIMATES)
       and all(v.get("label") and int(v.get("seconds", 0)) > 0 for v in main.TASK_ESTIMATES.values())
       and all(k.startswith("/") for k in main.TASK_ESTIMATES), len(main.TASK_ESTIMATES))
+
+# --- alarmer: kanaler, outbox, dedupe, signatur, backoff og stille timer (v7.12) ---
+main.API_BUDGETS["serpapi"] = ("", 0)          # budget-guarden er testet ovenfor
+main.TELEGRAM_BOT_TOKEN = main.TELEGRAM_CHAT_ID = ""
+main.SMTP_HOST = main.SMTP_TO = main.SMTP_FROM = ""
+main.NTFY_TOPIC = ""
+main.ALERT_WEBHOOK_URL = f"http://127.0.0.1:{port}/hook"
+main.ALERT_WEBHOOK_SECRET = "whsec_" + base64.b64encode(b"test-secret").decode()
+main.ALERT_MIN_SEVERITY, main.ALERT_QUIET_HOURS = "info", ""
+with main.get_db() as db:
+    db.execute("DELETE FROM alert_outbox"); db.execute("DELETE FROM alarms")
+    queued = main.enqueue_alert(db, "test-kanal", "webhook virker", "advarsel")
+check("alerts: kun konfigurerede kanaler koeres", queued == ["webhook"], queued)
+res = main.drain_alert_outbox()
+check("alerts: webhook leveres", res["sent"] == 1 and bool(Ok.hits), res)
+hit = Ok.hits[-1]
+expect = "v1," + base64.b64encode(hmac.new(
+    b"test-secret",
+    f'{hit["headers"]["webhook-id"]}.{hit["headers"]["webhook-timestamp"]}.'.encode() + hit["body"],
+    hashlib.sha256).digest()).decode()
+check("alerts: signaturen foelger standard-webhooks (HMAC over id.timestamp.body)",
+      hit["headers"].get("webhook-signature") == expect)
+check("alerts: payload har type/timestamp/data med event_id",
+      b'"type": "alert"' in hit["body"] and b'"data"' in hit["body"] and b'"event_id"' in hit["body"],
+      hit["body"][:120])
+
+with main.get_db() as db:
+    db.execute("DELETE FROM alert_outbox")
+    first = main.enqueue_alert(db, "pris", "pris steget", "advarsel")
+    second = main.enqueue_alert(db, "pris", "pris steget", "advarsel")
+check("alerts: identisk alarm inden for dedupe-vinduet koeres en gang",
+      first == ["webhook"] and second == [], (first, second))
+
+with main.get_db() as db:
+    db.execute("DELETE FROM alert_outbox")
+main.ALERT_WEBHOOK_URL = f"http://127.0.0.1:{port}/hookfail"
+with main.get_db() as db:
+    main.enqueue_alert(db, "fejl", "500 fra modtager", "info")
+res = main.drain_alert_outbox()
+with main.get_db() as db:
+    row = db.execute("SELECT * FROM alert_outbox").fetchone()
+check("alerts: fejlende modtager proeves igen med backoff (ikke tabt)",
+      res["failed"] == 1 and row["state"] == "pending" and row["attempts"] == 1
+      and row["next_attempt_at"] > row["created_at"], dict(row))
+
+main.ALERT_WEBHOOK_URL = f"http://127.0.0.1:{port}/hook"
+main.ALERT_QUIET_HOURS = f"{datetime.now().hour}-{(datetime.now().hour + 1) % 24}"
+with main.get_db() as db:
+    db.execute("DELETE FROM alert_outbox")
+    main.enqueue_alert(db, "stille", "info om natten", "info")
+before = len(Ok.hits)
+res = main.drain_alert_outbox()
+check("alerts: stille timer udskyder ikke-kritiske alarmer i stedet for at tabe dem",
+      res["deferred"] == 1 and len(Ok.hits) == before, res)
+main.ALERT_QUIET_HOURS = ""
+
+ok, err = main._send_email_alert("x", "y", "info")
+check("alerts: manglende SMTP-felter forklares", ok is False and "SMTP" in err, err)
+
+with main.get_db() as db:
+    db.execute("DELETE FROM alert_outbox")
+    main.add_alarm(db, "test", "alarm via add_alarm", "advarsel")
+    n = db.execute("SELECT COUNT(*) FROM alert_outbox").fetchone()[0]
+check("alerts: add_alarm kun koer (ingen blokerende HTTP i request-stien)", n == 1, n)
 
 srv.shutdown()
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)

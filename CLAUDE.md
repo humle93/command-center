@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 1. november 2026 · **Version:** 7.11.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 1. november 2026 · **Version:** 7.12.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -75,6 +75,18 @@ kørte grønt på `ed97575`. CI tjekker desuden at alle 17 indlejrede filer i `i
   Cockpit-kortet "Daglig drift (pushet fra Juno)" og skemaet for `drift`, `gsc_daily`, `gsc_queries`.
 - Tilbage: kun WordPress-broen (Steamgears Autopilot, `sgap/v1`) — den er **ikke** Juno.
 - Konsekvens: der er **ingen Google Search Console-data** længere. Det er roadmap-punkt 1.
+
+### Alarmer og outbox (v7.12)
+- `add_alarm` sender ikke længere inline til Telegram: alarmen skrives i `alert_outbox` pr. kanal
+  (telegram/e-mail/ntfy/webhook) og leveres af `job_drain_alerts` hvert minut.
+- Dedupe pr. `sha256(type|message)` i `ALERT_DEDUPE_MINUTES`; stille timer udskyder alt under
+  "kritisk"; backoff 30 s → 2 min → 10 min → 1 t, derefter `failed` + synlig fejl i UI.
+- Webhook signeres efter Standard Webhooks (`webhook-id`, `webhook-timestamp`,
+  `webhook-signature: v1,...`), e-mail via `smtplib` (STARTTLS/SSL, 15 s timeout).
+- UI: fanen **Alarmer** viser kanaler, test-knapper (`POST /alerts/test`) og fejlede leveringer;
+  status som JSON på `GET /api/alerts/status`.
+- Nye tests i `tests/test_v8_features.py` dækker kanalvalg, signatur, dedupe, backoff, stille timer
+  og at `add_alarm` ikke laver HTTP.
 
 ### Dokumentation og CI
 - `README.md`, manualen og arkitektur-dokumentet er skrevet om til v7.11; `docs/Command_Center_Install_Script.md`

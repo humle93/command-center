@@ -87,6 +87,17 @@ skriver alle filer (inkl. `deploy/nginx-command-center.conf` og `deploy/command-
 - **Health**: `/health` (200, eller 503 ved kritisk DB/disk-tilstand) viser også månedens API-forbrug
 - **Tests**: `python3 tests/test_v8_features.py` (enhedstests), `bash tests/ci_check.sh` (boot + alle sider + auth + WordPress-bro + link-audit)
 
+## Alarmer (v7.12)
+
+Alarmer går til flere kanaler: **Telegram**, **e-mail** (SMTP), **ntfy** og en **signeret webhook**.
+De sendes ikke inline — de skrives i køen `alert_outbox` og leveres af et job med backoff
+(30 s → 2 min → 10 min → 1 t, maks. 5 forsøg), så en langsom modtager aldrig blokerer appen.
+Ens alarmer dedupliceres inden for `ALERT_DEDUPE_MINUTES`, stille timer (`ALERT_QUIET_HOURS=23-7`)
+udskyder alt under "kritisk" til vinduet slutter, og webhooken signeres efter Standard Webhooks
+(`webhook-id`, `webhook-timestamp`, `webhook-signature: v1,...` = HMAC-SHA256 over
+`id.timestamp.body`). Fanen **Alarmer** viser hvilke kanaler der er sat op, har test-knapper pr.
+kanal og lister fejlede leveringer med årsag og antal forsøg.
+
 ## Dokumentation
 
 Kodeændringer kræver dokumentation i samme commit: `README.md` plus den relevante fil i `docs/`

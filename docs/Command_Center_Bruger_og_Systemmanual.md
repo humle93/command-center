@@ -195,3 +195,25 @@ bash install.sh
 ```
 
 Scriptet selv-installerer (venv, deps, `.env`-skabelon, nginx-config, systemd-unit) og er idempotent.
+
+
+## Alarmer og kanaler (v7.12)
+
+Alarmer (døde domæner, ændrede priser, fejlede keyword-tjek, budgetloft, strategi-mangler) sendes nu
+til de kanaler du sætter i `.env`:
+
+| Kanal | Variabler |
+|---|---|
+| Telegram | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` |
+| E-mail | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_TO`, `SMTP_TLS` |
+| ntfy | `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN` |
+| Webhook | `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_SECRET` |
+
+`ALERT_MIN_SEVERITY` (info/advarsel/kritisk) filtrerer støj, `ALERT_QUIET_HOURS=23-7` holder
+ikke-kritiske alarmer væk om natten, og `ALERT_DEDUPE_MINUTES` (standard 180) sikrer at den samme
+alarm ikke spammer. Genstart efter ændringer. Under fanen **Alarmer** ser du hvilke kanaler der er
+aktive, kan sende en testalarm pr. kanal, og se hvorfor en levering eventuelt fejlede — appen prøver
+automatisk igen med stigende interval i op til fem forsøg.
+
+E-mail kræver en app-adgangskode (Google/Fastmail), ikke din normale adgangskode.
+Webhooken kan verificeres med `webhook-signature`-headeren, hvis modtageren kender hemmeligheden.

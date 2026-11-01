@@ -1,9 +1,8 @@
-from fastapi import FastAPI, Request, Form, Header
+from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, PlainTextResponse
 from fastapi import Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi import HTTPException
 from fastapi.middleware.gzip import GZipMiddleware
 from contextlib import contextmanager, asynccontextmanager
 from urllib.parse import urlparse
@@ -30,7 +29,6 @@ import hashlib
 import hmac
 import json as jsonlib
 import subprocess
-import sys
 import tarfile
 import base64
 import smtplib
@@ -109,10 +107,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.13.0"
+APP_VERSION = "7.13.1"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.13.1", "Oprydning: doede importer og variabler fjernet, Juno-tabelrester droppes naar de er tomme"),
     ("7.13.0", "Login viser IP og en koerselsrapport; opstart skriver version og nyheder"),
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
@@ -415,7 +414,6 @@ _safe(init_db)
 
 def migrate_db():
     with get_db() as db:
-        cols = {}
         for table, want in {
             "articles": ["meta_title", "meta_desc"],
             "seopages": ["content_hash", "redirects"],
@@ -431,6 +429,16 @@ def migrate_db():
         db.execute("""CREATE TABLE IF NOT EXISTS login_attempts (
             id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, ip TEXT, ok INTEGER DEFAULT 0, created_at TEXT
         )""")
+        # v7.13: ryd tabelrester fra Juno-tiden - kun hvis de er tomme, saa data aldrig gaar tabt.
+        for retired in ("drift", "gsc_daily", "gsc_queries"):
+            try:
+                exists = db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (retired,)
+                ).fetchone()
+                if exists and db.execute(f"SELECT COUNT(*) FROM {retired}").fetchone()[0] == 0:
+                    db.execute(f"DROP TABLE {retired}")
+            except Exception:
+                pass
         # v7.12: eksisterende installationer faar outbox-tabellen her (init_db rammer kun nye DB'er).
         db.execute("""CREATE TABLE IF NOT EXISTS alert_outbox (
             id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT, alarm_id INTEGER, dedupe_key TEXT,

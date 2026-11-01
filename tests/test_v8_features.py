@@ -314,6 +314,19 @@ hb = TestClient(main.app).get("/health").json()
 check("health: nyheder og opstartstid er med",
       hb.get("newest") and len(hb["newest"]) >= 1 and "started_at" in hb, (hb.get("newest"), hb.get("started_at")))
 
+# --- oprydning: tomme Juno-tabelrester droppes, tabeller med data beholdes (v7.13.1) ---
+with main.get_db() as db:
+    for t in ("drift", "gsc_daily", "gsc_queries"):
+        db.execute(f"CREATE TABLE IF NOT EXISTS {t} (id INTEGER PRIMARY KEY, x TEXT)")
+    db.execute("INSERT INTO gsc_queries (x) VALUES ('behold')")
+main.migrate_db()
+with main.get_db() as db:
+    names = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    kept = db.execute("SELECT COUNT(*) FROM gsc_queries").fetchone()[0]
+check("oprydning: tomme Juno-tabeller droppes, tabeller med data beholdes",
+      "drift" not in names and "gsc_daily" not in names and "gsc_queries" in names and kept == 1,
+      (sorted(n for n in names if n.startswith(("drift", "gsc"))), kept))
+
 srv.shutdown()
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)
 print("ALL PASS" if not FAILED else f"{len(FAILED)} FAILED")

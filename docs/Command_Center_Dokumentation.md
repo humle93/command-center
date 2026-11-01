@@ -163,3 +163,18 @@ Status findes på `GET /api/alerts/status` (kanaler, kø, problemer) og test på
   hop af `X-Forwarded-For` og falder tilbage til socket-adressen.
 - `last_run_report()` giver login-siden et bevidst minimalt overblik (ingen alarmtekster eller
   brugernavne, fordi `/login` er offentlig).
+
+
+## 15. Oprydning (v7.13.1)
+
+Gennemgang med AST: 107 ikke-rute-funktioner, alle refereret mindst to steder - der var ingen døde
+funktioner tilbage efter Juno-fjernelsen. `/api/history/{domain_id}` ser ubrugt ud i en ren
+tekstsøgning, men kaldes fra dashboardets JS (`fetch('/api/history/' + domainId)`), så den bliver.
+
+Fjernet: ubrugte importer (`Header`, `HTTPException`, `sys`) og den døde lokale `cols = {}` i
+`migrate_db`. Tilføjet: `migrate_db` dropper `drift`, `gsc_daily` og `gsc_queries` fra Juno-tiden,
+men **kun hvis de er tomme** - en tabel med data røres aldrig.
+
+De 35 `run_in_executor`-kald er bevidst ikke slået sammen til en hjælpefunktion: mønstret varierer
+(await, tildeling, fire-and-forget, `loop2`), og en mekanisk omskrivning ville være kosmetisk churn
+med risiko for at stall'e event-loopet. Det er dokumenteret her, så det ikke bliver "opdaget" igen.

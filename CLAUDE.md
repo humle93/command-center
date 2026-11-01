@@ -104,6 +104,12 @@ kørte grønt på `ed97575`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - Nye formular-actions der tager mere end ~5 s skal have en `TASK_ESTIMATES`-post (label + seconds),
   ellers kører de uden fremdrift. Crud-handlinger og `/alarms/resolve` er undtaget.
 
+### Oprydning (v7.13.1)
+- AST-gennemgang: ingen døde funktioner. `/api/history/{domain_id}` bruges af dashboardets JS.
+- Fjernet: `Header`/`HTTPException`/`sys`-importer og `cols = {}` i `migrate_db`.
+- `migrate_db` dropper nu `drift`/`gsc_daily`/`gsc_queries` **kun hvis de er tomme**.
+- `run_in_executor`-mønstret (35 steder) er bevidst ikke refaktoreret - se arkitektur §15.
+
 ### Dokumentation og CI
 - `README.md`, manualen og arkitektur-dokumentet er skrevet om til v7.11; `docs/Command_Center_Install_Script.md`
   er erstattet af en kort, korrekt side (den gamle var en 1.362-linjers kopi af v6.0-scriptet).

@@ -38,6 +38,10 @@ Fanerne er nummereret i den rækkefølge, et normalt arbejdsflow bruger dem.
 - **"Sådan bruger du Command Center"**: 4 klikbare trin gennem workflowet
 - Alarmer og noter
 
+### Fremdrift på opgaver
+
+Alle tunge handlinger viser et lille kort nederst til højre med timer, procent og forventet resttid ("~20 s igen"). Crawl viser de rigtige tal (sider/total + ETA) fra `/api/crawl/status`, mens de øvrige bruger estimater fra `TASK_ESTIMATES` i `app/main.py`. Tunge formularer viser en kvittering ("… færdig på 14 s"), når siden er genindlæst.
+
 ### 2. SEO & Audit
 
 - **Deep audit** af en enkelt side (RankMath-stil): titel, meta, H1-struktur, alt-tekster, intern link-tæthed, Core Web Vitals (hvis `PSI_API_KEY` er sat). Score 0-100 + "AI-rewrite titel/meta"

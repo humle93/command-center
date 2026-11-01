@@ -76,6 +76,7 @@ Alle queries er parameteriserede. `settings` bruges til små tilstande (JSON), s
 - Crawleren følger samme-host-links, gemmer `content_hash` (ændret indhold), `redirects` (kæder/loops) og validerer op til 50 sitemap-URL'er
 - Der gemmes **to** crawl-runs: det nye og det forrige, så `/api/crawl/diff` kan sammenligne. Dashboard, duplikat-rapport, redirect-audit og link-forslag læser kun den seneste run
 - Ikke-200-sider analyseres uden at hente dem igen (HTML videregives)
+- Under crawl rapporterer `/api/crawl/status` `percent`, `eta_seconds` og `elapsed_seconds` (beregnet i `crawl_progress()`); dashboardet poller den og viser fremdrift. Øvrige tunge opgaver bruger estimaterne i `TASK_ESTIMATES`
 
 ## 7. Indhold og kvalitetsgate
 

@@ -61,6 +61,8 @@ check "auth: login sets a session" "$(curl -s -o /dev/null -w '%{http_code}' -b 
 curl -s -o /dev/null -b "$TMP/jar2" -c "$TMP/jar2" $U/logout
 check "auth: logout ends the session" "$(curl -s -o /dev/null -w '%{http_code}' -b "$TMP/jar2" $U/)" "303"
 
+check "ui: task progress card is rendered" "$(curl -s -b "$JAR" $U/ | grep -c 'id="cc-task"')" "1"
+check "ui: crawl status exposes percent and ETA" "$(curl -s -b "$JAR" $U/api/crawl/status | python3 -c 'import json,sys;d=json.load(sys.stdin);print("percent" in d and "eta_seconds" in d and "elapsed_seconds" in d)')" "True"
 check "no Python tracebacks" "$(grep -c Traceback "$TMP/cc.log")" "0"
 [ "$FAIL" = 0 ] && echo "ALL PASS" || { echo "SOME FAILED"; tail -40 "$TMP/cc.log"; }
 exit $FAIL

@@ -91,6 +91,7 @@ Artikel-forhåndsvisningen i dashboardet vises med saniteret HTML: kun formateri
 ### 7. Social
 
 - **Steamgears Autopilot**: kø, kladder der venter på godkendelse, og udgivet/klik/ordrer/omsætning pr. kanal (30 dage). "→ Autopilot" sender et opslag som kladde til WordPress-pluginnet
+- **Kun én kladde pr. opslag**: rækken låses før kaldet til WordPress. Et dobbeltklik eller et genforsøg sender derfor intet ekstra, og status skifter til "sender til autopilot" mens kaldet kører. Afviser WordPress kaldet, får opslaget sin gamle status tilbage og kan sendes igen. Svarer WordPress slet ikke (timeout), bliver status "sendt? (svar udeblev)" med en alarm — tjek AI Drafts i WordPress, før du sender igen
 - **Planlagt tid**: vælg et tidspunkt i feltet under opslaget. Det viser zonen (`CC_TZ`, standard Europe/Copenhagen), og tiden gemmes både som lokal tid og UTC. "→ Autopilot" sender begge med, så tjenesten og Android-klienten ikke skal gætte. En tid der ikke findes (fx 02:30 den nat sommertiden starter) **afvises** med en alarm i stedet for at blive gættet
 - Opslagskø med CSV-export (kolonner for både lokal tid og UTC + zone)
 

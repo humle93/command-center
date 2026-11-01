@@ -46,6 +46,11 @@ check "bridge: dashboard shows panel" "$(curl -s -b "$JAR" $U/ | grep -c 'Kladde
 curl -s -o /dev/null -b "$JAR" -X POST $U/social/add -d platform=X -d message=Hello
 curl -s -o /dev/null -b "$JAR" -X POST $U/social/to-autopilot -d id=1
 check "bridge: social post sent as draft" "$(q "SELECT status FROM socialqueue WHERE id=1")" "sendt til autopilot (kladde #1)"
+
+curl -s -o /dev/null -b "$JAR" -X POST $U/social/to-autopilot -d id=1
+DRAFTS=$(curl -s -u 'admin:app pass' http://127.0.0.1:8770/wp-json/sgap/v1/drafts | grep -o '"id":' | wc -l | tr -d ' ')
+check "bridge: genforsoeg sender ikke kladden igen" "$DRAFTS" "1"
+check "bridge: status er uaendret efter genforsoeg" "$(q "SELECT status FROM socialqueue WHERE id=1")" "sendt til autopilot (kladde #1)"
 echo 404 > "$TMP/state"
 curl -s -o /dev/null -b "$JAR" -X POST $U/autopilot/sync
 curl -s -o /dev/null -b "$JAR" -X POST $U/autopilot/sync

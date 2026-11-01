@@ -2522,6 +2522,25 @@ def sgap_error_text(exc: Exception) -> str:
     return f"Autopilot-pluginnet svarer ikke: {exc}"
 
 
+# Idempotens for "-> Autopilot": statusfeltet er laasen. Samme opslag maa kun give EN kladde,
+# ogsaa hvis brugeren dobbeltklikker eller proever igen efter et tabt svar.
+SOCIAL_SENT = "sendt til autopilot"
+SOCIAL_SENDING = "sender til autopilot"
+SOCIAL_UNCERTAIN = "sendt? (svar udeblev)"
+
+
+def social_claim(db, post_id: int) -> bool:
+    """Atomisk laas paa raekken: True kun hvis opslaget hverken er sendt eller undervejs."""
+    cur = db.execute(
+        """UPDATE socialqueue SET status = ?
+           WHERE id = ?
+             AND COALESCE(status, '') NOT LIKE ?
+             AND COALESCE(status, '') NOT IN (?, ?)""",
+        (SOCIAL_SENDING, post_id, SOCIAL_SENT + "%", SOCIAL_SENDING, SOCIAL_UNCERTAIN),
+    )
+    return cur.rowcount == 1
+
+
 def sgap_snapshot() -> dict:
     with get_db() as db:
         row = db.execute("SELECT value FROM settings WHERE key='sgap_snapshot'").fetchone()
@@ -2585,7 +2604,7 @@ async def social_to_autopilot(id: int = Form(...)):
     """Send et opslag fra CC's sociale koe til pluginnet som AI-kladde (godkendes i WordPress)."""
     with get_db() as db:
         post = db.execute(
-            "SELECT platform, message, scheduled_at, scheduled_at_utc FROM socialqueue WHERE id=?", (id,)
+            "SELECT platform, message, status, scheduled_at, scheduled_at_utc FROM socialqueue WHERE id=?", (id,)
         ).fetchone()
     if not post:
         return RedirectResponse("/", status_code=303)
@@ -2598,16 +2617,33 @@ async def social_to_autopilot(id: int = Form(...)):
     message = post["message"].strip()
     title = message.split("\n", 1)[0][:90]
 
+    # Laas raekken FOER kaldet. Uden laasen giver et dobbeltklik - eller et genforsoeg efter et
+    # tabt svar - to kladder i WordPress til det samme opslag.
+    with get_db() as db:
+        if not social_claim(db, id):
+            return RedirectResponse("/", status_code=303)
+
     def send():
         return sgap_api("POST", "/drafts", json=social_payload(post, channel, title, message))
 
     try:
         result = await asyncio.get_running_loop().run_in_executor(executor, send)
         with get_db() as db:
-            db.execute("UPDATE socialqueue SET status=? WHERE id=?", (f"sendt til autopilot (kladde #{result.get('id')})", id))
+            db.execute("UPDATE socialqueue SET status=? WHERE id=?", (f"{SOCIAL_SENT} (kladde #{result.get('id')})", id))
     except Exception as e:
+        # Svar fra WordPress = kladden blev ikke oprettet -> slip raekken, saa den kan sendes igen.
+        # Timeout/forbindelsesfejl = vi ved ikke om den blev oprettet -> bloker for gensend.
+        uncertain = isinstance(e, (requests.exceptions.Timeout, requests.exceptions.ConnectionError))
         with get_db() as db:
-            add_alarm(db, "autopilot", "Kunne ikke sende opslag: " + sgap_error_text(e), "advarsel")
+            db.execute("UPDATE socialqueue SET status=? WHERE id=?",
+                       (SOCIAL_UNCERTAIN if uncertain else (post["status"] or ""), id))
+            if uncertain:
+                add_alarm(db, "autopilot",
+                          f"Opslaget blev sendt, men svaret udeblev ({sgap_error_text(e)}). "
+                          "Tjek AI Drafts i WordPress foer du sender igen",
+                          "advarsel")
+            else:
+                add_alarm(db, "autopilot", "Kunne ikke sende opslag: " + sgap_error_text(e), "advarsel")
     return RedirectResponse("/", status_code=303)
 
 

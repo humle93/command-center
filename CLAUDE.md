@@ -141,6 +141,18 @@ kørte grønt på `ed97575`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - Ikke-eksisterende sommertid afvises; tvetydig tid giver foerste forekomst (`fold=0`). Testene daekker
   baade 29/3 og 25/10 2026.
 - Zonen er `CC_TZ` (standard Europe/Copenhagen). Ukendt zone falder tilbage, den crasher ikke.
+### Idempotens paa Autopilot-broen (v7.14.1)
+- `/social/to-autopilot` laaser raekken med `social_claim()` **foer** kaldet: status bliver
+  `sender til autopilot`, og et dobbeltklik eller genforsoeg rammer `rowcount = 0` og sender intet.
+  Uden laasen gav et tabt svar to kladder i WordPress til det samme opslag.
+- Svar fra WordPress (4xx/5xx) slipper raekken tilbage til sin gamle status, saa den kan sendes igen.
+  Timeout/`ConnectionError` goer det modsatte: status bliver `sendt? (svar udeblev)` + alarm, fordi vi
+  ikke ved om kladden blev oprettet. Gentagen sending er vaerre end en manuel kontrol.
+- Status-konstanterne er `SOCIAL_SENT` / `SOCIAL_SENDING` / `SOCIAL_UNCERTAIN`; `social_claim` er den
+  eneste skriver af laasen, saa en ny kaldevej skal bruge den i stedet for selv at saette status.
+- Tests: `tests/test_v8_features.py` (tre POSTs mod en fake sgap-server = én kladde, og laasen kan kun
+  tages én gang) samt `tests/ci_check.sh` (genforsoeg mod `fake_wp` lader kladdetallet vaere 1).
+
 ### Screenshot-script (v7.13.1)
 - `scripts/screenshots.py` tager `cc-login.png` og alle 14 fanebilleder i `docs/img/` mod en kørende
   app: `python3 scripts/screenshots.py --base http://127.0.0.1:8000 --user X --password Y`.

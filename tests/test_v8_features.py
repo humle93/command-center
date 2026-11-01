@@ -404,6 +404,48 @@ check("social: CSV har UTC-kolonner og zone",
       "created_at_utc" in csv_text and "scheduled_at_utc" in csv_text and main.CC_TZ_NAME in csv_text,
       csv_text.splitlines()[0] if csv_text else "")
 
+# --- idempotens: samme opslag maa kun give én kladde i WordPress ---
+class _SgapDrafts(BaseHTTPRequestHandler):
+    log_message = lambda self, *a: None
+    posts = []
+    def do_POST(self):
+        n = int(self.headers.get("content-length") or 0)
+        _SgapDrafts.posts.append(json.loads(self.rfile.read(n) or b"{}"))
+        b = json.dumps({"id": len(_SgapDrafts.posts)}).encode()
+        self.send_response(201)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+
+_sgap_srv = HTTPServer(("127.0.0.1", 0), _SgapDrafts)
+threading.Thread(target=_sgap_srv.serve_forever, daemon=True).start()
+with main.get_db() as db:
+    db.execute("INSERT INTO socialqueue (platform, message, status, created_at) VALUES (?,?,?,?)",
+               ("Twitter", "dobbeltklik", "Klar i ko", "2026-01-01T12:00:00"))
+    double_id = db.execute("SELECT MAX(id) FROM socialqueue").fetchone()[0]
+_keep = main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD, main.sgap_ready
+main.WP_URL = f"http://127.0.0.1:{_sgap_srv.server_address[1]}"
+main.WP_USER, main.WP_APP_PASSWORD = "admin", "app pass"
+main.sgap_ready = lambda: True
+for _ in range(3):
+    c2.post("/social/to-autopilot", data={"id": double_id})
+main.sgap_ready = _keep[3]
+main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD = _keep[0], _keep[1], _keep[2]
+check("autopilot: dobbeltklik sender kun én kladde", len(_SgapDrafts.posts) == 1, len(_SgapDrafts.posts))
+with main.get_db() as db:
+    dbl = db.execute("SELECT status FROM socialqueue WHERE id=?", (double_id,)).fetchone()
+check("autopilot: status peger paa den ene kladde",
+      bool(dbl) and dbl["status"] == "sendt til autopilot (kladde #1)", dbl["status"] if dbl else None)
+with main.get_db() as db:
+    db.execute("INSERT INTO socialqueue (platform, message, status, created_at) VALUES (?,?,?,?)",
+               ("Mastodon", "laas", "Klar i ko", "2026-01-01T12:00:00"))
+    lock_id = db.execute("SELECT MAX(id) FROM socialqueue").fetchone()[0]
+    first = main.social_claim(db, lock_id)
+    second = main.social_claim(db, lock_id)
+check("autopilot: laasen kan kun tages én gang", first and not second, (first, second))
+
 # --- agent + skill i repoet (v7.13.3) ---
 import glob, re as _re
 agents_dir = os.path.join(ROOT, ".agents")

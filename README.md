@@ -118,13 +118,17 @@ din IP - ingen alarmtekster eller brugernavne.
 
 ## Agenter og skills (v7.13.2)
 
-Repoet har to Freebuff/Codebuff-tilføjelser til agenter:
+Fire agenter i tre grupper, plus en skill. Se `.agents/README.md` for detaljer og spawn-eksempler.
 
-- `.agents/command-center-reviewer.ts` — en **read-only reviewer** der kender de otte regler,
-  kontrakterne (`/health`, `TASK_ESTIMATES`, `alert_outbox`, login-sporet, `NEWEST`) og de kendte
-  faldgruber. Med `params.run_tests=true` kører den begge testsuiter.
+| Gruppe | Repo / system | Agenter |
+|---|---|---|
+| App | `humle93/command-center` | `command-center-reviewer` (review mod regler/kontrakter), `cc-verifier` (tests, ruter, installer-paritet) |
+| Integration | `steamgears-autopilot` (WordPress-plugin) | `wp-bridge-auditor` (endpoints, felter, auth, idempotens) |
+| Indhold | `TRACK_DOMAIN` (den overvågede side) | `site-seo-auditor` (striking distance, decay, tynde sider, gap) |
+
 - `.agents/skills/command-center/SKILL.md` — en **skill** med reglerne, kontrakterne,
   verify-kommandoerne og faldgruberne. Den bliver slash-kommandoen `/skill:command-center`.
+- Alle agenter er **read-only** med vilje; kun `cc-verifier` må køre kommandoer, og den skriver ikke.
 
 De er udviklerværktøj, ikke app-funktioner: de indgår ikke i `install.sh`, og self-update henter dem
 ikke. Modellen i agenten står som `anthropic/claude-sonnet-4.5` (Codebuff-docsenes eksempel) — skift

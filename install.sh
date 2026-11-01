@@ -191,10 +191,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.13.2"
+APP_VERSION = "7.13.3"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.13.3", "Fire agenter i tre grupper (app, WordPress-plugin, indhold) + manifest i .agents/"),
     ("7.13.2", "Agent + skill i .agents/ og sidste doede variabler fjernet (sitemap_missing, _up, result)"),
     ("7.13.1", "Oprydning: doede importer og variabler fjernet, Juno-tabelrester droppes naar de er tomme"),
     ("7.13.0", "Login viser IP og en koerselsrapport; opstart skriver version og nyheder"),
@@ -5391,13 +5392,17 @@ din IP - ingen alarmtekster eller brugernavne.
 
 ## Agenter og skills (v7.13.2)
 
-Repoet har to Freebuff/Codebuff-tilføjelser til agenter:
+Fire agenter i tre grupper, plus en skill. Se `.agents/README.md` for detaljer og spawn-eksempler.
 
-- `.agents/command-center-reviewer.ts` — en **read-only reviewer** der kender de otte regler,
-  kontrakterne (`/health`, `TASK_ESTIMATES`, `alert_outbox`, login-sporet, `NEWEST`) og de kendte
-  faldgruber. Med `params.run_tests=true` kører den begge testsuiter.
+| Gruppe | Repo / system | Agenter |
+|---|---|---|
+| App | `humle93/command-center` | `command-center-reviewer` (review mod regler/kontrakter), `cc-verifier` (tests, ruter, installer-paritet) |
+| Integration | `steamgears-autopilot` (WordPress-plugin) | `wp-bridge-auditor` (endpoints, felter, auth, idempotens) |
+| Indhold | `TRACK_DOMAIN` (den overvågede side) | `site-seo-auditor` (striking distance, decay, tynde sider, gap) |
+
 - `.agents/skills/command-center/SKILL.md` — en **skill** med reglerne, kontrakterne,
   verify-kommandoerne og faldgruberne. Den bliver slash-kommandoen `/skill:command-center`.
+- Alle agenter er **read-only** med vilje; kun `cc-verifier` må køre kommandoer, og den skriver ikke.
 
 De er udviklerværktøj, ikke app-funktioner: de indgår ikke i `install.sh`, og self-update henter dem
 ikke. Modellen i agenten står som `anthropic/claude-sonnet-4.5` (Codebuff-docsenes eksempel) — skift

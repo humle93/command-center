@@ -273,8 +273,9 @@ check("alerts: add_alarm kun koer (ingen blokerende HTTP i request-stien)", n ==
 
 # --- opstart, login-IP og koerselsrapport (v7.13) ---
 banner = "\n".join(main.startup_banner("0.0.0.0", 8000))
-check("startup: banneret har version, nyheder og lytteadresse",
-      main.APP_VERSION in banner and "nyhed 7.13.0" in banner and "lytter paa 0.0.0.0:8000" in banner, banner[:120])
+check("startup: banneret har version, de tre nyeste og lytteadresse",
+      main.APP_VERSION in banner and all(f"nyhed {v}" in banner for v, _ in main.NEWEST[:3])
+      and "lytter paa 0.0.0.0:8000" in banner, banner[:160])
 check("startup: NEWEST_LINE er én linje scripts kan laese",
       bool(main.NEWEST_LINE) and "\n" not in main.NEWEST_LINE, main.NEWEST_LINE)
 
@@ -327,27 +328,40 @@ check("oprydning: tomme Juno-tabeller droppes, tabeller med data beholdes",
       "drift" not in names and "gsc_daily" not in names and "gsc_queries" in names and kept == 1,
       (sorted(n for n in names if n.startswith(("drift", "gsc"))), kept))
 
-# --- agent + skill i repoet (v7.13.2) ---
-import re as _re
-agent_p = os.path.join(ROOT, ".agents", "command-center-reviewer.ts")
-skill_p = os.path.join(ROOT, ".agents", "skills", "command-center", "SKILL.md")
-agent = open(agent_p, encoding="utf-8").read() if os.path.exists(agent_p) else ""
+# --- agent + skill i repoet (v7.13.3) ---
+import glob, re as _re
+agents_dir = os.path.join(ROOT, ".agents")
+agent_files = sorted(glob.glob(os.path.join(agents_dir, "*.ts")))
+manifest_p = os.path.join(agents_dir, "README.md")
+skill_p = os.path.join(agents_dir, "skills", "command-center", "SKILL.md")
+manifest = open(manifest_p, encoding="utf-8").read() if os.path.exists(manifest_p) else ""
 skill = open(skill_p, encoding="utf-8").read() if os.path.exists(skill_p) else ""
-check("agent: definition har id, model, vaerktoejer og prompts",
-      all(k in agent for k in ("id: 'command-center-reviewer'", "displayName:", "model:",
-                               "toolNames:", "instructionsPrompt", "export default definition")),
-      agent[:80])
-check("agent: id matcher filnavnet (Codebuff-krav)",
-      os.path.basename(agent_p) == "command-center-reviewer.ts"
-      and _re.search(r"id: 'command-center-reviewer'", agent) is not None)
+texts = {p: open(p, encoding="utf-8").read() for p in agent_files}
+check("agents: mindst tre definitioner (app, integration, indhold)",
+      len(agent_files) >= 3, [os.path.basename(p) for p in agent_files])
+bad = []
+for path, txt in texts.items():
+    stem = os.path.basename(path)[:-3]
+    m = _re.search(r"id: '([a-z0-9-]+)'", txt)
+    if not (m and m.group(1) == stem and all(k in txt for k in
+            ("displayName:", "model:", "toolNames:", "instructionsPrompt", "export default definition"))):
+        bad.append(os.path.basename(path))
+check("agents: id matcher filnavn, og alle har model, vaerktoejer og prompt", not bad, bad)
+check("agents: hver agent er naevnt i .agents/README.md",
+      all(os.path.basename(p)[:-3] in manifest for p in agent_files),
+      [os.path.basename(p) for p in agent_files if os.path.basename(p)[:-3] not in manifest])
+check("agents: manifestet grupperer dem med de tre repos",
+      "command-center" in manifest and "steamgears-autopilot" in manifest and "TRACK_DOMAIN" in manifest)
 front = skill.split("---")[1] if skill.startswith("---") else ""
 desc = _re.search(r"description: (.+)", skill)
 check("skill: SKILL.md har frontmatter med name = mappenavn",
       skill.startswith("---") and "name: command-center" in front, front[:80])
-check("skill: beskrivelsen er 10-1024 tegn",
-      bool(desc) and 10 < len(desc.group(1)) <= 1024, desc.group(1)[:60] if desc else None)
+check("skill: beskrivelsen er 10-1024 tegn", bool(desc) and 10 < len(desc.group(1)) <= 1024)
 check("agent+skill: ingen hemmeligheder i filerne",
-      not any(t in (agent + skill).lower() for t in ("sk-ant", "api_key=", "password=", "ghp_")))
+      not any(t in (manifest + skill + "".join(texts.values())).lower()
+              for t in ("sk-ant", "api_key=", "password=", "ghp_")))
+check("agents: alle filer er danske/ascii (ingen utilsigtet fremmed tekst)",
+      not any(_re.search(r"[\u4e00-\u9fff]", t) for t in (manifest, skill, *texts.values())))
 
 srv.shutdown()
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)

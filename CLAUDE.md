@@ -110,7 +110,14 @@ kørte grønt på `ed97575`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - `migrate_db` dropper nu `drift`/`gsc_daily`/`gsc_queries` **kun hvis de er tomme**.
 - `run_in_executor`-mønstret (35 steder) er bevidst ikke refaktoreret - se arkitektur §15.
 
-### Agent + skill (v7.13.2)
+### Agent + skill (v7.13.2-v7.13.3)
+- Fire agenter, grupperet i `.agents/README.md` efter de tre repos/systemer: app
+  (`command-center-reviewer`, `cc-verifier`), WordPress-pluginnet (`wp-bridge-auditor`) og den
+  overvaagede side (`site-seo-auditor`).
+- De ligger fladt i `.agents/` fordi Freebuff laeser `<id>.ts` direkte der; grupperingen er
+  id-prefix + manifest, ikke undermapper.
+- Testen validerer nu ALLE agentfiler (id = filnavn, model, vaerktoejer, prompt), at de er naevnt i
+  manifestet, og at der ikke er fremmedsprog/rester eller hemmeligheder i dem.
 - `.agents/command-center-reviewer.ts`: read-only reviewer (id = filnavn, jf. Codebuff-kravet), kender
   regler/kontrakter/faldgruber og kan koere begge testsuiter via `params.run_tests`.
 - `.agents/skills/command-center/SKILL.md`: frontmatter `name: command-center` + de otte regler.

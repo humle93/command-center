@@ -4,6 +4,7 @@
 #   bash scripts/agents_md_rollout.sh --dry-run          # vis hvad der ville ske, rør intet
 #   bash scripts/agents_md_rollout.sh                    # spørg om lov, og kør
 #   bash scripts/agents_md_rollout.sh --yes              # uden bekræftelse
+#   bash scripts/agents_md_rollout.sh --owner humle93 --only steamgears-site --dry-run
 #   bash scripts/agents_md_rollout.sh --owner humle93 --skip thredup-cart-hoarding
 #   bash scripts/agents_md_rollout.sh --source ~/AGENTS.md --branch chore/delte-regler
 #
@@ -21,6 +22,7 @@ DRY_RUN=0
 ASSUME_YES=0
 OVERWRITE=0
 SKIP_LIST=""
+ONLY_LIST=""
 
 read -r -d '' BODY <<'EOF_BODY' || true
 Tilføjer en fælles `AGENTS.md`, så agenter (Claude, Codebuff m.fl.) møder de samme regler i alle repoer.
@@ -42,6 +44,7 @@ Brug: bash scripts/agents_md_rollout.sh [muligheder]
   --source STI       AGENTS.md der skal kopieres (standard: filen i dette repo)
   --branch NAVN      Branchen der laves i hvert repo (standard: chore/agents-md)
   --skip NAVN        Spring repo over; kan gentages eller angives med komma
+  --only NAVN        Kør kun disse repoer (fx --only steamgears-site); kan gentages
   --overwrite        Erstat en eksisterende, afvigende AGENTS.md (standard: spring over)
   --dry-run          Vis kun planen; klon, commit og PR springes over
   --yes              Spørg ikke om bekræftelse
@@ -50,6 +53,7 @@ Brug: bash scripts/agents_md_rollout.sh [muligheder]
 Eksempler:
   bash scripts/agents_md_rollout.sh --dry-run
   bash scripts/agents_md_rollout.sh --skip command-center,thredup-cart-hoarding
+  bash scripts/agents_md_rollout.sh --only steamgears-site --dry-run
 EOF_USAGE
 }
 
@@ -61,6 +65,7 @@ while [ $# -gt 0 ]; do
     --source)   [ $# -ge 2 ] || die "--source mangler en værdi"; SOURCE="$2"; shift 2 ;;
     --branch)   [ $# -ge 2 ] || die "--branch mangler en værdi"; BRANCH="$2"; shift 2 ;;
     --skip)     [ $# -ge 2 ] || die "--skip mangler en værdi"; SKIP_LIST="$SKIP_LIST,$2"; shift 2 ;;
+    --only)     [ $# -ge 2 ] || die "--only mangler en værdi"; ONLY_LIST="$ONLY_LIST,$2"; shift 2 ;;
     --overwrite) OVERWRITE=1; shift ;;
     --dry-run)  DRY_RUN=1; shift ;;
     --yes)      ASSUME_YES=1; shift ;;
@@ -79,11 +84,11 @@ fi
 [ -f "$SOURCE" ] || die "kan ikke finde kilden: $SOURCE"
 SOURCE="$(cd "$(dirname "$SOURCE")" && pwd)/$(basename "$SOURCE")"
 
-is_skipped() {
-  local repo="$1" name entry
+in_list() {
+  local list="$1" repo="$2" name entry
   name="${repo#*/}"
   # shellcheck disable=SC2086
-  for entry in $(printf '%s' "$SKIP_LIST" | tr ',' ' '); do
+  for entry in $(printf '%s' "$list" | tr ',' ' '); do
     [ -n "$entry" ] || continue
     if [ "$entry" = "$repo" ] || [ "$entry" = "$name" ]; then return 0; fi
   done
@@ -105,6 +110,16 @@ REPOS="$(gh repo list "$OWNER" --limit 200 \
   || die "kunne ikke hente repo-listen for $OWNER (mangler gh adgang?)"
 
 [ -n "$REPOS" ] || die "fandt ingen repoer under $OWNER med skriveadgang"
+
+if [ -n "$ONLY_LIST" ]; then
+  filtered=""
+  while IFS=$'\t' read -r repo base; do
+    [ -n "${repo:-}" ] || continue
+    if in_list "$ONLY_LIST" "$repo"; then filtered+="$repo"$'\t'"$base"$'\n'; fi
+  done <<< "$REPOS"
+  REPOS="${filtered%$'\n'}"
+  [ -n "$REPOS" ] || die "ingen af repoerne i --only ($(printf '%s' "$ONLY_LIST" | sed 's/^,//')) blev fundet med skriveadgang"
+fi
 
 TOTAL=$(printf '%s\n' "$REPOS" | wc -l | tr -d ' ')
 printf 'Fandt %s repo(er) med skriveadgang.\n\n' "$TOTAL"
@@ -132,7 +147,7 @@ while IFS=$'\t' read -r repo base; do
   [ -n "${repo:-}" ] || continue
   short="${repo#*/}"
 
-  if is_skipped "$repo"; then
+  if in_list "$SKIP_LIST" "$repo"; then
     printf -- '- %-30s sprunget over (--skip)\n' "$short"
     skipped=$((skipped + 1))
     continue

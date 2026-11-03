@@ -204,10 +204,13 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - Testen validerer nu ALLE agentfiler (id = filnavn, model, vaerktoejer, prompt), at de er naevnt i
   manifestet, og at der ikke er fremmedsprog/rester eller hemmeligheder i dem.
 - `scripts/agents_md_rollout.sh` (ny): lægger den fælles `AGENTS.md` ind i alle repoer under kontoen som
-  branch `chore/agents-md` + PR. `--dry-run` viser planen, `--skip` springer repoer over, og en
-  eksisterende fil overskrives kun med `--overwrite`; `main` pushes der aldrig til. Kræver `gh` logget
-  ind lokalt, indgår ikke i `install.sh` og kører ikke i CI — testet offline mod tre lokale bare-repoer
-  (opret, identisk, afvigende, genkørsel og `--skip`).
+  branch `chore/agents-md` + PR. `--dry-run` viser planen, `--only`/`--skip` styrer hvilke repoer der
+  køres, og en eksisterende fil overskrives kun med `--overwrite`; `main` pushes der aldrig til. Kræver
+  `gh` logget ind lokalt, indgår ikke i `install.sh` og kører ikke i CI — testet offline mod tre lokale
+  bare-repoer (opret, identisk, afvigende, genkørsel, `--skip` og `--only`) samt tørkørsel mod
+  `steamgears-site`. **Bemærk:** `steamgears-site` har allerede en repo-specifik `AGENTS.md` (procenter,
+  `projektstatus.py`, natlig push) og bliver derfor sprunget over — dér skal der lægges sammen, ikke
+  overskrives, og push-reglen i §5 der vinder over den fælles "push kun når der bedes om det".
 - `.agents/mcp-access-auditor.ts` (v7.17.1): read-only revisor for MCP-adgangen. Laeser `api_clients`
   og `api_audit` med `mode=ro` og rapporterer noegler der boer tilbagekaldes (ubrugte, for brede
   scopes, brug efter tilbagekaldelse), scope-afvisninger i auditten, om `CC_PUBLIC_URL` er sat

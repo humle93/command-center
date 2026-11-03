@@ -45,9 +45,9 @@ install.sh                 # selvstændig installer (indeholder kopier af filern
 | Første bruger | `/setup` — kun åben når `users` er tom |
 | Rate limit | 5 fejl pr. IP = 10 min lås (bounded dict) |
 | UI-adgang | Middleware sætter `request.state.user`; ikke-loggede sendes til `/setup` eller `/login` |
-| API-nøgler (v7.16) | `api_clients(id, name, key_hash UNIQUE, key_hint, scopes, created_at, last_used_at, last_used_ip, revoked_at)`. Nøglen er `cc_` + 32 tegn, vises **én gang** (gemmes midlertidigt i `settings.api_key_once` indtil den er kvitteret), gemmes som sha256 og kan tilbagekaldes pr. klient |
+| API-nøgler (v7.16) | `api_clients(id, name, key_hash UNIQUE, key_hint, scopes, created_at, last_used_at, last_used_ip, revoked_at)`. Nøglen er `cc_` + 32 tegn, vises **én gang** (klartekst ligger kun i `settings.api_key_once` til den er vist — rækken slettes i samme kald, med 15 min. TTL som sikkerhedsnet), gemmes som sha256 og kan tilbagekaldes pr. klient |
 | MCP | `POST /mcp` er **uden for** session-middlewaren: `Authorization: Bearer cc_…` → `find_api_client()`, `Origin`/`Host` valideres, svaret er JSON-RPC 2.0 (spec `2026-07-28`, stateless). Hvert værktøj har et `scope` (`read`/`write`), og `tools/call` afvises med `-32003`, hvis nøglen mangler det |
-| MCP-audit (v7.17) | `api_audit(id, client_id, method, tool, ok, detail, duration_ms, created_at)` — ét spor pr. `tools/call`, også afviste kald. Vist i fanen Brugere og via `scripts/api_key.py audit`; ryddes efter 90 dage |
+| MCP-audit (v7.17) | `api_audit(id, client_id, method, tool, ok, detail, duration_ms, created_at)` — ét spor pr. `tools/call`, også afviste kald og ukendte værktøjsnavne. Vist i fanen Brugere og via `scripts/api_key.py audit`; ryddes efter 90 dage |
 
 `APP_TOKEN` er fjernet, og der er ingen invite-tokens: en invitation er en mail med en midlertidig adgangskode, som brugeren skifter. Sessioner slettes ved logout, bruger-sletning og adgangskode-skift (bortset fra den aktuelle session).
 
@@ -125,6 +125,7 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 - Netværkskald: alle med timeout; budget-guard stopper betalte API'er
 - Invitationer: midlertidig adgangskode er tilfældig (12 tegn), staar kun i mailen, og `must_change_password` vises som gul bjælke i dashboardet indtil koden er skiftet
 - MCP-nøgler: `cc_` + 32 tegn, kun `sha256` i DB, `Bearer` i header (aldrig query), `read`/`write`-scopes, tilbagekald pr. nøgle, `Origin`/`Host`-validering mod `CC_PUBLIC_URL` (DNS-rebinding) og samme rate-limit-tænkning som login
+- MCP-hærdning (v7.17.1): klartekst-nøglen lever kun til den er vist (slettes i samme kald, TTL 15 min.), og et ukendt værktøjsnavn giver både `-32602` og en række i `api_audit`, så et nøgle der prøver navne af ikke er usynligt
 - MCP-skrivning (v7.17): kun nøgler med `write` kan kalde `start_crawl`, `add_monitor`, `resolve_alarm` og `add_note`; handlingerne går gennem de samme funktioner som UI'et (validering, `normalize_url`, dublet-tjek), og alt logges i `api_audit` uden nøglen i klartekst
 - Kendte, ikke-lukkede punkter (se ROADMAP): udgående requests kan pege på private IP'er (SSRF-flade), Telegram-kald sker inde i en åben DB-transaktion, og der er ingen CSRF-token (SameSite dækker cross-site POST)
 
@@ -138,6 +139,7 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 
 ## 12. Versionshistorik (kort)
 
+- **v7.17.1** — MCP-hærdning: nøglen ligger ikke længere i klartekst i databasen (rækken i `settings.api_key_once` slettes ved visning, TTL 15 min., oprydningen fjerner resten; `POST /api-keys/dismiss` er fjernet), og ukendte værktøjsnavne på `/mcp` logges nu i `api_audit`
 - **v7.17** — MCP fase 2: fire skrive-værktøjer bag `write`-scope (`start_crawl`, `add_monitor`, `resolve_alarm`, `add_note`), `readOnlyHint`/`destructiveHint` i `tools/list`, audit pr. nøgle i `api_audit` (vist i UI + `scripts/api_key.py audit`) og oprydning efter 90 dage
 - **v7.16** — MCP-adgang fase 1: `api_clients` med hash og scopes, `POST /mcp` (JSON-RPC, Streamable HTTP uden SSE) med syv læse-værktøjer, `Origin`/`Host`-validering og `scripts/api_key.py`
 - **v7.15** — login med e-mail i stedet for brugernavn (migrering beholder gamle brugernavne som fallback) · invitation på mail med midlertidig adgangskode og `must_change_password` · fælles `send_email()` til alarmer og invitationer
@@ -233,7 +235,7 @@ ved hvert CI-løb, så tabellen og koden ikke kan glide fra hinanden ubemærket.
 | --- | --- |
 | Opstart og auth | `GET /setup`, `POST /setup`, `GET /login`, `POST /login`, `GET /logout` |
 | Brugere | `POST /users/invite` (mail med midlertidig kode), `POST /users/delete`, `POST /users/password` |
-| API-nøgler | `POST /api-keys/create`, `POST /api-keys/revoke`, `POST /api-keys/dismiss` |
+| API-nøgler | `POST /api-keys/create`, `POST /api-keys/revoke` (nøglen vises én gang og slettes fra `settings` i samme kald) |
 | MCP | `POST /mcp` — JSON-RPC 2.0 (`initialize`, `ping`, `tools/list`, `tools/call`) med Bearer-nøgle |
 | Dashboard | `GET /` |
 | Domæner | `POST /domains/check`, `POST /domains/add`, `POST /domains/delete`, `GET /api/history/{domain_id}` |

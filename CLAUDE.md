@@ -70,6 +70,21 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - Tests: 11 nye checks i `tests/test_v8_features.py` (annotations, skrivning, scope-afvisning, dublet,
   alarm, crawl-afvisning, ugyldig URL, audit, usage, ingen nøgle i audit) og 10 i `tests/ci_check.sh`.
 
+### MCP-hærdning (v7.17.1) — implementeret
+- **Klartekst-nøglen lever ikke længere i DB'en.** `settings.api_key_once` indeholder nu
+  `{name, key, created_at}`, og `pending_api_key()` **sletter rækken i samme kald** som dashboardet
+  læser den (returnerer værdien til netop den visning). `API_KEY_ONCE_TTL = 15 min.` er kun et
+  sikkerhedsnet, hvis siden aldrig åbnes; `cleanup_old_data()` rydder en glemt række med **samme**
+  DB-håndtag — et indlejret `get_db()` kunne ikke skrive i den åbne transaktion (fejlede stille).
+- `POST /api-keys/dismiss` + `clear_api_key()` er fjernet (de gjorde intet efter ændringen), og knappen
+  i dashboardet er erstattet af en linje om at kopiere nøglen nu.
+- **Ukendte værktøjsnavne i auditten:** `_mcp_handle` kalder `log_api_call(..., False, "ukendt
+  vaerktoej")` før `-32602`, så en nøgle der prøver navne af kan ses i "N kald · M fejl".
+- Tests: 6 nye `mcp3:`-checks i `tests/test_v8_features.py` og 8 i `tests/ci_check.sh` (bl.a. at
+  nøglen forsvinder fra DB efter én visning, TTL, oprydning og at dismiss-ruten er væk).
+- Fase 3 (OAuth) er stadig ikke lavet; `_MCP_LOCAL_HOSTS` accepterer fortsat `localhost`/`testserver`
+  ubetinget (lav risiko: nøgle + Origin kræves stadig).
+
 ### MCP fase 1 (v7.16) — implementeret
 - `api_clients` (`name`, `key_hash` = sha256, `key_hint`, `scopes`, `last_used_at/ip`, `revoked_at`):
   én nøgle pr. klient, `cc_` + 32 tegn, vises **én gang** via `settings.api_key_once` i fanen Brugere.

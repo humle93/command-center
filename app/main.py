@@ -109,10 +109,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.17.0"
+APP_VERSION = "7.17.1"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.17.1", "MCP-noeglen ligger ikke laengere i klartekst i DB'en, og ukendte vaerktoejer havner i auditten"),
     ("7.17.0", "MCP fase 2: skrivende vaerktoejer med write-scope og audit pr. noegle"),
     ("7.16.0", "MCP-adgang: hver klient sin egen noegle (hash) og syv laese-vaerktoejer paa /mcp"),
     ("7.15.0", "Login med e-mail + invitation paa mail med midlertidig adgangskode - ingen tokens"),
@@ -125,7 +126,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "MCP-klienter kan nu ogsaa starte crawl, oprette monitorer og noter - med audit pr. noegle"
+NEWEST_LINE = "MCP-noeglen slettes fra DB'en ved foerste visning, og ukendte vaerktoejer logges i auditten"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -591,6 +592,15 @@ def cleanup_old_data():
         db.execute("DELETE FROM health_history WHERE checked_at < ?", (cutoff(180),))
         db.execute("DELETE FROM keyword_ideas WHERE created_at < ?", (cutoff(180),))
         db.execute("DELETE FROM api_audit WHERE created_at < ?", (cutoff(90),))
+        # en noegle der blev vist men aldrig laest (fx lukket fane) skal ikke blive liggende i klartekst
+        row = db.execute("SELECT value FROM settings WHERE key='api_key_once'").fetchone()
+        if row:
+            try:
+                created = str((jsonlib.loads(row["value"]) or {}).get("created_at") or "")
+            except Exception:
+                created = ""
+            if not created or created < (now - API_KEY_ONCE_TTL).isoformat(timespec="seconds"):
+                db.execute("DELETE FROM settings WHERE key='api_key_once'")
 
 
 # ---------- Auth: brugere og sessioner ----------
@@ -731,6 +741,9 @@ def invite_user(email: str, base_url: str = "", deliver=None) -> tuple:
 # ---------- API-noegler: personlige noegler pr. MCP-klient (ingen global token) ----------
 API_KEY_PREFIX = "cc_"
 API_SCOPES = ("read", "write")
+# Noeglen vises én gang i dashboardet. Den ligger i settings i saa kort tid som muligt: raekken
+# slettes i samme kald som den laeses, og TTL'en er kun et sikkerhedsnet hvis visningen aldrig sker.
+API_KEY_ONCE_TTL = timedelta(minutes=15)
 
 
 def hash_api_key(key: str) -> str:
@@ -784,24 +797,27 @@ def api_client_rows() -> list:
 
 
 def remember_api_key(name: str, key: str) -> None:
-    """Noeglen vises én gang i UI'et - den ligger kun i settings, indtil den er kvitteret."""
+    """Noeglen vises én gang i UI'et. Raekken indeholder klartekst, saa den lever kun til naeste visning."""
     with get_db() as db:
         db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('api_key_once', ?)",
-                   (jsonlib.dumps({"name": name, "key": key}),))
+                   (jsonlib.dumps({"name": name, "key": key, "created_at": now_iso()}),))
 
 
 def pending_api_key():
+    """Ny noegle til dashboardet - og raekken slettes i samme kald, saa klartekst ikke bliver liggende."""
     try:
         with get_db() as db:
             row = db.execute("SELECT value FROM settings WHERE key='api_key_once'").fetchone()
-        return jsonlib.loads(row["value"]) if row and row["value"] else None
+            if not row or not row["value"]:
+                return None
+            data = jsonlib.loads(row["value"])
+            created = str((data or {}).get("created_at") or "")
+            stale = (not created
+                     or created < (datetime.now() - API_KEY_ONCE_TTL).isoformat(timespec="seconds"))
+            db.execute("DELETE FROM settings WHERE key='api_key_once'")
+            return None if stale else data
     except Exception:
         return None
-
-
-def clear_api_key() -> None:
-    with get_db() as db:
-        db.execute("DELETE FROM settings WHERE key='api_key_once'")
 
 
 def log_api_call(client_id: int, method: str, tool: str, ok: bool, detail: str = "",
@@ -4412,6 +4428,8 @@ async def _mcp_handle(msg, client) -> dict | None:
         args = params.get("arguments") or {}
         tool = next((t for t in MCP_TOOLS if t["name"] == name), None)
         if not tool:
+            # ogsaa et forkert vaerktoejsnavn er et spoer: en noegle der famler skal kunne ses i auditten
+            log_api_call(client["id"], "tools/call", name or "(tomt navn)", False, "ukendt vaerktoej")
             return _mcp_error(mid, -32602, f"Ukendt vaerktoej: {name}")
         scope = tool.get("scope", "read")
         if scope not in [x for x in (client["scopes"] or "").split(",") if x]:
@@ -4474,12 +4492,6 @@ async def api_keys_create(name: str = Form(...), scopes: str = Form("read")):
     except ValueError as e:
         with get_db() as db:
             add_alarm(db, "brugere", f"API-noegle ikke oprettet: {str(e)[:120]}", "advarsel")
-    return RedirectResponse("/", status_code=303)
-
-
-@app.post("/api-keys/dismiss")
-async def api_keys_dismiss():
-    clear_api_key()
     return RedirectResponse("/", status_code=303)
 
 

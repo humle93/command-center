@@ -2,7 +2,7 @@
 set -e
 PROJECT_DIR="$HOME/command-center"
 
-echo "⚡ Command Center v7.17 - installerer i $PROJECT_DIR..."
+echo "⚡ Command Center v7.17.1 - installerer i $PROJECT_DIR..."
 mkdir -p "$PROJECT_DIR/app/templates" "$PROJECT_DIR/app/data" "$PROJECT_DIR/app/static" "$PROJECT_DIR/deploy" "$PROJECT_DIR/scripts"
 echo "📄 requirements.txt..."
 cat << 'EOF_REQ' > "$PROJECT_DIR/requirements.txt"
@@ -197,10 +197,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.17.0"
+APP_VERSION = "7.17.1"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.17.1", "MCP-noeglen ligger ikke laengere i klartekst i DB'en, og ukendte vaerktoejer havner i auditten"),
     ("7.17.0", "MCP fase 2: skrivende vaerktoejer med write-scope og audit pr. noegle"),
     ("7.16.0", "MCP-adgang: hver klient sin egen noegle (hash) og syv laese-vaerktoejer paa /mcp"),
     ("7.15.0", "Login med e-mail + invitation paa mail med midlertidig adgangskode - ingen tokens"),
@@ -213,7 +214,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "MCP-klienter kan nu ogsaa starte crawl, oprette monitorer og noter - med audit pr. noegle"
+NEWEST_LINE = "MCP-noeglen slettes fra DB'en ved foerste visning, og ukendte vaerktoejer logges i auditten"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -679,6 +680,15 @@ def cleanup_old_data():
         db.execute("DELETE FROM health_history WHERE checked_at < ?", (cutoff(180),))
         db.execute("DELETE FROM keyword_ideas WHERE created_at < ?", (cutoff(180),))
         db.execute("DELETE FROM api_audit WHERE created_at < ?", (cutoff(90),))
+        # en noegle der blev vist men aldrig laest (fx lukket fane) skal ikke blive liggende i klartekst
+        row = db.execute("SELECT value FROM settings WHERE key='api_key_once'").fetchone()
+        if row:
+            try:
+                created = str((jsonlib.loads(row["value"]) or {}).get("created_at") or "")
+            except Exception:
+                created = ""
+            if not created or created < (now - API_KEY_ONCE_TTL).isoformat(timespec="seconds"):
+                db.execute("DELETE FROM settings WHERE key='api_key_once'")
 
 
 # ---------- Auth: brugere og sessioner ----------
@@ -819,6 +829,9 @@ def invite_user(email: str, base_url: str = "", deliver=None) -> tuple:
 # ---------- API-noegler: personlige noegler pr. MCP-klient (ingen global token) ----------
 API_KEY_PREFIX = "cc_"
 API_SCOPES = ("read", "write")
+# Noeglen vises én gang i dashboardet. Den ligger i settings i saa kort tid som muligt: raekken
+# slettes i samme kald som den laeses, og TTL'en er kun et sikkerhedsnet hvis visningen aldrig sker.
+API_KEY_ONCE_TTL = timedelta(minutes=15)
 
 
 def hash_api_key(key: str) -> str:
@@ -872,24 +885,27 @@ def api_client_rows() -> list:
 
 
 def remember_api_key(name: str, key: str) -> None:
-    """Noeglen vises én gang i UI'et - den ligger kun i settings, indtil den er kvitteret."""
+    """Noeglen vises én gang i UI'et. Raekken indeholder klartekst, saa den lever kun til naeste visning."""
     with get_db() as db:
         db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('api_key_once', ?)",
-                   (jsonlib.dumps({"name": name, "key": key}),))
+                   (jsonlib.dumps({"name": name, "key": key, "created_at": now_iso()}),))
 
 
 def pending_api_key():
+    """Ny noegle til dashboardet - og raekken slettes i samme kald, saa klartekst ikke bliver liggende."""
     try:
         with get_db() as db:
             row = db.execute("SELECT value FROM settings WHERE key='api_key_once'").fetchone()
-        return jsonlib.loads(row["value"]) if row and row["value"] else None
+            if not row or not row["value"]:
+                return None
+            data = jsonlib.loads(row["value"])
+            created = str((data or {}).get("created_at") or "")
+            stale = (not created
+                     or created < (datetime.now() - API_KEY_ONCE_TTL).isoformat(timespec="seconds"))
+            db.execute("DELETE FROM settings WHERE key='api_key_once'")
+            return None if stale else data
     except Exception:
         return None
-
-
-def clear_api_key() -> None:
-    with get_db() as db:
-        db.execute("DELETE FROM settings WHERE key='api_key_once'")
 
 
 def log_api_call(client_id: int, method: str, tool: str, ok: bool, detail: str = "",
@@ -4500,6 +4516,8 @@ async def _mcp_handle(msg, client) -> dict | None:
         args = params.get("arguments") or {}
         tool = next((t for t in MCP_TOOLS if t["name"] == name), None)
         if not tool:
+            # ogsaa et forkert vaerktoejsnavn er et spoer: en noegle der famler skal kunne ses i auditten
+            log_api_call(client["id"], "tools/call", name or "(tomt navn)", False, "ukendt vaerktoej")
             return _mcp_error(mid, -32602, f"Ukendt vaerktoej: {name}")
         scope = tool.get("scope", "read")
         if scope not in [x for x in (client["scopes"] or "").split(",") if x]:
@@ -4562,12 +4580,6 @@ async def api_keys_create(name: str = Form(...), scopes: str = Form("read")):
     except ValueError as e:
         with get_db() as db:
             add_alarm(db, "brugere", f"API-noegle ikke oprettet: {str(e)[:120]}", "advarsel")
-    return RedirectResponse("/", status_code=303)
-
-
-@app.post("/api-keys/dismiss")
-async def api_keys_dismiss():
-    clear_api_key()
     return RedirectResponse("/", status_code=303)
 
 
@@ -5544,14 +5556,12 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">MCP-adgang ({{ api_clients|length }} nøgler)</h2>
             {% if api_key_once %}
             <div class="bg-emerald-500/5 border border-emerald-500/40 rounded-xl p-3 mb-4">
-                <div class="text-[11px] uppercase tracking-wider text-emerald-300 mb-1">Ny nøgle til {{ api_key_once.name }} — vises kun nu</div>
+                <div class="text-[11px] uppercase tracking-wider text-emerald-300 mb-1">Ny nøgle til {{ api_key_once.name }} — vises kun her</div>
                 <code class="block text-xs text-emerald-200 break-all select-all" id="cc-api-key">{{ api_key_once.key }}</code>
-                <form action="/api-keys/dismiss" method="POST" class="mt-2">
-                    <button class="text-[11px] text-zinc-400 hover:text-zinc-200 underline">Jeg har gemt nøglen</button>
-                </form>
+                <p class="text-[10px] text-zinc-500 mt-2">Nøglen er allerede slettet fra databasen — kopiér den nu. Genindlæser du siden, er den væk, og du skal oprette en ny.</p>
             </div>
             {% endif %}
-            <p class="text-xs text-zinc-500 mb-3">Hver MCP-klient får sin egen nøgle (ingen fælles token). Nøglen sendes som <code class="text-zinc-400">Authorization: Bearer …</code> til <code class="text-zinc-400">/mcp</code> og gemmes kun som hash — den kan tilbagekaldes enkeltvis. <code class="text-zinc-400">read</code> giver de syv læse-værktøjer; <code class="text-zinc-400">read,write</code> giver også <code class="text-zinc-400">start_crawl</code>, <code class="text-zinc-400">add_monitor</code>, <code class="text-zinc-400">resolve_alarm</code> og <code class="text-zinc-400">add_note</code>. Hvert kald havner i auditten nedenfor.</p>
+            <p class="text-xs text-zinc-500 mb-3">Hver MCP-klient får sin egen nøgle (ingen fælles token). Nøglen sendes som <code class="text-zinc-400">Authorization: Bearer …</code> til <code class="text-zinc-400">/mcp</code> og gemmes kun som hash — den kan tilbagekaldes enkeltvis. Selve nøglen findes i klartekst i databasen i det ene øjeblik den vises, og slettes i samme kald (højst 15 min. hvis siden aldrig åbnes). <code class="text-zinc-400">read</code> giver de syv læse-værktøjer; <code class="text-zinc-400">read,write</code> giver også <code class="text-zinc-400">start_crawl</code>, <code class="text-zinc-400">add_monitor</code>, <code class="text-zinc-400">resolve_alarm</code> og <code class="text-zinc-400">add_note</code>. Hvert kald havner i auditten nedenfor.</p>
             <form action="/api-keys/create" method="POST" class="grid grid-cols-1 md:grid-cols-3 gap-2 mb-4">
                 <input type="text" name="name" placeholder="Navn, fx Claude Desktop" required minlength="2" maxlength="60" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
                 <select name="scopes" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
@@ -6099,6 +6109,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 
 ## Nyheder i v7.17
 
+- **MCP-hærdning (v7.17.1)** — nøglen ligger ikke længere i klartekst i databasen: rækken i `settings` slettes i samme kald som dashboardet viser den (højst 15 min. hvis siden aldrig åbnes, og oprydningen fjerner resten). "Jeg har gemt nøglen"-knappen er derfor væk. Ukendte værktøjsnavne på `/mcp` havner nu også i auditten, så en nøgle der famler kan ses.
 - **MCP skriver nu også (fase 2)** — med `read,write` på nøglen kan en agent starte et site-crawl, oprette en monitor, løse en alarm og skrive en note (`start_crawl`, `add_monitor`, `resolve_alarm`, `add_note`). Hvert kald — også afviste — havner i en **audit pr. nøgle** (`api_audit`) med værktøj, varighed og fejl, som du ser i fanen **Brugere** og med `python3 scripts/api_key.py audit`. Værktøjerne har `readOnlyHint`/`destructiveHint`, så klienten kan advare før et kald.
 - **MCP-adgang (fase 1)** — agenter og editorer kan læse Command Center direkte. Under fanen **Brugere** opretter du en nøgle pr. klient (ingen fælles token); den vises én gang, gemmes kun som sha256 og kan tilbagekaldes enkeltvis. `POST /mcp` tilbyder syv læse-værktøjer: `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes` og `history`. Endpointet validerer `Origin`/`Host` (DNS-rebinding) og svarer `401` med `WWW-Authenticate` uden nøgle — se [docs/Command_Center_MCP.md](docs/Command_Center_MCP.md).
 - **E-mail er login (v7.15)** — første besøg opretter din bruger med e-mail + adgangskode (`/setup`), derefter logger du ind med e-mail og adgangskode (PBKDF2-SHA256, salt pr. bruger, 30 dages HttpOnly-session). Gamle konti fra brugernavn-tiden kan stadig logge ind med deres brugernavn, indtil de får en e-mail.
@@ -6159,9 +6170,10 @@ curl -s https://<din-adresse>/mcp -H "Authorization: Bearer cc_..." \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-- Nøglen sendes altid i `Authorization: Bearer …` (aldrig i query string) og gemmes kun som hash.
+- Nøglen sendes altid i `Authorization: Bearer …` (aldrig i query string) og gemmes kun som hash. Den vises **én gang** — rækken med klartekst slettes i samme kald som dashboardet viser den.
 - `scopes`: `read` (kun læsning) eller `read,write` (læsning + de fire skrive-værktøjer). Manglende scope giver `-32003`.
 - `Origin`/`Host` valideres mod `CC_PUBLIC_URL`; ukendt vært giver `421`, fremmed origin `403`.
+- Ukendte værktøjsnavne og manglende scopes havner også i auditten (`ok=0`), så et nøgle der prøver ting af kan ses.
 - `python3 scripts/api_key.py list` viser nøglerne (kun halen), `revoke <id>` slår dem fra med det samme, og `audit [antal]` viser de seneste kald pr. nøgle.
 - Læse-værktøjer: `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes`, `history`.
 - Skrive-værktøjer (`write`): `start_crawl` (afvises hvis et crawl kører), `add_monitor` (samme url+type oprettes ikke to gange), `resolve_alarm`, `add_note`.
@@ -6248,11 +6260,11 @@ din IP - ingen alarmtekster eller brugernavne.
 
 ## Agenter og skills (v7.13.2)
 
-Fire agenter i tre grupper, plus en skill. Se `.agents/README.md` for detaljer og spawn-eksempler.
+Fem agenter i tre grupper, plus en skill. Se `.agents/README.md` for detaljer og spawn-eksempler.
 
 | Repo | Agenter |
 |---|---|
-| **Command Center** (dette repo) | `command-center-reviewer` (regler/kontrakter), `cc-verifier` (tests, ruter, installer-paritet), `site-seo-auditor` (SEO ud fra appens DB) |
+| **Command Center** (dette repo) | `command-center-reviewer` (regler/kontrakter), `cc-verifier` (tests, ruter, installer-paritet), `site-seo-auditor` (SEO ud fra appens DB), `mcp-access-auditor` (MCP-nøgler, scopes, audit, transport) |
 | **Social Autopilot** (tjenesten) | `social-autopilot-auditor` (`/drafts`, `/autopilot/sync`, kanaler, idempotens, tidszoner) |
 | **Social Autopilot Android** (mobilklienten) | `social-autopilot-android` (API-paritet, Keystore, offline-kø, release) |
 

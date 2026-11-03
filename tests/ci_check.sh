@@ -69,6 +69,18 @@ check "mcp2: alarmen er markeret loest i DB" "$(q "SELECT resolved FROM alarms W
 check "mcp2: auditten har kald med noeglenavn" "$(q "SELECT COUNT(*) FROM api_audit WHERE tool='add_monitor' AND ok=1")" "2"
 check "mcp2: scope-afvisning staar i auditten" "$(q "SELECT COUNT(*) FROM api_audit WHERE ok=0 AND detail LIKE '%scope: write%'")" "1"
 check "mcp2: auditten gemmer ikke noeglen" "$(q "SELECT COUNT(*) FROM api_audit WHERE detail LIKE '%$WKEY%'")" "0"
+# --- v7.17.1: ukendt vaerktoej i auditten + noeglen vises kun én gang ---
+check "mcp3: ukendt vaerktoej giver -32602" "$(wmcp '{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"findes_ikke","arguments":{}}}' \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["error"]["code"])')" "-32602"
+check "mcp3: ukendt vaerktoej staar i auditten" "$(q "SELECT COUNT(*) FROM api_audit WHERE tool='findes_ikke' AND ok=0 AND detail LIKE '%ukendt%'")" "1"
+check "mcp3: fejl i auditten taelles med i api_usage" "$(q "SELECT COUNT(*) FROM api_audit WHERE client_id=(SELECT id FROM api_clients WHERE name='CI-skriver') AND ok=0")" "1"
+curl -s -o /dev/null -b "$JAR" -X POST $U/api-keys/create -d name=UI-noegle -d scopes=read
+UIKEY=$(python3 -c "import sqlite3,json;r=sqlite3.connect('app/data/center.db').execute(\"SELECT value FROM settings WHERE key='api_key_once'\").fetchone();print(json.loads(r[0])['key'] if r else '')")
+check "mcp3: UI-noeglen har et tidsstempel" "$(python3 -c "import sqlite3,json;r=sqlite3.connect('app/data/center.db').execute(\"SELECT value FROM settings WHERE key='api_key_once'\").fetchone();print('ja' if r and json.loads(r[0]).get('created_at') else 'nej')")" "ja"
+check "mcp3: noeglen vises paa dashboardet" "$(curl -s -b "$JAR" $U/ | grep -c "$UIKEY")" "1"
+check "mcp3: anden visning viser ingen noegle" "$(curl -s -b "$JAR" $U/ | grep -c "$UIKEY")" "0"
+check "mcp3: noeglen er slettet fra DB efter visning" "$(q "SELECT COUNT(*) FROM settings WHERE key='api_key_once'")" "0"
+check "mcp3: dismiss-ruten er væk" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -X POST $U/api-keys/dismiss)" "404"
 check "update: /api/update is available" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" $U/api/update)" "200"
 check "update: /api/update reports the repo" "$(curl -s -b "$JAR" $U/api/update | python3 -c 'import json,sys;print(bool(json.load(sys.stdin).get("repo")))')" "True"
 

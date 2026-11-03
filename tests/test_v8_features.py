@@ -516,6 +516,41 @@ check("mcp2: api_usage taeller kald og fejl pr. noegle",
 check("mcp2: auditten gemmer ikke noeglen i klartekst",
       not any((rw_key in (a["detail"] or "")) or (rw_key in (a["tool"] or "")) for a in audit_rows))
 
+# --- v7.17.1: ukendte vaerktoejer i auditten + noeglen bliver ikke liggende i klartekst ---
+r = mcp_call("findes_ikke", {})
+row = main.api_audit_rows(1)[0]
+check("mcp3: ukendt vaerktoej giver -32602 og havner i auditten",
+      r.json()["error"]["code"] == -32602
+      and row["tool"] == "findes_ikke" and row["ok"] == 0 and "ukendt" in (row["detail"] or ""),
+      (r.json()["error"]["code"], row["tool"], row["detail"]))
+
+_j = __import__("json")
+main.remember_api_key("Engangs-noegle", rw_key)
+with main.get_db() as db:
+    raw = db.execute("SELECT value FROM settings WHERE key='api_key_once'").fetchone()
+raw_data = _j.loads(raw["value"]) if raw else {}
+check("mcp3: remember_api_key gemmer et tidsstempel",
+      bool(raw_data.get("created_at")) and raw_data.get("key") == rw_key, raw_data)
+shown = main.pending_api_key()
+with main.get_db() as db:
+    left = db.execute("SELECT COUNT(*) FROM settings WHERE key='api_key_once'").fetchone()[0]
+check("mcp3: noeglen vises én gang og slettes i samme kald",
+      shown and shown["key"] == rw_key and left == 0, (bool(shown), left))
+check("mcp3: genindlaesning viser ingen noegle", main.pending_api_key() is None)
+
+stale = (main.datetime.now() - main.timedelta(minutes=20)).isoformat(timespec="seconds")
+with main.get_db() as db:
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('api_key_once', ?)",
+               (_j.dumps({"name": "Gammel", "key": rw_key, "created_at": stale}),))
+check("mcp3: en noegle aeldre end 15 min vises ikke", main.pending_api_key() is None)
+with main.get_db() as db:
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('api_key_once', ?)",
+               (_j.dumps({"name": "Glemt", "key": rw_key, "created_at": stale}),))
+main.cleanup_old_data()
+with main.get_db() as db:
+    glemt = db.execute("SELECT COUNT(*) FROM settings WHERE key='api_key_once'").fetchone()[0]
+check("mcp3: oprydningen fjerner en glemt noegle", glemt == 0, glemt)
+
 main.log_startup("127.0.0.1", 8000)      # lifespan koerer ikke i TestClient uden context manager
 rep = main.last_run_report()
 check("report: version, taellinger, tidsstempler og db-stoerrelse",

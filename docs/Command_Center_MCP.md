@@ -116,7 +116,7 @@ applikationsstyrede (værten vælger kontekst), **prompts** er brugerstyrede ska
 
 Fase 1 kan leveres uden at røre dashboardets øvrige funktioner: alt er nye ruter og én ny tabel.
 
-## 6. Sådan er MCP bygget (v7.16–v7.17)
+## 6. Sådan er MCP bygget (v7.16–v7.17.1)
 
 - **Ingen ny afhængighed.** `mcp==2.3.0` kræver `starlette 1.10`, men appen kører `fastapi==0.115.6`,
   som kræver `starlette<0.42`. `pip install mcp` ødelagde derfor FastAPI-installationen i test, og
@@ -130,14 +130,16 @@ Fase 1 kan leveres uden at røre dashboardets øvrige funktioner: alt er nye rut
 - **Svar:** JSON-RPC 2.0 med `MCP-Protocol-Version: 2026-07-28` og `X-Accel-Buffering: no` i headeren.
   `initialize`, `ping`, `tools/list`, `tools/call`; notifikationer besvares med `202`; ukendt metode
   giver `-32601`, ukendt værktøj `-32602`, manglende `read`-scope `-32003`, ugyldig JSON `-32700`.
-- **Nøgler:** tabel `api_clients`, nøglen vises én gang (via `settings.api_key_once` indtil den er
-  kvitteret i UI'et), og `last_used_at`/`last_used_ip` opdateres ved hvert kald.
+- **Nøgler:** tabel `api_clients`, nøglen vises én gang: klartekst ligger kun i `settings.api_key_once`,
+  og rækken slettes i samme kald som dashboardet viser den (TTL 15 min. som sikkerhedsnet, og
+  `cleanup_old_data` fjerner en glemt række). `last_used_at`/`last_used_ip` opdateres ved hvert kald.
 - **Værktøjer:** `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes` og
   `history(domain_id)`; alle læser eksisterende tabeller, og `limit`-parametre klemmes til et loft.
 - **Fase 2 (v7.17): skrivning og audit.** Hvert værktøj har `scope` (`read`/`write`); `start_crawl`,
   `add_monitor`, `resolve_alarm` og `add_note` kræver `write`, og `tools/list` sender
   `annotations` (`readOnlyHint`/`destructiveHint`), så klienten kan advare før et kald. Alle kald —
-  også afviste — havner i `api_audit` med nøgle, værktøj, ok/fejl, årsag og varighed; UI'et viser kald
+  også afviste og ukendte værktøjsnavne — havner i `api_audit` med nøgle, værktøj, ok/fejl, årsag og
+  varighed; UI'et viser kald
   og fejl pr. nøgle plus de seneste 10 kald, og `scripts/api_key.py audit` viser dem i terminalen.
   Rækker ældre end 90 dage ryddes af `cleanup_old_data`. Skrive-værktøjerne genbruger appens egne
   funktioner (`normalize_url`, dublet-tjek, `site_crawl_sync`), så MCP ikke kan gøre noget, UI'et ikke

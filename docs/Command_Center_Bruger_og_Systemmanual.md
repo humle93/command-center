@@ -208,7 +208,8 @@ Agenter og editorer (Claude, Codebuff m.fl.) kan både læse og handle i Command
 
 1. Fanen **Brugere → MCP-adgang**: skriv et navn (fx "Claude Desktop"), vælg `read` (kun læsning)
    eller `read,write` (læsning + handlinger), og tryk **Opret nøgle**. Nøglen (`cc_…`) vises én gang —
-   kopiér den med det samme.
+   kopiér den med det samme: den ligger kun i klartekst i databasen indtil siden er vist (højst 15 min.),
+   og derefter findes den kun som hash. Genindlæser du dashboardet, er nøglen væk, og du skal oprette en ny.
 2. Peg klienten på `https://<din-adresse>/mcp` og send nøglen som `Authorization: Bearer cc_…`.
 3. Vil du hellere gøre det fra terminalen:
 
@@ -236,16 +237,18 @@ Skrive-værktøjer (kun med `write`-scope):
 gange (den svarer `created: false` med den eksisterende id).
 
 - Nøglen gemmes kun som sha256; databasen kan ikke genskabe den. Selve nøglen har ingen udløbsdato —
-  tilbagekald den, når klienten ikke skal have adgang mere.
-- `scopes` er `read` eller `read,write`; skrivende værktøjer kommer i fase 2, så `write` giver i dag
-  ingen ekstra rettigheder.
+  tilbagekald den, når klienten ikke skal have adgang mere. Den ene række med klartekst, der vises i
+  dashboardet, slettes i samme kald som visningen; den daglige oprydning fjerner en glemt række.
+- `scopes` er `read` (syv læse-værktøjer) eller `read,write` (også de fire skrive-værktøjer). Manglende
+  scope giver `-32003`, og afvisningen havner i auditten.
 - Endpointet validerer `Host` mod `CC_PUBLIC_URL` (ellers `421`) og `Origin` (fremmed origin giver `403`),
   så en fremmed webside ikke kan bruge nøglen fra browseren. Uden nøgle svarer det `401` med
   `WWW-Authenticate: Bearer`.
 - Brug af en nøgle opdaterer "sidst brugt" i tabellen, så en glemt nøgle er nem at få øje på.
 - **Audit pr. nøgle**: hvert værktøjskald gemmes i `api_audit` (nøgle, værktøj, ok/fejl, årsag,
-  varighed, tid) og vises under nøglerne. Også afviste kald (fx manglende `write`-scope) gemmes, så et
-  misbrugt eller glemt nøgle kan ses. Rækker ældre end 90 dage ryddes af den daglige oprydning.
+  varighed, tid) og vises under nøglerne. Også afviste kald gemmes: manglende scope, en fejl i
+  værktøjet og et **ukendt værktøjsnavn**, så et nøgle der famler eller prøver ting af kan ses. Rækker
+  ældre end 90 dage ryddes af den daglige oprydning.
 - Plan og baggrund: [`Command_Center_MCP.md`](Command_Center_MCP.md).
 
 ## API (til automatisering)
@@ -256,7 +259,7 @@ Alle routes kræver en indlogget bruger (cookie) - samme session som UI'et. Vigt
 - `POST /keywords/add` · `GET /api/visibility` · `GET /api/health-history`
 - `POST /backlinks/prospect` · `POST /seo/audit` · `POST /seo/crawl`
 - `GET /health` · `POST /settings/module` · `GET /api/update` · `POST /update/check` · `POST /update/apply`
-- `POST /mcp` (MCP, kræver `Authorization: Bearer cc_…` i stedet for cookie) · `POST /api-keys/create`, `/api-keys/revoke`, `/api-keys/dismiss` (cookie)
+- `POST /mcp` (MCP, kræver `Authorization: Bearer cc_…` i stedet for cookie) · `POST /api-keys/create`, `/api-keys/revoke` (cookie)
 - `POST /self-update` (alias for `/update/apply`)
 
 ## Environment-variabler (.env)

@@ -908,14 +908,12 @@
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">MCP-adgang ({{ api_clients|length }} nøgler)</h2>
             {% if api_key_once %}
             <div class="bg-emerald-500/5 border border-emerald-500/40 rounded-xl p-3 mb-4">
-                <div class="text-[11px] uppercase tracking-wider text-emerald-300 mb-1">Ny nøgle til {{ api_key_once.name }} — vises kun nu</div>
+                <div class="text-[11px] uppercase tracking-wider text-emerald-300 mb-1">Ny nøgle til {{ api_key_once.name }} — vises kun her</div>
                 <code class="block text-xs text-emerald-200 break-all select-all" id="cc-api-key">{{ api_key_once.key }}</code>
-                <form action="/api-keys/dismiss" method="POST" class="mt-2">
-                    <button class="text-[11px] text-zinc-400 hover:text-zinc-200 underline">Jeg har gemt nøglen</button>
-                </form>
+                <p class="text-[10px] text-zinc-500 mt-2">Nøglen er allerede slettet fra databasen — kopiér den nu. Genindlæser du siden, er den væk, og du skal oprette en ny.</p>
             </div>
             {% endif %}
-            <p class="text-xs text-zinc-500 mb-3">Hver MCP-klient får sin egen nøgle (ingen fælles token). Nøglen sendes som <code class="text-zinc-400">Authorization: Bearer …</code> til <code class="text-zinc-400">/mcp</code> og gemmes kun som hash — den kan tilbagekaldes enkeltvis. <code class="text-zinc-400">read</code> giver de syv læse-værktøjer; <code class="text-zinc-400">read,write</code> giver også <code class="text-zinc-400">start_crawl</code>, <code class="text-zinc-400">add_monitor</code>, <code class="text-zinc-400">resolve_alarm</code> og <code class="text-zinc-400">add_note</code>. Hvert kald havner i auditten nedenfor.</p>
+            <p class="text-xs text-zinc-500 mb-3">Hver MCP-klient får sin egen nøgle (ingen fælles token). Nøglen sendes som <code class="text-zinc-400">Authorization: Bearer …</code> til <code class="text-zinc-400">/mcp</code> og gemmes kun som hash — den kan tilbagekaldes enkeltvis. Selve nøglen findes i klartekst i databasen i det ene øjeblik den vises, og slettes i samme kald (højst 15 min. hvis siden aldrig åbnes). <code class="text-zinc-400">read</code> giver de syv læse-værktøjer; <code class="text-zinc-400">read,write</code> giver også <code class="text-zinc-400">start_crawl</code>, <code class="text-zinc-400">add_monitor</code>, <code class="text-zinc-400">resolve_alarm</code> og <code class="text-zinc-400">add_note</code>. Hvert kald havner i auditten nedenfor.</p>
             <form action="/api-keys/create" method="POST" class="grid grid-cols-1 md:grid-cols-3 gap-2 mb-4">
                 <input type="text" name="name" placeholder="Navn, fx Claude Desktop" required minlength="2" maxlength="60" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
                 <select name="scopes" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">

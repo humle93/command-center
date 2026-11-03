@@ -203,6 +203,11 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
   id-prefix + manifest, ikke undermapper.
 - Testen validerer nu ALLE agentfiler (id = filnavn, model, vaerktoejer, prompt), at de er naevnt i
   manifestet, og at der ikke er fremmedsprog/rester eller hemmeligheder i dem.
+- `scripts/agents_md_rollout.sh` (ny): lægger den fælles `AGENTS.md` ind i alle repoer under kontoen som
+  branch `chore/agents-md` + PR. `--dry-run` viser planen, `--skip` springer repoer over, og en
+  eksisterende fil overskrives kun med `--overwrite`; `main` pushes der aldrig til. Kræver `gh` logget
+  ind lokalt, indgår ikke i `install.sh` og kører ikke i CI — testet offline mod tre lokale bare-repoer
+  (opret, identisk, afvigende, genkørsel og `--skip`).
 - `.agents/mcp-access-auditor.ts` (v7.17.1): read-only revisor for MCP-adgangen. Laeser `api_clients`
   og `api_audit` med `mode=ro` og rapporterer noegler der boer tilbagekaldes (ubrugte, for brede
   scopes, brug efter tilbagekaldelse), scope-afvisninger i auditten, om `CC_PUBLIC_URL` er sat

@@ -38,7 +38,7 @@ install.sh                 # selvstændig installer (indeholder kopier af filern
 | --- | --- |
 | Brugere | `users(id, email UNIQUE, username (legacy, kan vaere NULL), password_hash, must_change_password, created_at, last_login_ip, last_login_at)` |
 | Login-id | e-mail i smaa bogstaver (`normalize_email`); et gammelt brugernavn accepteres stadig, saa migrerede konti ikke laases ude |
-| Invitation | `POST /users/invite` → `send_email()` med en midlertidig adgangskode. Brugeren oprettes **først naar mailen er sendt**; fejler SMTP, oprettes ingen bruger og fejlen bliver en alarm. `must_change_password=1` ryddes af `/users/password` |
+| Invitation | `POST /users/invite` → `send_email()` med en midlertidig adgangskode. Brugeren oprettes **først naar mailen er sendt**; fejler SMTP, oprettes ingen bruger, fejlen bliver en alarm og svares tilbage i URL'en. `must_change_password` ryddes af `/users/password` |
 | Hash | `pbkdf2_sha256$240000$<salt>$<hash>` (salt pr. bruger, `hmac.compare_digest`) |
 | Sessioner | `sessions(id=sha256(cookie), user_id, created_at, last_seen, expires_at)`, 30 dage |
 | Cookie | `cc_session`, HttpOnly, SameSite=Lax, `Secure` når scheme er https |
@@ -139,6 +139,7 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 
 ## 12. Versionshistorik (kort)
 
+- **v7.17.2** — invitationen svarer i sin egen formular: `POST /users/invite` redirecter til `/?tab=brugere&invite=ok|fejl&invite_msg=…`, dashboardet åbner den fane (`initial_tab`, kun kendte faner) og viser enten "sendt til X" eller mailserverens fejl. Før landede svaret på Cockpit, og en mislykket invitation var kun synlig som alarm
 - **v7.17.1** — MCP-hærdning: nøglen ligger ikke længere i klartekst i databasen (rækken i `settings.api_key_once` slettes ved visning, TTL 15 min., oprydningen fjerner resten; `POST /api-keys/dismiss` er fjernet), og ukendte værktøjsnavne på `/mcp` logges nu i `api_audit`
 - **v7.17** — MCP fase 2: fire skrive-værktøjer bag `write`-scope (`start_crawl`, `add_monitor`, `resolve_alarm`, `add_note`), `readOnlyHint`/`destructiveHint` i `tools/list`, audit pr. nøgle i `api_audit` (vist i UI + `scripts/api_key.py audit`) og oprydning efter 90 dage
 - **v7.16** — MCP-adgang fase 1: `api_clients` med hash og scopes, `POST /mcp` (JSON-RPC, Streamable HTTP uden SSE) med syv læse-værktøjer, `Origin`/`Host`-validering og `scripts/api_key.py`

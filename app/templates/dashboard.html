@@ -33,7 +33,7 @@
     </style>
 </head>
 {% if insecure %}<div class="bg-yellow-600 text-black text-xs text-center py-1.5 px-4 font-semibold">&Uacute;t&uacute;n HTTPS &mdash; login og adgangskoder sendes ukrypteret. S&aelig;t nginx + TLS op foran CC (se Install-dokumentationen).</div>{% endif %}
-<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null, histOpen: false, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
+<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: '{{ initial_tab }}', seoResult: null, seoLoading: false, crawl: null, histChart: null, histOpen: false, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
 {% if current_user and current_user.must_change_password %}
 <div class="bg-amber-500/10 border-b border-amber-500/40 text-amber-300 text-xs text-center py-2 px-4">Du er logget ind med en midlertidig adgangskode fra invitationsmailen &mdash; skift den under fanen <b>Brugere</b>.</div>
 {% endif %}
@@ -898,6 +898,19 @@
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Inviter bruger</h2>
+            {% if invite_feedback %}
+            {% if invite_feedback.ok %}
+            <div class="bg-emerald-500/10 border border-emerald-500/40 text-emerald-300 rounded-xl px-3 py-2 mb-3 text-xs">
+                ✅ Invitationen er sendt til <b>{{ invite_feedback.message }}</b>. Brugeren får en midlertidig adgangskode i mailen — bed den inviterede tjekke spam, hvis den ikke dukker op.
+            </div>
+            {% else %}
+            <div class="bg-rose-500/10 border border-rose-500/40 text-rose-300 rounded-xl px-3 py-2 mb-3 text-xs">
+                ❌ <b>Invitationen blev ikke sendt</b> — og der blev ikke oprettet nogen bruger. Fejlen fra mailserveren:
+                <code class="block mt-1 text-rose-200 break-all">{{ invite_feedback.message }}</code>
+                <span class="block mt-1 text-rose-300/80">Mangler <b>SMTP_HOST</b> + <b>SMTP_FROM</b> i <code>.env</code>, bliver der ikke sendt noget. Uden SMTP kan invitationen i stedet læses op med <code>python3 scripts/invite.py navn@domaene.dk --print</code>.</span>
+            </div>
+            {% endif %}
+            {% endif %}
             <form action="/users/invite" method="POST" class="grid grid-cols-1 md:grid-cols-2 gap-2">
                 <input type="email" name="email" placeholder="navn@domaene.dk" required maxlength="254" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Send invitation</button>

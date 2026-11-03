@@ -16,7 +16,7 @@ Derefter logger du ind med e-mail og adgangskode. Konti fra før v7.15 (oprettet
 
 Under fanen **Brugere**:
 
-- **Inviter bruger** — skriv en e-mail, og appen sender en invitation med en midlertidig adgangskode (12 tegn). Brugeren skal skifte den ved første login, og dashboardet viser en gul bjælke indtil da. Invitationen kræver `SMTP_HOST` + `SMTP_FROM` i `.env`: kan mailen ikke sendes, bliver brugeren **ikke** oprettet, og fejlen står under fanen Alarmer
+- **Inviter bruger** — skriv en e-mail, og appen sender en invitation med en midlertidig adgangskode (12 tegn). Brugeren skal skifte den ved første login, og dashboardet viser en gul bjælke indtil da. Invitationen kræver `SMTP_HOST` + `SMTP_FROM` i `.env`: kan mailen ikke sendes, bliver brugeren **ikke** oprettet, og fejlen vises med det samme i formularen (og under fanen Alarmer). Formularen bliver stående på fanen Brugere, så du ikke skal lede efter svaret
 - **Slet bruger** gør det samme som før, og den sidste bruger kan ikke slettes, så du ikke låser dig ude
 - Sletter du dig selv, bliver du logget ud
 
@@ -284,7 +284,7 @@ Rigtige miljøvariabler vinder over `.env`. `.env` læses før appens konfigurat
 | "GITHUB_TOKEN mangler" i opdaterings-panelet | Sæt token i `.env` (privat repo) og genstart appen |
 | 504 fra nginx ved crawl/AI-kald | `proxy_read_timeout 300s` i nginx-blokken |
 | Login låst | 5 fejl = 10 min pr. IP; vent eller genstart appen |
-| Kan ikke invitere en bruger | Gyldig e-mail + `SMTP_HOST`/`SMTP_FROM` i `.env`; fejlen står under Alarmer. Adgangskode ved direkte oprettelse: min. 8 tegn |
+| Kan ikke invitere en bruger | Gyldig e-mail + `SMTP_HOST`/`SMTP_FROM` i `.env`; fejlen står nu direkte i formularen (og under Alarmer). Uden SMTP: `python3 scripts/invite.py adresse --print` og send mailen selv. Adgangskode ved direkte oprettelse: min. 8 tegn |
 | Ingen adgang til `/api/*` | Log ind igen - API'et kræver en aktiv session (cookie), ikke en token |
 | Appen starter ikke efter opdatering | `pip install -r requirements.txt` (gør `./run.sh`), og se `journalctl --user -u command-center` |
 

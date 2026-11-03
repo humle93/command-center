@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 3. november 2026 · **Version:** 7.17.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 3. november 2026 · **Version:** 7.17.2 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -69,6 +69,14 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
   `created: false` for samme url+type, `resolve_alarm` svarer `already_resolved` for gamle alarmer.
 - Tests: 11 nye checks i `tests/test_v8_features.py` (annotations, skrivning, scope-afvisning, dublet,
   alarm, crawl-afvisning, ugyldig URL, audit, usage, ingen nøgle i audit) og 10 i `tests/ci_check.sh`.
+
+### Invitation med svar (v7.17.2) — implementeret
+- `POST /users/invite` redirecter nu til `/?tab=brugere&invite=ok|fejl&invite_msg=…`
+  (`invite_redirect()`), og dashboardet starter på den fane (`initial_tab`, kun navne i
+  `DASHBOARD_TABS`). Fejlen vises i formularen med mailserverens tekst + `--print`-vejen, så en
+  invitation uden SMTP ikke længere ligner en tabt mail. Rapporteret som "modtog aldrig invite
+  email": mailen var aldrig sendt, og svaret lå kun under Alarmer.
+- Tests: 5 nye checks i `tests/test_v8_features.py`, 3 i `tests/ci_check.sh`.
 
 ### MCP-hærdning (v7.17.1) — implementeret
 - **Klartekst-nøglen lever ikke længere i DB'en.** `settings.api_key_once` indeholder nu

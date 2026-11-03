@@ -2,7 +2,7 @@
 set -e
 PROJECT_DIR="$HOME/command-center"
 
-echo "⚡ Command Center v7.17.1 - installerer i $PROJECT_DIR..."
+echo "⚡ Command Center v7.17.2 - installerer i $PROJECT_DIR..."
 mkdir -p "$PROJECT_DIR/app/templates" "$PROJECT_DIR/app/data" "$PROJECT_DIR/app/static" "$PROJECT_DIR/deploy" "$PROJECT_DIR/scripts"
 echo "📄 requirements.txt..."
 cat << 'EOF_REQ' > "$PROJECT_DIR/requirements.txt"
@@ -197,10 +197,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.17.1"
+APP_VERSION = "7.17.2"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.17.2", "Invitationen viser selv om mailen blev sendt - foer laa fejlen kun under Alarmer"),
     ("7.17.1", "MCP-noeglen ligger ikke laengere i klartekst i DB'en, og ukendte vaerktoejer havner i auditten"),
     ("7.17.0", "MCP fase 2: skrivende vaerktoejer med write-scope og audit pr. noegle"),
     ("7.16.0", "MCP-adgang: hver klient sin egen noegle (hash) og syv laese-vaerktoejer paa /mcp"),
@@ -214,7 +215,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "MCP-noeglen slettes fra DB'en ved foerste visning, og ukendte vaerktoejer logges i auditten"
+NEWEST_LINE = "Invitationen viser resultatet med det samme - og MCP-noeglen ligger ikke laengere i klartekst"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -826,6 +827,20 @@ def invite_user(email: str, base_url: str = "", deliver=None) -> tuple:
     return True, ""
 
 
+# Fanerne i dashboardet - bruges naar en handling skal lande i den rigtige fane efter et POST.
+DASHBOARD_TABS = ("cockpit", "seo", "keywords", "articles", "links", "spy", "social", "monitors",
+                  "ai", "pro", "moduler", "brugere", "alarms", "notes")
+
+
+def invite_redirect(ok: bool, text: str) -> str:
+    """Sender brugeren tilbage til Brugere-fanen med invitationens resultat i URL'en.
+
+    Uden det her landede svaret paa Cockpit, og en mislykket invitation var kun synlig som en
+    alarm i en anden fane - det ligner en mail der bare er tabt."""
+    state = "ok" if ok else "fejl"
+    return f"/?tab=brugere&invite={state}&invite_msg={urllib.parse.quote((text or '').strip()[:180])}"
+
+
 # ---------- API-noegler: personlige noegler pr. MCP-klient (ingen global token) ----------
 API_KEY_PREFIX = "cc_"
 API_SCOPES = ("read", "write")
@@ -1152,12 +1167,14 @@ async def logout(request: Request):
 
 @app.post("/users/invite")
 async def users_invite(request: Request, email: str = Form(...)):
-    """Inviterer en bruger paa mail. Fejler SMTP, oprettes brugeren ikke - fejlen bliver en alarm."""
+    """Inviterer en bruger paa mail. Fejler SMTP, oprettes brugeren ikke - fejlen bliver en alarm
+    og vises samtidig i formularen, saa en manglende mail ikke ser ud som en tabt mail."""
     ok, err = invite_user(email, str(request.base_url).rstrip("/"))
     if not ok:
         with get_db() as db:
             add_alarm(db, "brugere", f"Invitation til '{email.strip()[:64]}' blev ikke sendt: {str(err)[:160]}", "advarsel")
-    return RedirectResponse("/", status_code=303)
+        return RedirectResponse(invite_redirect(False, err), status_code=303)
+    return RedirectResponse(invite_redirect(True, email.strip().lower()), status_code=303)
 
 
 @app.post("/users/delete")
@@ -4008,6 +4025,9 @@ def sanitize_article_html(html: str) -> str:
 # ---------- Dashboard ----------
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
+    tab = (request.query_params.get("tab") or "").strip().lower()
+    invite = (request.query_params.get("invite") or "").strip().lower()
+    invite_msg = (request.query_params.get("invite_msg") or "").strip()[:180]
     with get_db() as db:
         domains = db.execute("SELECT * FROM domains ORDER BY id DESC").fetchall()
         competitors = db.execute("SELECT * FROM competitors ORDER BY id DESC LIMIT 20").fetchall()
@@ -4112,6 +4132,9 @@ async def dashboard(request: Request):
         "strategy_autopilot_label": STRATEGIES[active_key]["label"],
         "insecure": getattr(request.state, "insecure", False),
         "strategy_check": jsonlib.loads(check_row["value"]) if check_row and check_row["value"] else None,
+        "initial_tab": tab if tab in DASHBOARD_TABS else "cockpit",
+        "invite_feedback": ({"ok": invite == "ok", "message": invite_msg}
+                            if invite in ("ok", "fejl") else None),
     })
 
 
@@ -4681,7 +4704,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
     </style>
 </head>
 {% if insecure %}<div class="bg-yellow-600 text-black text-xs text-center py-1.5 px-4 font-semibold">&Uacute;t&uacute;n HTTPS &mdash; login og adgangskoder sendes ukrypteret. S&aelig;t nginx + TLS op foran CC (se Install-dokumentationen).</div>{% endif %}
-<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null, histOpen: false, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
+<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: '{{ initial_tab }}', seoResult: null, seoLoading: false, crawl: null, histChart: null, histOpen: false, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
 {% if current_user and current_user.must_change_password %}
 <div class="bg-amber-500/10 border-b border-amber-500/40 text-amber-300 text-xs text-center py-2 px-4">Du er logget ind med en midlertidig adgangskode fra invitationsmailen &mdash; skift den under fanen <b>Brugere</b>.</div>
 {% endif %}
@@ -5546,6 +5569,19 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Inviter bruger</h2>
+            {% if invite_feedback %}
+            {% if invite_feedback.ok %}
+            <div class="bg-emerald-500/10 border border-emerald-500/40 text-emerald-300 rounded-xl px-3 py-2 mb-3 text-xs">
+                ✅ Invitationen er sendt til <b>{{ invite_feedback.message }}</b>. Brugeren får en midlertidig adgangskode i mailen — bed den inviterede tjekke spam, hvis den ikke dukker op.
+            </div>
+            {% else %}
+            <div class="bg-rose-500/10 border border-rose-500/40 text-rose-300 rounded-xl px-3 py-2 mb-3 text-xs">
+                ❌ <b>Invitationen blev ikke sendt</b> — og der blev ikke oprettet nogen bruger. Fejlen fra mailserveren:
+                <code class="block mt-1 text-rose-200 break-all">{{ invite_feedback.message }}</code>
+                <span class="block mt-1 text-rose-300/80">Mangler <b>SMTP_HOST</b> + <b>SMTP_FROM</b> i <code>.env</code>, bliver der ikke sendt noget. Uden SMTP kan invitationen i stedet læses op med <code>python3 scripts/invite.py navn@domaene.dk --print</code>.</span>
+            </div>
+            {% endif %}
+            {% endif %}
             <form action="/users/invite" method="POST" class="grid grid-cols-1 md:grid-cols-2 gap-2">
                 <input type="email" name="email" placeholder="navn@domaene.dk" required maxlength="254" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Send invitation</button>
@@ -6113,7 +6149,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 - **MCP skriver nu også (fase 2)** — med `read,write` på nøglen kan en agent starte et site-crawl, oprette en monitor, løse en alarm og skrive en note (`start_crawl`, `add_monitor`, `resolve_alarm`, `add_note`). Hvert kald — også afviste — havner i en **audit pr. nøgle** (`api_audit`) med værktøj, varighed og fejl, som du ser i fanen **Brugere** og med `python3 scripts/api_key.py audit`. Værktøjerne har `readOnlyHint`/`destructiveHint`, så klienten kan advare før et kald.
 - **MCP-adgang (fase 1)** — agenter og editorer kan læse Command Center direkte. Under fanen **Brugere** opretter du en nøgle pr. klient (ingen fælles token); den vises én gang, gemmes kun som sha256 og kan tilbagekaldes enkeltvis. `POST /mcp` tilbyder syv læse-værktøjer: `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes` og `history`. Endpointet validerer `Origin`/`Host` (DNS-rebinding) og svarer `401` med `WWW-Authenticate` uden nøgle — se [docs/Command_Center_MCP.md](docs/Command_Center_MCP.md).
 - **E-mail er login (v7.15)** — første besøg opretter din bruger med e-mail + adgangskode (`/setup`), derefter logger du ind med e-mail og adgangskode (PBKDF2-SHA256, salt pr. bruger, 30 dages HttpOnly-session). Gamle konti fra brugernavn-tiden kan stadig logge ind med deres brugernavn, indtil de får en e-mail.
-- **Invitation på mail (v7.15)** — fanen **Brugere** har "Inviter bruger": du skriver en e-mail, og appen sender en invitation med en midlertidig adgangskode, som brugeren skifter ved første login (dashboardet minder om det). Der er ingen invite-links og ingen tokens - kun en adgangskode.
+- **Invitation på mail (v7.15, svar i v7.17.2)** — fanen **Brugere** har "Inviter bruger": du skriver en e-mail, og appen sender en invitation med en midlertidig adgangskode, som brugeren skifter ved første login (dashboardet minder om det). Der er ingen invite-links og ingen tokens - kun en adgangskode. Svaret lander i den samme formular: blev mailen sendt, står der hvilken adresse den gik til, og fejler den, står mailserverens fejl der med det samme i stedet for kun under Alarmer.
 - ⏱️ **Fremdrift på opgaver** — tunge handlinger (crawl, AI-artikel, keyword-tjek, backlink-prospecting …) viser timer, procent og "~N s igen"; crawl læser de rigtige tal (sider/total + ETA) fra `/api/crawl/status`
 - **Opdatering fra GitHub** — Cockpit viser installeret commit vs. seneste commit på `main`, tjekker selv kl. 05:00, og "Opdater" laver DB-backup og henter kun projektets filer. Den gamle "hent install.sh og kør den"-vej er fjernet.
 - **nginx / Ultra.cc** — `deploy/nginx-command-center.conf`, `deploy/command-center.user.service` og proxy-header-understøttelse, så appen bliver på `127.0.0.1` bag nginx med korrekte Secure-cookies og rigtig klient-IP.

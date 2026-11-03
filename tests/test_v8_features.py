@@ -337,6 +337,12 @@ with main.get_db() as db:
     invited = db.execute("SELECT email, must_change_password FROM users WHERE email='ny@example.dk'").fetchone()
 check("invite: mailen gaar til den inviterede adresse", r.status_code == 303 and sent.get("to") == "ny@example.dk",
       (r.status_code, sent.get("to")))
+check("invite: svaret lander i Brugere-fanen",
+      (r.headers.get("location") or "").startswith("/?tab=brugere&invite=ok"), r.headers.get("location"))
+_ok_side = d.get(r.headers["location"])
+check("invite: dashboardet bekraefter at mailen er sendt",
+      _ok_side.status_code == 200 and "Invitationen er sendt til" in _ok_side.text
+      and "ny@example.dk" in _ok_side.text and "tab: 'brugere'" in _ok_side.text, _ok_side.text[:120])
 check("invite: brugeren oprettes og skal skifte kode",
       invited and invited["must_change_password"] == 1, invited and dict(invited))
 match = __import__("re").search(r"Midlertidig adgangskode: (\S+)", sent.get("body") or "")
@@ -360,6 +366,14 @@ with main.get_db() as db:
     warned = db.execute("SELECT COUNT(*) FROM alarms WHERE message LIKE '%blev ikke sendt%'").fetchone()[0]
 check("invite: uden SMTP oprettes ingen bruger, og fejlen bliver en alarm",
       r.status_code == 303 and missing == 0 and warned >= 1, (missing, warned))
+check("invite: fejlen sendes tilbage til Brugere-fanen",
+      (r.headers.get("location") or "").startswith("/?tab=brugere&invite=fejl"), r.headers.get("location"))
+_fail_side = d.get(r.headers["location"])
+check("invite: dashboardet viser fejlen i formularen",
+      "Invitationen blev ikke sendt" in _fail_side.text and "SMTP_HOST / SMTP_FROM mangler" in _fail_side.text,
+      _fail_side.text[:160])
+check("invite: en ukendt fane falder tilbage til Cockpit",
+      "tab: 'cockpit'" in d.get("/?tab=findes-ikke").text)
 
 # --print-stien: mailen holdes tilbage, saa den kan sendes fra en anden mailkonto. Den skal
 # virke selv om SMTP fejler, og koden skal vaere den samme som i den udskrevne mail.

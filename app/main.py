@@ -109,10 +109,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.17.1"
+APP_VERSION = "7.17.2"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.17.2", "Invitationen viser selv om mailen blev sendt - foer laa fejlen kun under Alarmer"),
     ("7.17.1", "MCP-noeglen ligger ikke laengere i klartekst i DB'en, og ukendte vaerktoejer havner i auditten"),
     ("7.17.0", "MCP fase 2: skrivende vaerktoejer med write-scope og audit pr. noegle"),
     ("7.16.0", "MCP-adgang: hver klient sin egen noegle (hash) og syv laese-vaerktoejer paa /mcp"),
@@ -126,7 +127,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "MCP-noeglen slettes fra DB'en ved foerste visning, og ukendte vaerktoejer logges i auditten"
+NEWEST_LINE = "Invitationen viser resultatet med det samme - og MCP-noeglen ligger ikke laengere i klartekst"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -738,6 +739,20 @@ def invite_user(email: str, base_url: str = "", deliver=None) -> tuple:
     return True, ""
 
 
+# Fanerne i dashboardet - bruges naar en handling skal lande i den rigtige fane efter et POST.
+DASHBOARD_TABS = ("cockpit", "seo", "keywords", "articles", "links", "spy", "social", "monitors",
+                  "ai", "pro", "moduler", "brugere", "alarms", "notes")
+
+
+def invite_redirect(ok: bool, text: str) -> str:
+    """Sender brugeren tilbage til Brugere-fanen med invitationens resultat i URL'en.
+
+    Uden det her landede svaret paa Cockpit, og en mislykket invitation var kun synlig som en
+    alarm i en anden fane - det ligner en mail der bare er tabt."""
+    state = "ok" if ok else "fejl"
+    return f"/?tab=brugere&invite={state}&invite_msg={urllib.parse.quote((text or '').strip()[:180])}"
+
+
 # ---------- API-noegler: personlige noegler pr. MCP-klient (ingen global token) ----------
 API_KEY_PREFIX = "cc_"
 API_SCOPES = ("read", "write")
@@ -1064,12 +1079,14 @@ async def logout(request: Request):
 
 @app.post("/users/invite")
 async def users_invite(request: Request, email: str = Form(...)):
-    """Inviterer en bruger paa mail. Fejler SMTP, oprettes brugeren ikke - fejlen bliver en alarm."""
+    """Inviterer en bruger paa mail. Fejler SMTP, oprettes brugeren ikke - fejlen bliver en alarm
+    og vises samtidig i formularen, saa en manglende mail ikke ser ud som en tabt mail."""
     ok, err = invite_user(email, str(request.base_url).rstrip("/"))
     if not ok:
         with get_db() as db:
             add_alarm(db, "brugere", f"Invitation til '{email.strip()[:64]}' blev ikke sendt: {str(err)[:160]}", "advarsel")
-    return RedirectResponse("/", status_code=303)
+        return RedirectResponse(invite_redirect(False, err), status_code=303)
+    return RedirectResponse(invite_redirect(True, email.strip().lower()), status_code=303)
 
 
 @app.post("/users/delete")
@@ -3920,6 +3937,9 @@ def sanitize_article_html(html: str) -> str:
 # ---------- Dashboard ----------
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
+    tab = (request.query_params.get("tab") or "").strip().lower()
+    invite = (request.query_params.get("invite") or "").strip().lower()
+    invite_msg = (request.query_params.get("invite_msg") or "").strip()[:180]
     with get_db() as db:
         domains = db.execute("SELECT * FROM domains ORDER BY id DESC").fetchall()
         competitors = db.execute("SELECT * FROM competitors ORDER BY id DESC LIMIT 20").fetchall()
@@ -4024,6 +4044,9 @@ async def dashboard(request: Request):
         "strategy_autopilot_label": STRATEGIES[active_key]["label"],
         "insecure": getattr(request.state, "insecure", False),
         "strategy_check": jsonlib.loads(check_row["value"]) if check_row and check_row["value"] else None,
+        "initial_tab": tab if tab in DASHBOARD_TABS else "cockpit",
+        "invite_feedback": ({"ok": invite == "ok", "message": invite_msg}
+                            if invite in ("ok", "fejl") else None),
     })
 
 

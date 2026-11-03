@@ -31,6 +31,14 @@ check "auth: session cookie opens the dashboard" "$(curl -s -o /dev/null -w '%{h
 curl -s -o /dev/null -b "$JAR" -X POST $U/users/invite -d email=ci2@example.dk
 check "invite: no user without SMTP" "$(q "SELECT COUNT(*) FROM users")" "1"
 check "invite: the failure is visible as an alarm" "$(q "SELECT COUNT(*) FROM alarms WHERE message LIKE '%blev ikke sendt%'")" "1"
+# ... og svaret lander i Brugere-fanen, saa fejlen ikke ser ud som en tabt mail.
+check "invite: failure redirects to the Brugere tab" \
+    "$(curl -s -o /dev/null -b "$JAR" -X POST $U/users/invite -d email=ci3@example.dk -w '%{redirect_url}' | sed "s|^$U||")" \
+    "/?tab=brugere&invite=fejl&invite_msg=SMTP_HOST%20/%20SMTP_FROM%20mangler%20i%20.env%20-%20der%20blev%20ikke%20sendt%20noget"
+check "invite: the page shows the error in the form" \
+    "$(curl -s -b "$JAR" "$U/?tab=brugere&invite=fejl&invite_msg=SMTP_HOST%20mangler" | grep -c 'Invitationen blev ikke sendt')" "1"
+check "invite: the Brugere tab opens from the URL" \
+    "$(curl -s -b "$JAR" "$U/?tab=brugere" | grep -c "tab: 'brugere'")" "1"
 # --- MCP fase 1: personlige noegler + laese-vaerktoejer paa /mcp ---
 mcp() { curl -s -X POST $U/mcp -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d "$1"; }
 check "mcp: uden noegle svarer 401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST $U/mcp \

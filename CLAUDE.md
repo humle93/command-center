@@ -37,6 +37,9 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
   `must_change_password=1`. Fejler SMTP, oprettes ingen bruger, og fejlen bliver en alarm.
   `/users/password` rydder flaget; dashboardet viser en gul bjælke indtil da.
 - `send_email(to, subject, body)` er fælles for alarmer (`SMTP_TO`) og invitationer (modtageren).
+- `invite_user(email, base_url, deliver=None)` kan sende ad en anden vej end SMTP: `scripts/invite.py
+  navn@domaene.dk --print` opretter brugeren og udskriver den færdige mail, så den kan sendes fra en
+  anden mailkonto (fx Gmail) når `SMTP_HOST` ikke kan sættes op på serveren.
 - Sessioner ligger i `sessions` som `sha256(id)`, HttpOnly-cookie `cc_session` (30 dage, `Secure` på https).
 - Fane **Brugere**: invitér/slet brugere og skift adgangskode (logger andre sessioner ud).
 - Login-lås: 5 fejl pr. IP = 10 min. Adgangskode ≥ 8 tegn; invitationer kræver `SMTP_HOST` + `SMTP_FROM`.

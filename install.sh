@@ -734,11 +734,29 @@ def temporary_password() -> str:
     return secrets.token_urlsafe(9)
 
 
-def invite_user(email: str, base_url: str = "") -> tuple:
+INVITE_SUBJECT = "Invitation til Command Center"
+
+
+def invitation_body(email: str, base_url: str, password: str) -> str:
+    """Mailteksten til en invitation - samme tekst uanset om SMTP eller en anden vej sender den."""
+    return (
+        "Du er inviteret til Command Center.\n\n"
+        f"Adresse: {CC_PUBLIC_URL or base_url or 'den adresse du har faaet af ejeren'}\n"
+        f"E-mail: {email}\n"
+        f"Midlertidig adgangskode: {password}\n\n"
+        "Log ind og skift adgangskoden med det samme under fanen Brugere.\n"
+        "Adgangskoden staar kun i denne mail."
+    )
+
+
+def invite_user(email: str, base_url: str = "", deliver=None) -> tuple:
     """Inviterer en bruger: opretter kontoen med en midlertidig kode og mailer den.
 
     Returnerer (ok, fejl). Der sendes ingen links og ingen tokens - kun en e-mailadresse og en
-    midlertidig adgangskode, som brugeren skifter ved foerste login."""
+    midlertidig adgangskode, som brugeren skifter ved foerste login.
+
+    deliver(subject, body) -> (ok, fejl) bruges, naar mailen skal afsted ad en anden vej end SMTP
+    (fx printes, saa ejeren kan sende den fra sin egen mailkonto)."""
     try:
         email = normalize_email(email)
     except ValueError as e:
@@ -747,15 +765,8 @@ def invite_user(email: str, base_url: str = "") -> tuple:
         if db.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone():
             return False, f"Der findes allerede en bruger med {email}"
     password = temporary_password()
-    body = (
-        "Du er inviteret til Command Center.\n\n"
-        f"Adresse: {CC_PUBLIC_URL or base_url or 'den adresse du har faaet af ejeren'}\n"
-        f"E-mail: {email}\n"
-        f"Midlertidig adgangskode: {password}\n\n"
-        "Log ind og skift adgangskoden med det samme under fanen Brugere.\n"
-        "Adgangskoden staar kun i denne mail."
-    )
-    ok, err = send_email(email, "Invitation til Command Center", body)
+    body = invitation_body(email, base_url, password)
+    ok, err = deliver(INVITE_SUBJECT, body) if deliver else send_email(email, INVITE_SUBJECT, body)
     if not ok:
         return False, err
     try:
@@ -5572,7 +5583,7 @@ Cockpit med opdaterings-panel og alarmer. Login-siden og alle 14 faner ligger i 
 1. `cp .env.example .env` og udfyld nøgler
 2. `./run.sh` — scriptet udskriver den adresse appen lytter på (samt LAN-IP når `CC_HOST=0.0.0.0`)
 3. Åbn adressen: **første besøg opretter din bruger** (`/setup`) — derefter log ind med e-mail + adgangskode. Der er ingen token i `.env`.
-4. Nye brugere inviteres på mail, og sletning/adgangskode-skift klares under fanen **Brugere** (kræver `SMTP_HOST` + `SMTP_FROM`); fra serveren kan samme invitation sendes med `python3 scripts/invite.py navn@domaene.dk`
+4. Nye brugere inviteres på mail, og sletning/adgangskode-skift klares under fanen **Brugere** (kræver `SMTP_HOST` + `SMTP_FROM`); fra serveren kan samme invitation sendes med `python3 scripts/invite.py navn@domaene.dk` — og med `--print` udskrives mailen i stedet, så den kan sendes fra en anden mailkonto når SMTP ikke er sat op
 5. (VPS) kør bag reverse proxy med TLS, eller brug `deploy/command-center.service` + SSH-tunnel
 
 ## Ultra.cc / nginx (reverse proxy)

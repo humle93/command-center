@@ -360,6 +360,20 @@ with main.get_db() as db:
     warned = db.execute("SELECT COUNT(*) FROM alarms WHERE message LIKE '%blev ikke sendt%'").fetchone()[0]
 check("invite: uden SMTP oprettes ingen bruger, og fejlen bliver en alarm",
       r.status_code == 303 and missing == 0 and warned >= 1, (missing, warned))
+
+# --print-stien: mailen holdes tilbage, saa den kan sendes fra en anden mailkonto. Den skal
+# virke selv om SMTP fejler, og koden skal vaere den samme som i den udskrevne mail.
+produced = []
+ok_print, err_print = main.invite_user("print@example.dk", "https://cc.example.dk",
+                                       deliver=lambda subject, body: (produced.append(body), (True, ""))[1])
+pmatch = __import__("re").search(r"Midlertidig adgangskode: (\S+)", produced[0] if produced else "")
+ptemp = pmatch.group(1) if pmatch else ""
+prow = main.find_user("print@example.dk")
+check("invite: --print opretter brugeren uden SMTP og giver en kode der virker",
+      ok_print and bool(ptemp) and prow is not None and prow["must_change_password"] == 1
+      and main.verify_password(ptemp, prow["password_hash"])
+      and "Adresse: https://cc.example.dk" in (produced[0] if produced else ""),
+      (ok_print, err_print, ptemp))
 main.send_email = _orig_send
 
 main.log_startup("127.0.0.1", 8000)      # lifespan koerer ikke i TestClient uden context manager

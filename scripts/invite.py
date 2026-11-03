@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Inviterer en bruger paa mail - samme vej som fanen Brugere, men fra terminalen.
+"""Inviterer en bruger - samme vej som fanen Brugere, men fra terminalen.
 
-Brug: python3 scripts/invite.py navn@domaene.dk [adresse-i-mailen]
-Kraever SMTP_HOST + SMTP_FROM i .env (se .env.example). Brugeren oprettes foerst, naar
-mailen er sendt, og skal skifte den midlertidige adgangskode ved foerste login.
+Brug: python3 scripts/invite.py navn@domaene.dk [adresse-i-mailen] [--print]
+
+Uden --print kraever scriptet SMTP_HOST + SMTP_FROM i .env, og brugeren oprettes foerst, naar
+mailen er sendt. Med --print oprettes brugeren med det samme, og den faerdige mail (med den
+midlertidige adgangskode) skrives til skaermen, saa den kan sendes fra en anden mailkonto.
+Brugeren skal skifte koden ved foerste login.
 """
 import os
 import sys
@@ -14,19 +17,39 @@ os.chdir(ROOT)
 
 from app import main  # noqa: E402
 
+USAGE = "Brug: python3 scripts/invite.py navn@domaene.dk [adresse-i-mailen] [--print]"
+
 
 def run() -> int:
-    if len(sys.argv) < 2:
-        print("Brug: python3 scripts/invite.py navn@domaene.dk [adresse-i-mailen]")
+    print_mode = "--print" in sys.argv[1:]
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if not args:
+        print(USAGE)
         return 2
-    email = sys.argv[1]
-    base_url = sys.argv[2] if len(sys.argv) > 2 else main.CC_PUBLIC_URL
-    ok, err = main.invite_user(email, base_url)
-    if ok:
-        print(f"Invitation sendt til {main.normalize_email(email)} - brugeren skal skifte kode ved foerste login.")
+    email = args[0]
+    base_url = args[1] if len(args) > 1 else main.CC_PUBLIC_URL
+
+    held = []  # (emne, tekst) - printes foerst naar brugeren er oprettet
+
+    def hold(subject, body):
+        held.append((subject, body))
+        return True, ""
+
+    ok, err = main.invite_user(email, base_url, deliver=hold if print_mode else None)
+    if not ok:
+        print(f"Kunne ikke invitere: {err}")
+        return 1
+    if print_mode:
+        print(f"Invitation klar til {main.normalize_email(email)} - ingen mail sendt herfra.")
+        print("Send teksten nedenfor fra din egen mailkonto:\n")
+        for subject, body in held:
+            print(f"Emne: {subject}")
+            print("-" * 60)
+            print(body)
+            print("-" * 60)
         return 0
-    print(f"Kunne ikke invitere: {err}")
-    return 1
+    print(f"Invitation sendt til {main.normalize_email(email)} - brugeren skal skifte kode ved foerste login.")
+    return 0
 
 
 if __name__ == "__main__":

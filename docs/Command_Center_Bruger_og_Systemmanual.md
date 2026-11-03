@@ -25,9 +25,12 @@ Invitationen kan også sendes fra serveren uden browser — samme funktion, samm
 ```bash
 python3 scripts/invite.py cpaleadsis@gmail.com                      # adressen kommer fra CC_PUBLIC_URL
 python3 scripts/invite.py navn@domaene.dk https://cc.example.dk     # eller angiv den selv
+python3 scripts/invite.py cpaleadsis@gmail.com --print              # ingen SMTP: udskriv mailen
 ```
 
 Scriptet skriver, hvad der blev sendt, og stopper med en fejl (intet oprettes), hvis mailen ikke kan sendes.
+Med `--print` kræves ingen SMTP: brugeren oprettes med en midlertidig kode, og den færdige mail
+(emne + tekst med koden) skrives til skærmen, så den kan sendes fra en anden mailkonto.
 - **Skift min adgangskode** — kræver den nuværende; dine andre sessioner logges ud
 
 Efter 5 fejlede logins fra samme IP er login låst i 10 minutter.

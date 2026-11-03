@@ -170,8 +170,8 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - `run_in_executor`-mønstret (35 steder) er bevidst ikke refaktoreret - se arkitektur §15.
 
 ### Agent + skill (v7.13.2-v7.13.3)
-- Fem agenter, grupperet i `.agents/README.md` efter de tre repos der horer sammen: Command Center
-  (`command-center-reviewer`, `cc-verifier`, `site-seo-auditor`), Social Autopilot
+- Seks agenter, grupperet i `.agents/README.md` efter de tre repos der horer sammen: Command Center
+  (`command-center-reviewer`, `cc-verifier`, `site-seo-auditor`, `mcp-access-auditor`), Social Autopilot
   (`social-autopilot-auditor`) og Social Autopilot Android (`social-autopilot-android`).
 - Kun Command Center ligger i denne arbejdsmappe; de to andre agenter arbejder ud fra den kontrakt
   Command Center implementerer (`/drafts`, `/autopilot/sync`, `socialqueue`, **lokal tid**) og skal
@@ -180,6 +180,11 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
   id-prefix + manifest, ikke undermapper.
 - Testen validerer nu ALLE agentfiler (id = filnavn, model, vaerktoejer, prompt), at de er naevnt i
   manifestet, og at der ikke er fremmedsprog/rester eller hemmeligheder i dem.
+- `.agents/mcp-access-auditor.ts` (v7.17.1): read-only revisor for MCP-adgangen. Laeser `api_clients`
+  og `api_audit` med `mode=ro` og rapporterer noegler der boer tilbagekaldes (ubrugte, for brede
+  scopes, brug efter tilbagekaldelse), scope-afvisninger i auditten, om `CC_PUBLIC_URL` er sat
+  (ellers er Host-tjekket slaaet fra), og om de fire skrive-vaerktoejer gaar gennem appens egne
+  funktioner. `params.focus` = noegler/scopes/audit/transport/skrivning; `live` kalder kun 127.0.0.1.
 - `.agents/command-center-reviewer.ts`: read-only reviewer (id = filnavn, jf. Codebuff-kravet), kender
   regler/kontrakter/faldgruber og kan koere begge testsuiter via `params.run_tests`.
 - `.agents/skills/command-center/SKILL.md`: frontmatter `name: command-center` + de otte regler.

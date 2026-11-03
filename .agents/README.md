@@ -7,7 +7,7 @@ grupperingen sker via id-prefix og tabellen nedenfor.
 
 | # | Repo | Agenter | Formål |
 |---|---|---|---|
-| 1 | **Command Center** (dette repo) | `command-center-reviewer`<br>`cc-verifier`<br>`site-seo-auditor` | Review mod repoets regler og kontrakter · verificér tests, ruter og installer-paritet · analysér den overvågede sides SEO ud fra appens egen DB |
+| 1 | **Command Center** (dette repo) | `command-center-reviewer`<br>`cc-verifier`<br>`site-seo-auditor`<br>`mcp-access-auditor` | Review mod repoets regler og kontrakter · verificér tests, ruter og installer-paritet · analysér den overvågede sides SEO ud fra appens egen DB · revidér MCP-nøgler, scopes, audit og transport |
 | 2 | **Social Autopilot** (tjenesten) | `social-autopilot-auditor` | Kontrakten `/drafts` + `/autopilot/sync`, Application Password, kanal-mapping, `socialqueue`, idempotens og tidszoner |
 | 3 | **Social Autopilot Android** (mobilklienten) | `social-autopilot-android` | API-paritet med gruppe 2, token i Keystore, offline-kø og genforsøg, planlagte opslag, release-blokeringer |
 
@@ -18,6 +18,9 @@ grupperingen sker via id-prefix og tabellen nedenfor.
 - **Broen til tjenesten:** `social-autopilot-auditor` med `area` = `push`/`sync`/`kanaler`.
 - **Mobilklienten:** `social-autopilot-android` med `focus` = `api`/`auth`/`offline`/`release`.
 - **Indhold:** `site-seo-auditor` med `focus` = `striking`/`decay`/`thin`/`gap`.
+- **MCP-adgang:** `mcp-access-auditor` med `focus` = `noegler`/`scopes`/`audit`/`transport`/`skrivning`
+  (og `client_id` for én nøgle). Den læser `api_clients` + `api_audit` read-only og rapporterer, hvilke
+  nøgler der bør tilbagekaldes eller have færre scopes.
 
 ## Regler for agenterne
 

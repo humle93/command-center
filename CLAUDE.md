@@ -306,6 +306,10 @@ springer tjekket over til rene undtagelser.
 
 ## Arbejdsform
 
+- Regelsættet ligger i [`AGENTS.md`](AGENTS.md): afsnit 1-7 er fælles for alle repoer (roadmap før kode,
+  dokumentation, test, sikkerhed, git, pakning), afsnit 8 har profilen for WordPress/PHP, Python/FastAPI
+  og frontend, og afsnit 9 er dette repos egne otte regler. Kopiér filen til de øvrige repoer i stedet
+  for at skrive reglerne igen.
 - Start hver opgave med et tidsestimat (fx "~25 min") — også små opgaver — og afslut med det faktiske
   tidsforbrug. Skrider det, sig det straks.
 - Rapportér fremgang i **procent** undervejs ("~40 %: reglerne er rettet, research mangler"), så brugeren

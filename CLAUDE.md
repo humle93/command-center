@@ -211,6 +211,10 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
   `steamgears-site`. **Bemærk:** `steamgears-site` har allerede en repo-specifik `AGENTS.md` (procenter,
   `projektstatus.py`, natlig push) og bliver derfor sprunget over — dér skal der lægges sammen, ikke
   overskrives, og push-reglen i §5 der vinder over den fælles "push kun når der bedes om det".
+  Den sammenlagte udgave (lokal §1-§6 urørt + fælles §7-§10) ligger i
+  `docs/agents-md/steamgears-site.md`: kør
+  `bash scripts/agents_md_rollout.sh --only steamgears-site --overwrite --source docs/agents-md/steamgears-site.md`.
+  `--overwrite` er nødvendig, fordi også den sammenlagte fil afviger fra den nuværende.
 - `.agents/mcp-access-auditor.ts` (v7.17.1): read-only revisor for MCP-adgangen. Laeser `api_clients`
   og `api_audit` med `mode=ro` og rapporterer noegler der boer tilbagekaldes (ubrugte, for brede
   scopes, brug efter tilbagekaldelse), scope-afvisninger i auditten, om `CC_PUBLIC_URL` er sat

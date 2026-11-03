@@ -131,7 +131,7 @@ check("crawl: two runs (and their pages) are kept", runs == 2 and runs_with_page
 
 # --- authenticated UI rules: crawl-diff works, bad monitor input does not 500 ---
 a = TestClient(main.app)
-a.post("/setup", data={"username": "tester", "password": "testpass1", "confirm": "testpass1"}, follow_redirects=False)
+a.post("/setup", data={"email": "tester@example.dk", "password": "testpass1", "confirm": "testpass1"}, follow_redirects=False)
 r = a.get("/api/crawl/diff")
 check("crawl: diff compares the two runs", r.status_code == 200 and "error" not in r.json(), r.text[:120])
 r = a.post("/monitors/add", data={"name": "x", "url": "nope", "type_": "contains", "expected": "x"}, follow_redirects=False)
@@ -282,17 +282,17 @@ check("startup: NEWEST_LINE er én linje scripts kan laese",
 with main.get_db() as db:
     db.execute("DELETE FROM login_attempts"); db.execute("DELETE FROM sessions"); db.execute("DELETE FROM users")
 b = TestClient(main.app)
-b.post("/setup", data={"username": "iptest", "password": "iptest-pass", "confirm": "iptest-pass"},
+b.post("/setup", data={"email": "iptest@example.dk", "password": "iptest-pass", "confirm": "iptest-pass"},
        follow_redirects=False, headers={"x-forwarded-for": "203.0.113.9, 10.0.0.1"})
 with main.get_db() as db:
-    usr = db.execute("SELECT last_login_ip FROM users WHERE username='iptest'").fetchone()
+    usr = db.execute("SELECT last_login_ip FROM users WHERE email='iptest@example.dk'").fetchone()
     ses = db.execute("SELECT ip FROM sessions ORDER BY rowid DESC LIMIT 1").fetchone()
     okn = db.execute("SELECT COUNT(*) FROM login_attempts WHERE ok=1").fetchone()[0]
 check("login: IP gemmes paa bruger, session og i loggen",
       usr and usr["last_login_ip"] == "203.0.113.9" and ses and ses["ip"] == "203.0.113.9" and okn == 1,
       (usr and dict(usr), ses and dict(ses), okn))
 
-b.post("/login", data={"username": "iptest", "password": "helt-forkert"}, follow_redirects=False,
+b.post("/login", data={"email": "iptest@example.dk", "password": "helt-forkert"}, follow_redirects=False,
        headers={"x-forwarded-for": "198.51.100.7"})
 with main.get_db() as db:
     fail = db.execute("SELECT ip, ok FROM login_attempts ORDER BY id DESC LIMIT 1").fetchone()
@@ -304,6 +304,63 @@ r = b.get("/login", headers={"x-forwarded-for": "203.0.113.9"})
 check("login-side: viser version, IP og koerselsrapport",
       r.status_code == 200 and main.APP_VERSION in r.text and "Din IP" in r.text
       and "Seneste opstart" in r.text and "203.0.113.9" in r.text, r.text[:160])
+
+# --- v7.15: e-mail er login-id, og nye brugere inviteres paa mail (ingen tokens) ---
+try:
+    main.normalize_email("ikke-en-mail")
+    bad_mail = False
+except ValueError:
+    bad_mail = True
+check("mail: ugyldig adresse afvises", bad_mail)
+check("mail: adressen gemmes i smaa bogstaver",
+      main.normalize_email("  Ejer@Example.DK ") == "ejer@example.dk")
+with main.get_db() as db:
+    db.execute("UPDATE users SET username='gammelt-navn' WHERE email='iptest@example.dk'")
+check("mail: gamle brugernavne kan stadig logge ind",
+      TestClient(main.app).post("/login", data={"email": "gammelt-navn", "password": "iptest-pass"},
+                                follow_redirects=False).status_code == 303)
+
+sent = {}
+
+
+def _fake_send(to, subject, body):
+    sent.update(to=to, subject=subject, body=body)
+    return True, ""
+
+
+_orig_send = main.send_email
+main.send_email = _fake_send
+d = TestClient(main.app)
+d.post("/login", data={"email": "iptest@example.dk", "password": "iptest-pass"}, follow_redirects=False)
+r = d.post("/users/invite", data={"email": "Ny@Example.dk"}, follow_redirects=False)
+with main.get_db() as db:
+    invited = db.execute("SELECT email, must_change_password FROM users WHERE email='ny@example.dk'").fetchone()
+check("invite: mailen gaar til den inviterede adresse", r.status_code == 303 and sent.get("to") == "ny@example.dk",
+      (r.status_code, sent.get("to")))
+check("invite: brugeren oprettes og skal skifte kode",
+      invited and invited["must_change_password"] == 1, invited and dict(invited))
+match = __import__("re").search(r"Midlertidig adgangskode: (\S+)", sent.get("body") or "")
+temp = match.group(1) if match else ""
+e = TestClient(main.app)
+check("invite: den midlertidige kode virker",
+      bool(temp) and e.post("/login", data={"email": "ny@example.dk", "password": temp},
+                            follow_redirects=False).status_code == 303, temp)
+check("invite: dashboardet minder om at skifte kode",
+      "midlertidig adgangskode" in e.get("/").text)
+e.post("/users/password", data={"current": temp, "new": "nyt-pass-1", "confirm": "nyt-pass-1"},
+       follow_redirects=False)
+with main.get_db() as db:
+    cleared = db.execute("SELECT must_change_password FROM users WHERE email='ny@example.dk'").fetchone()
+check("invite: skift af adgangskode fjerner midlertidig-kode flaget",
+      cleared and cleared["must_change_password"] == 0, cleared and dict(cleared))
+main.send_email = lambda to, subject, body: (False, "SMTP_HOST / SMTP_FROM mangler i .env")
+r = d.post("/users/invite", data={"email": "fejl@example.dk"}, follow_redirects=False)
+with main.get_db() as db:
+    missing = db.execute("SELECT COUNT(*) FROM users WHERE email='fejl@example.dk'").fetchone()[0]
+    warned = db.execute("SELECT COUNT(*) FROM alarms WHERE message LIKE '%blev ikke sendt%'").fetchone()[0]
+check("invite: uden SMTP oprettes ingen bruger, og fejlen bliver en alarm",
+      r.status_code == 303 and missing == 0 and warned >= 1, (missing, warned))
+main.send_email = _orig_send
 
 main.log_startup("127.0.0.1", 8000)      # lifespan koerer ikke i TestClient uden context manager
 rep = main.last_run_report()
@@ -357,7 +414,7 @@ check("tid: ukendt zone falder tilbage i stedet for at crashe",
       main.CC_TZ_NAME == "Europe/Copenhagen", main.CC_TZ_NAME)
 
 c2 = TestClient(main.app)
-c2.post("/login", data={"username": "iptest", "password": "iptest-pass"}, follow_redirects=False)
+c2.post("/login", data={"email": "iptest@example.dk", "password": "iptest-pass"}, follow_redirects=False)
 check("social: testklienten er logget ind", c2.get("/").status_code == 200, c2.get("/").status_code)
 c2.post("/social/add", data={"platform": "Pinterest", "message": "Test opslag",
                              "scheduled_at": "2026-07-01T12:00"})

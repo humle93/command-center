@@ -1,13 +1,14 @@
-# Command Center v7.11 PRO
+# Command Center v7.15 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
 
-## Nyheder i v7.11
+## Nyheder i v7.15
 
-- **Brugere i stedet for token-login** — første besøg opretter din bruger (`/setup`), derefter logger du ind med brugernavn + adgangskode (PBKDF2-SHA256, salt pr. bruger, 30 dages HttpOnly-session). Fanen **Brugere** opretter/sletter brugere og skifter adgangskode. `APP_TOKEN` findes ikke længere, og der er ingen maskin-nøgle - al adgang kræver en bruger.
+- **E-mail er login** — første besøg opretter din bruger med e-mail + adgangskode (`/setup`), derefter logger du ind med e-mail og adgangskode (PBKDF2-SHA256, salt pr. bruger, 30 dages HttpOnly-session). Gamle konti fra brugernavn-tiden kan stadig logge ind med deres brugernavn, indtil de får en e-mail.
+- **Invitation på mail** — fanen **Brugere** har "Inviter bruger": du skriver en e-mail, og appen sender en invitation med en midlertidig adgangskode, som brugeren skifter ved første login (dashboardet minder om det). Der er ingen invite-links og ingen tokens - kun en adgangskode.
 - ⏱️ **Fremdrift på opgaver** — tunge handlinger (crawl, AI-artikel, keyword-tjek, backlink-prospecting …) viser timer, procent og "~N s igen"; crawl læser de rigtige tal (sider/total + ETA) fra `/api/crawl/status`
 - **Opdatering fra GitHub** — Cockpit viser installeret commit vs. seneste commit på `main`, tjekker selv kl. 05:00, og "Opdater" laver DB-backup og henter kun projektets filer. Den gamle "hent install.sh og kør den"-vej er fjernet.
 - **nginx / Ultra.cc** — `deploy/nginx-command-center.conf`, `deploy/command-center.user.service` og proxy-header-understøttelse, så appen bliver på `127.0.0.1` bag nginx med korrekte Secure-cookies og rigtig klient-IP.
@@ -44,8 +45,8 @@ Cockpit med opdaterings-panel og alarmer. Login-siden og alle 14 faner ligger i 
 
 1. `cp .env.example .env` og udfyld nøgler
 2. `./run.sh` — scriptet udskriver den adresse appen lytter på (samt LAN-IP når `CC_HOST=0.0.0.0`)
-3. Åbn adressen: **første besøg opretter din bruger** (`/setup`) — derefter log ind med brugernavn + adgangskode. Der er ingen token i `.env`.
-4. Nye brugere, sletning og adgangskode-skift klares under fanen **Brugere**
+3. Åbn adressen: **første besøg opretter din bruger** (`/setup`) — derefter log ind med e-mail + adgangskode. Der er ingen token i `.env`.
+4. Nye brugere inviteres på mail, og sletning/adgangskode-skift klares under fanen **Brugere** (kræver `SMTP_HOST` + `SMTP_FROM`); fra serveren kan samme invitation sendes med `python3 scripts/invite.py navn@domaene.dk`
 5. (VPS) kør bag reverse proxy med TLS, eller brug `deploy/command-center.service` + SSH-tunnel
 
 ## Ultra.cc / nginx (reverse proxy)

@@ -37,7 +37,7 @@ systemctl --user enable --now command-center
 bash scripts/smoke_test.sh     # /health, /login, /setup
 ```
 
-Første besøg i browseren opretter din bruger (`/setup`). Der er ingen login-token i `.env`.
+Første besøg i browseren opretter din bruger med e-mail (`/setup`). Der er ingen login-token i `.env`; nye brugere inviteres på mail fra fanen Brugere.
 
 ## Rollback
 

@@ -2,7 +2,7 @@
 set -e
 PROJECT_DIR="$HOME/command-center"
 
-echo "⚡ Command Center v7.11 - installerer i $PROJECT_DIR..."
+echo "⚡ Command Center v7.15 - installerer i $PROJECT_DIR..."
 mkdir -p "$PROJECT_DIR/app/templates" "$PROJECT_DIR/app/data" "$PROJECT_DIR/app/static" "$PROJECT_DIR/deploy" "$PROJECT_DIR/scripts"
 echo "📄 requirements.txt..."
 cat << 'EOF_REQ' > "$PROJECT_DIR/requirements.txt"
@@ -18,14 +18,16 @@ EOF_REQ
 
 echo "📄 .env.example..."
 cat << 'EOF_ENVDOT' > "$PROJECT_DIR/.env.example"
-# Command Center v7.13 - kopier til .env og udfyld
-# Login: der er ingen token. Foerste besoeg i browseren opretter din bruger (/setup),
-# derefter logger du ind med brugernavn + adgangskode. Brugere styres under fanen "Brugere".
+# Command Center v7.15 - kopier til .env og udfyld
+# Login: der er ingen token. Foerste besoeg i browseren opretter din bruger (/setup) med e-mail,
+# derefter logger du ind med e-mail + adgangskode. Nye brugere inviteres paa mail under fanen
+# "Brugere" og kraever SMTP_HOST + SMTP_FROM nedenfor.
 # Hvor run.sh lytter. 127.0.0.1 = kun denne maskine; 0.0.0.0 = ogsaa fra netvaerket (kraever TLS/proxy).
 CC_HOST=127.0.0.1
 CC_PORT=8000
 # Adressen du aabner i browseren bag nginx (bruges kun til at printe den rigtige adresse).
-# Ultra.cc: fx https://<bruger>.<server>.ultra.cc - tom = ingen nginx.
+# Ultra.cc: fx https://<bruger>.<server>.ultra.cc - tom = ingen nginx. Bruges ogsaa som adresse
+# i invitationsmailen.
 CC_PUBLIC_URL=
 # Stoler paa X-Forwarded-* fra disse IP'er (nginx paa samme maskine = 127.0.0.1).
 CC_FORWARDED_ALLOW_IPS=127.0.0.1
@@ -194,10 +196,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.14.0"
+APP_VERSION = "7.15.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.15.0", "Login med e-mail + invitation paa mail med midlertidig adgangskode - ingen tokens"),
     ("7.14.0", "Planlagt tid gemmes som lokal tid + UTC; sommertid afvises i stedet for at gaettes"),
     ("7.13.4", "Agentgrupper rettet til de tre repos: Command Center, Social Autopilot og Android"),
     ("7.13.3", "Fire agenter i tre grupper (app, WordPress-plugin, indhold) + manifest i .agents/"),
@@ -207,7 +210,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Login: IP + sidste koersel i UI'et - opstart printer version og nyheder"
+NEWEST_LINE = "Brugere oprettes med e-mail; nye brugere inviteres paa mail"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -450,8 +453,10 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            username TEXT UNIQUE,
             password_hash TEXT NOT NULL,
+            must_change_password INTEGER DEFAULT 0,
             created_at TEXT
         );
         CREATE TABLE IF NOT EXISTS sessions (
@@ -521,6 +526,22 @@ def migrate_db():
             for c in want:
                 if c not in existing:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {c} TEXT")
+        # v7.15: konti skifter fra brugernavn til e-mail. Gamle raekker beholder brugernavnet i
+        # kolonnen username og kan stadig logge ind med det; de faar en pladsholder-adresse.
+        user_cols = [r[1] for r in db.execute("PRAGMA table_info(users)").fetchall()]
+        if user_cols and "email" not in user_cols:
+            db.execute("DROP TABLE IF EXISTS users_migrate")
+            db.execute("""CREATE TABLE users_migrate (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE NOT NULL, username TEXT UNIQUE,
+                password_hash TEXT NOT NULL, must_change_password INTEGER DEFAULT 0, created_at TEXT,
+                last_login_ip TEXT, last_login_at TEXT
+            )""")
+            db.execute("""INSERT INTO users_migrate (id, email, username, password_hash, created_at,
+                             last_login_ip, last_login_at)
+                SELECT id, lower(username) || '@local', username, password_hash, created_at,
+                       last_login_ip, last_login_at FROM users""")
+            db.execute("DROP TABLE users")
+            db.execute("ALTER TABLE users_migrate RENAME TO users")
         db.execute("""CREATE TABLE IF NOT EXISTS login_attempts (
             id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, ip TEXT, ok INTEGER DEFAULT 0, created_at TEXT
         )""")
@@ -625,13 +646,16 @@ def cleanup_old_data():
 
 
 # ---------- Auth: brugere og sessioner ----------
-# Dashboardet har rigtige brugere: brugernavn + adgangskode (PBKDF2-SHA256 med salt pr. bruger).
-# Foerste besoeg opretter den foerste bruger via /setup - der er ingen delt token i .env.
+# Dashboardet har rigtige brugere: e-mail + adgangskode (PBKDF2-SHA256 med salt pr. bruger).
+# Foerste besoeg opretter den foerste bruger via /setup; derefter inviterer en bruger de naeste
+# med en mail. Der er hverken delt noegle eller invite-token - adgang er altid en adgangskode.
 SESSION_COOKIE = "cc_session"
 SESSION_MAX_AGE = 60 * 60 * 24 * 30        # 30 dage
 PBKDF2_ITERATIONS = 240_000
 MIN_PASSWORD_LEN = 8
-_USERNAME_RE = re.compile(r"[A-Za-z0-9._-]{3,32}")
+EMAIL_MAX_LEN = 254
+CC_PUBLIC_URL = os.environ.get("CC_PUBLIC_URL", "").strip()   # adressen der staar i invitationsmailen
+_USER_EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}")
 
 _LOGIN_FAILS: dict = {}  # IP -> (antal fejl, laas-til)
 _LOGIN_MAX_FAILS = 5
@@ -668,16 +692,81 @@ def user_count() -> int:
         return 0
 
 
-def create_user(username: str, password: str) -> int:
-    username = (username or "").strip()
-    if not _USERNAME_RE.fullmatch(username):
-        raise ValueError("Brugernavn: 3-32 tegn (a-z, 0-9, punktum, bindestreg, underscore)")
+def normalize_email(value: str) -> str:
+    """E-mailen er login-id: trimmet, smaa bogstaver og i et format der kan modtage post."""
+    email = (value or "").strip().lower()
+    if len(email) > EMAIL_MAX_LEN or not _USER_EMAIL_RE.fullmatch(email):
+        raise ValueError("E-mail: brug en gyldig adresse, fx navn@domaene.dk")
+    return email
+
+
+def create_user(email: str, password: str, must_change: bool = False, username: str = "") -> int:
+    """Opretter en bruger. must_change=1 bruges til invitationer med en midlertidig kode."""
+    email = normalize_email(email)
     if len(password or "") < MIN_PASSWORD_LEN:
         raise ValueError(f"Adgangskoden skal vaere mindst {MIN_PASSWORD_LEN} tegn")
     with get_db() as db:
-        cur = db.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?,?,?)",
-                         (username, hash_password(password), now_iso()))
+        cur = db.execute(
+            "INSERT INTO users (email, username, password_hash, must_change_password, created_at) "
+            "VALUES (?,?,?,?,?)",
+            (email, (username or None), hash_password(password), 1 if must_change else 0, now_iso()))
         return cur.lastrowid
+
+
+def find_user(identifier: str):
+    """Brugeren bag en e-mail - eller et brugernavn fra foer v7.15, saa gamle konti ikke laases ude."""
+    ident = (identifier or "").strip()
+    if not ident:
+        return None
+    with get_db() as db:
+        row = db.execute(
+            "SELECT id, email, password_hash, must_change_password FROM users WHERE email=?",
+            (ident.lower(),)).fetchone()
+        if not row:
+            row = db.execute(
+                "SELECT id, email, password_hash, must_change_password FROM users WHERE username=?",
+                (ident,)).fetchone()
+        return row
+
+
+def temporary_password() -> str:
+    """Midlertidig adgangskode til en invitation: tilfaeldig, men til at skrive af (12 tegn)."""
+    return secrets.token_urlsafe(9)
+
+
+def invite_user(email: str, base_url: str = "") -> tuple:
+    """Inviterer en bruger: opretter kontoen med en midlertidig kode og mailer den.
+
+    Returnerer (ok, fejl). Der sendes ingen links og ingen tokens - kun en e-mailadresse og en
+    midlertidig adgangskode, som brugeren skifter ved foerste login."""
+    try:
+        email = normalize_email(email)
+    except ValueError as e:
+        return False, str(e)
+    with get_db() as db:
+        if db.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone():
+            return False, f"Der findes allerede en bruger med {email}"
+    password = temporary_password()
+    body = (
+        "Du er inviteret til Command Center.\n\n"
+        f"Adresse: {CC_PUBLIC_URL or base_url or 'den adresse du har faaet af ejeren'}\n"
+        f"E-mail: {email}\n"
+        f"Midlertidig adgangskode: {password}\n\n"
+        "Log ind og skift adgangskoden med det samme under fanen Brugere.\n"
+        "Adgangskoden staar kun i denne mail."
+    )
+    ok, err = send_email(email, "Invitation til Command Center", body)
+    if not ok:
+        return False, err
+    try:
+        create_user(email, password, must_change=True)
+    except sqlite3.IntegrityError:
+        return False, f"Der findes allerede en bruger med {email}"
+    except ValueError as e:
+        return False, str(e)
+    with get_db() as db:
+        add_alarm(db, "brugere", f"Invitation sendt til {email}", "info")
+    return True, ""
 
 
 def client_ip(request: Request) -> str:
@@ -764,7 +853,7 @@ def current_user(request: Request):
     try:
         with get_db() as db:
             row = db.execute(
-                "SELECT u.id, u.username, s.expires_at FROM sessions s "
+                "SELECT u.id, u.email, u.must_change_password, s.expires_at FROM sessions s "
                 "JOIN users u ON u.id = s.user_id WHERE s.id=?", (key,)
             ).fetchone()
             if not row:
@@ -773,7 +862,8 @@ def current_user(request: Request):
                 db.execute("DELETE FROM sessions WHERE id=?", (key,))
                 return None
             db.execute("UPDATE sessions SET last_seen=? WHERE id=?", (now_iso(), key))
-            return {"id": row["id"], "username": row["username"]}
+            return {"id": row["id"], "email": row["email"],
+                    "must_change_password": bool(row["must_change_password"])}
     except Exception:
         return None
 
@@ -803,7 +893,7 @@ async def auth_middleware(request: Request, call_next):
 async def setup_page(request: Request):
     if user_count() > 0:
         return RedirectResponse("/login", status_code=303)
-    return templates.TemplateResponse("login.html", {"request": request, "mode": "setup", "error": "", "username": "",
+    return templates.TemplateResponse("login.html", {"request": request, "mode": "setup", "error": "", "email": "",
                                                      "report": last_run_report(), "client_ip": client_ip(request),
                                                      "app_version": APP_VERSION})
 
@@ -814,7 +904,7 @@ async def setup_user(request: Request):
     if user_count() > 0:
         return RedirectResponse("/login", status_code=303)
     form = await request.form()
-    username = (form.get("username") or "").strip()
+    email = (form.get("email") or "").strip()
     password = form.get("password") or ""
     confirm = form.get("confirm") or ""
     err = ""
@@ -823,21 +913,21 @@ async def setup_user(request: Request):
         err = "De to adgangskoder er ikke ens"
     else:
         try:
-            user_id = create_user(username, password)
+            user_id = create_user(email, password)
         except ValueError as e:
             err = str(e)
         except sqlite3.IntegrityError:
-            err = "Brugernavnet er allerede taget"
+            err = "E-mailen er allerede oprettet - log ind i stedet"
     if not user_id:
-        return templates.TemplateResponse("login.html", {"request": request, "mode": "setup", "username": username,
+        return templates.TemplateResponse("login.html", {"request": request, "mode": "setup", "email": email,
                                                          "error": err, "report": last_run_report(),
                                                          "client_ip": client_ip(request),
                                                          "app_version": APP_VERSION}, status_code=400)
     ip = client_ip(request)
     with get_db() as db:
-        add_alarm(db, "brugere", f"Foerste bruger '{username}' oprettet", "info")
+        add_alarm(db, "brugere", f"Foerste bruger '{email}' oprettet", "info")
         db.execute("UPDATE users SET last_login_ip=?, last_login_at=? WHERE id=?", (ip, now_iso(), user_id))
-    record_login(ip, username, True)
+    record_login(ip, email, True)
     return session_redirect(request, start_session(user_id, ip))
 
 
@@ -845,7 +935,7 @@ async def setup_user(request: Request):
 async def login_page(request: Request):
     if user_count() == 0:
         return RedirectResponse("/setup", status_code=303)
-    return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "error": "", "username": "",
+    return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "error": "", "email": "",
                                                      "report": last_run_report(), "client_ip": client_ip(request),
                                                      "app_version": APP_VERSION})
 
@@ -856,26 +946,25 @@ async def login(request: Request):
     now = time.time()
     fails, locked_until = _LOGIN_FAILS.get(ip, (0, 0.0))
     if locked_until > now:
-        return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "username": "",
+        return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "email": "",
                                                          "error": "For mange fejlede logins - proev igen om " + str(int(locked_until - now)) + " sek."}, status_code=429)
     form = await request.form()
-    username = (form.get("username") or "").strip()
+    email = (form.get("email") or form.get("username") or "").strip()   # username = gamle installationer
     password = form.get("password") or ""
-    with get_db() as db:
-        user = db.execute("SELECT id, username, password_hash FROM users WHERE username=?", (username,)).fetchone()
+    user = find_user(email)
     if user and verify_password(password, user["password_hash"]):
         _LOGIN_FAILS.pop(ip, None)
         with get_db() as db:
             db.execute("UPDATE users SET last_login_ip=?, last_login_at=? WHERE id=?", (ip, now_iso(), user["id"]))
-        record_login(ip, username, True)
+        record_login(ip, email, True)
         return session_redirect(request, start_session(user["id"], ip))
-    record_login(ip, username, False)
+    record_login(ip, email, False)
     fails += 1
     _LOGIN_FAILS[ip] = (0, now + _LOGIN_LOCK_SECONDS) if fails >= _LOGIN_MAX_FAILS else (fails, locked_until)
     if len(_LOGIN_FAILS) > 2000:  # undgaa at listen vokser ubegraenset
         _LOGIN_FAILS.clear()
-    return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "username": username,
-                                                     "error": "Forkert brugernavn eller adgangskode", "ip": ip,
+    return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "email": email,
+                                                     "error": "Forkert e-mail eller adgangskode", "ip": ip,
                                                      "report": last_run_report(), "client_ip": ip,
                                                      "app_version": APP_VERSION}, status_code=401)
 
@@ -888,16 +977,13 @@ async def logout(request: Request):
     return resp
 
 
-@app.post("/users/add")
-async def users_add(username: str = Form(...), password: str = Form(...)):
-    try:
-        create_user(username, password)
-    except ValueError as e:
+@app.post("/users/invite")
+async def users_invite(request: Request, email: str = Form(...)):
+    """Inviterer en bruger paa mail. Fejler SMTP, oprettes brugeren ikke - fejlen bliver en alarm."""
+    ok, err = invite_user(email, str(request.base_url).rstrip("/"))
+    if not ok:
         with get_db() as db:
-            add_alarm(db, "brugere", f"Kunne ikke oprette bruger '{username}': {str(e)[:120]}", "advarsel")
-    except sqlite3.IntegrityError:
-        with get_db() as db:
-            add_alarm(db, "brugere", f"Kunne ikke oprette bruger '{username}': navnet er optaget", "advarsel")
+            add_alarm(db, "brugere", f"Invitation til '{email.strip()[:64]}' blev ikke sendt: {str(err)[:160]}", "advarsel")
     return RedirectResponse("/", status_code=303)
 
 
@@ -926,12 +1012,12 @@ async def users_password(request: Request, current: str = Form(...), new: str = 
     with get_db() as db:
         row = db.execute("SELECT password_hash FROM users WHERE id=?", (me["id"],)).fetchone()
         if not row or not verify_password(current, row["password_hash"]):
-            add_alarm(db, "brugere", f"Fejlet adgangskode-skift for '{me['username']}'", "info")
+            add_alarm(db, "brugere", f"Fejlet adgangskode-skift for '{me['email']}'", "info")
             return RedirectResponse("/", status_code=303)
         if new != confirm or len(new) < MIN_PASSWORD_LEN:
-            add_alarm(db, "brugere", f"Adgangskode-skift afvist for '{me['username']}': mindst {MIN_PASSWORD_LEN} tegn og ens i begge felter", "info")
+            add_alarm(db, "brugere", f"Adgangskode-skift afvist for '{me['email']}': mindst {MIN_PASSWORD_LEN} tegn og ens i begge felter", "info")
             return RedirectResponse("/", status_code=303)
-        db.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(new), me["id"]))
+        db.execute("UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?", (hash_password(new), me["id"]))
         # Log de andre sessioner ud, behold denne.
         db.execute("DELETE FROM sessions WHERE user_id=? AND id<>?",
                    (me["id"], _session_key(request.cookies.get(SESSION_COOKIE) or "")))
@@ -1216,13 +1302,16 @@ def _send_telegram_alert(subject: str, body: str, severity: str) -> tuple:
     return False, "Telegram er ikke konfigureret eller afviste beskeden"
 
 
-def _send_email_alert(subject: str, body: str, severity: str) -> tuple:
-    if not (SMTP_HOST and SMTP_TO and SMTP_FROM):
-        return False, "SMTP_HOST / SMTP_FROM / SMTP_TO mangler"
+def send_email(to: str, subject: str, body: str) -> tuple:
+    """Sender én mail til en konkret modtager (alarmer gaar til SMTP_TO, invitationer til brugeren)."""
+    if not (SMTP_HOST and SMTP_FROM):
+        return False, "SMTP_HOST / SMTP_FROM mangler i .env - der blev ikke sendt noget"
+    if not to:
+        return False, "Modtager mangler"
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = SMTP_FROM
-    msg["To"] = SMTP_TO
+    msg["To"] = to
     msg.set_content(body + f"\n\n--\nCommand Center {APP_VERSION}")
     try:
         if SMTP_TLS == "ssl":
@@ -1240,6 +1329,12 @@ def _send_email_alert(subject: str, body: str, severity: str) -> tuple:
         return True, ""
     except (smtplib.SMTPException, OSError, TimeoutError) as e:
         return False, str(e)[:200]
+
+
+def _send_email_alert(subject: str, body: str, severity: str) -> tuple:
+    if not (SMTP_HOST and SMTP_TO and SMTP_FROM):
+        return False, "SMTP_HOST / SMTP_FROM / SMTP_TO mangler"
+    return send_email(SMTP_TO, subject, body)
 
 
 def _send_ntfy_alert(subject: str, body: str, severity: str) -> tuple:
@@ -3771,7 +3866,8 @@ async def dashboard(request: Request):
         strategy_row = db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone()
         check_row = db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone()
         sgap_row = db.execute("SELECT value FROM settings WHERE key='sgap_snapshot'").fetchone()
-        users = db.execute("SELECT id, username, created_at, last_login_ip, last_login_at FROM users ORDER BY id").fetchall()
+        users = db.execute("SELECT id, email, created_at, last_login_ip, last_login_at, must_change_password "
+                           "FROM users ORDER BY id").fetchall()
         login_rows = db.execute("SELECT username, ip, ok, created_at FROM login_attempts ORDER BY id DESC LIMIT 8").fetchall()
         update_row = db.execute("SELECT value FROM settings WHERE key='github_update'").fetchone()
         alert_outbox = {r["state"]: r["n"] for r in
@@ -4064,8 +4160,11 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
       }
     </style>
 </head>
-{% if insecure %}<div class="bg-yellow-600 text-black text-xs text-center py-1.5 px-4 font-semibold">&Uacute;t&uacute;n HTTPS &mdash; token sendes ukrypteret. S&aelig;t nginx + TLS op foran CC (se Install-dokumentationen).</div>{% endif %}
+{% if insecure %}<div class="bg-yellow-600 text-black text-xs text-center py-1.5 px-4 font-semibold">&Uacute;t&uacute;n HTTPS &mdash; login og adgangskoder sendes ukrypteret. S&aelig;t nginx + TLS op foran CC (se Install-dokumentationen).</div>{% endif %}
 <body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null, histOpen: false, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
+{% if current_user and current_user.must_change_password %}
+<div class="bg-amber-500/10 border-b border-amber-500/40 text-amber-300 text-xs text-center py-2 px-4">Du er logget ind med en midlertidig adgangskode fra invitationsmailen &mdash; skift den under fanen <b>Brugere</b>.</div>
+{% endif %}
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
@@ -4075,7 +4174,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
         <div class="flex items-center gap-3">
             <form action="/update/apply" method="POST" onsubmit="return confirm('Hent og installér nyeste version fra GitHub? Der laves en DB-backup først, og appen skal genstartes bagefter.')"><button class="text-xs text-zinc-400 hover:text-emerald-400">⬆️ Opdatér</button></form>
             <a href="/health" class="text-xs text-emerald-400">Systemstatus</a>
-            {% if current_user %}<span class="text-xs text-zinc-500">👤 {{ current_user.username }}</span>
+            {% if current_user %}<span class="text-xs text-zinc-500">👤 {{ current_user.email }}</span>
             {% if client_ip %}<span class="text-xs text-zinc-600" title="Din IP">{{ client_ip }}</span>{% endif %}
             <a href="/logout" class="text-xs text-zinc-500 hover:text-rose-400">Log ud</a>{% endif %}
         </div>
@@ -4888,12 +4987,12 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
     <section x-show="tab === 'brugere'" class="space-y-4" style="display: none;">
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Brugere ({{ users|length }})</h2>
-            <p class="text-xs text-zinc-500 mb-3">Adgang sker med brugernavn + adgangskode (PBKDF2-SHA256). Den foerste bruger blev oprettet ved foerste besoeg — opret gerne en ekstra, saa du ikke laaser dig ude.</p>
+            <p class="text-xs text-zinc-500 mb-3">Adgang sker med e-mail + adgangskode (PBKDF2-SHA256). Den foerste bruger blev oprettet ved foerste besoeg — invitér gerne en ekstra, saa du ikke laaser dig ude.</p>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
                 <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3">
                     <div class="text-[11px] uppercase tracking-wider text-zinc-500 mb-2">Seneste login pr. bruger</div>
                     {% for u in users %}
-                    <div class="text-[11px] flex justify-between gap-2"><span>{{ u['username'] }}</span><span class="text-zinc-500">{{ u['last_login_ip'] or '—' }} · {{ (u['last_login_at'] or '')[0:16] }}</span></div>
+                    <div class="text-[11px] flex justify-between gap-2"><span>{{ u['email'] }}</span><span class="text-zinc-500">{{ u['last_login_ip'] or '—' }} · {{ (u['last_login_at'] or '')[0:16] }}</span></div>
                     {% endfor %}
                 </div>
                 <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3">
@@ -4912,8 +5011,9 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                 {% for u in users %}
                 <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs flex justify-between items-center">
                     <div>
-                        <span class="font-medium">{{ u.username }}</span>
+                        <span class="font-medium">{{ u.email }}</span>
                         {% if current_user and u.id == current_user.id %}<span class="text-[10px] text-emerald-400 ml-2">dig</span>{% endif %}
+                        {% if u['must_change_password'] %}<span class="text-[10px] text-amber-400 ml-2">skal skifte kode</span>{% endif %}
                         <div class="text-zinc-500">Oprettet {{ u.created_at }}</div>
                     </div>
                     <form action="/users/delete" method="POST">
@@ -4925,12 +5025,12 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             </div>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
-            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Opret bruger</h2>
-            <form action="/users/add" method="POST" class="grid grid-cols-1 md:grid-cols-3 gap-2">
-                <input type="text" name="username" placeholder="Brugernavn" required pattern="[A-Za-z0-9._-]{3,32}" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
-                <input type="password" name="password" placeholder="Adgangskode (min. 8 tegn)" required minlength="8" autocomplete="new-password" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
-                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Opret bruger</button>
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Inviter bruger</h2>
+            <form action="/users/invite" method="POST" class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                <input type="email" name="email" placeholder="navn@domaene.dk" required maxlength="254" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Send invitation</button>
             </form>
+            <p class="text-[10px] text-zinc-600 mt-2">Invitationen er en mail med en midlertidig adgangskode, som brugeren skifter ved foerste login. Kraever SMTP_HOST + SMTP_FROM i .env — mangler de, oprettes ingen bruger, og fejlen staar under Alarmer.</p>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Skift min adgangskode</h2>
@@ -5215,16 +5315,15 @@ cat << 'EOF_LOGIN' > "$PROJECT_DIR/app/templates/login.html"
 <div class="card">
     <h1>⚡ COMMAND CENTER</h1>
     {% if mode == 'setup' %}
-    <p class="sub">Foerste start: opret din bruger. Der er ingen token — kun brugernavn og adgangskode.</p>
+    <p class="sub">Foerste start: opret din bruger med din e-mail og en adgangskode.</p>
     {% else %}
-    <p class="sub">Log ind med din bruger.</p>
+    <p class="sub">Log ind med din e-mail og adgangskode.</p>
     {% endif %}
     {% if error %}<p class="error">{{ error }}</p>{% endif %}
     <form action="{{ '/setup' if mode == 'setup' else '/login' }}" method="POST">
-        <label for="username">Brugernavn</label>
-        <input id="username" type="text" name="username" value="{{ username }}" autocomplete="username"
-               pattern="[A-Za-z0-9._-]{3,32}" title="3-32 tegn: a-z, 0-9, punktum, bindestreg, underscore"
-               required autofocus>
+        <label for="email">E-mail</label>
+        <input id="email" type="email" name="email" value="{{ email }}" autocomplete="email"
+               placeholder="navn@domaene.dk" maxlength="254" required autofocus>
         <label for="password">Adgangskode</label>
         <input id="password" type="password" name="password" autocomplete="{{ 'new-password' if mode == 'setup' else 'current-password' }}"
                minlength="8" required>
@@ -5247,7 +5346,8 @@ cat << 'EOF_LOGIN' > "$PROJECT_DIR/app/templates/login.html"
       <div class="row"><span>Nyheder</span><b>{{ report.newest[0] if report.newest else '—' }}</b></div>
     </div>
     {% endif %}
-    <p class="foot">Adgangskoder gemmes som PBKDF2-SHA256-hash. Sessionen varer 30 dage.</p>
+    <p class="foot">Adgangskoder gemmes som PBKDF2-SHA256-hash. Sessionen varer 30 dage.<br>
+      Nye brugere inviteres af en administrator — invitationen kommer paa mail.</p>
 </div>
 </body>
 </html>
@@ -5424,16 +5524,17 @@ EOF_USERSVC
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.11 PRO
+# Command Center v7.15 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
 
-## Nyheder i v7.11
+## Nyheder i v7.15
 
-- **Brugere i stedet for token-login** — første besøg opretter din bruger (`/setup`), derefter logger du ind med brugernavn + adgangskode (PBKDF2-SHA256, salt pr. bruger, 30 dages HttpOnly-session). Fanen **Brugere** opretter/sletter brugere og skifter adgangskode. `APP_TOKEN` findes ikke længere, og der er ingen maskin-nøgle - al adgang kræver en bruger.
+- **E-mail er login** — første besøg opretter din bruger med e-mail + adgangskode (`/setup`), derefter logger du ind med e-mail og adgangskode (PBKDF2-SHA256, salt pr. bruger, 30 dages HttpOnly-session). Gamle konti fra brugernavn-tiden kan stadig logge ind med deres brugernavn, indtil de får en e-mail.
+- **Invitation på mail** — fanen **Brugere** har "Inviter bruger": du skriver en e-mail, og appen sender en invitation med en midlertidig adgangskode, som brugeren skifter ved første login (dashboardet minder om det). Der er ingen invite-links og ingen tokens - kun en adgangskode.
 - ⏱️ **Fremdrift på opgaver** — tunge handlinger (crawl, AI-artikel, keyword-tjek, backlink-prospecting …) viser timer, procent og "~N s igen"; crawl læser de rigtige tal (sider/total + ETA) fra `/api/crawl/status`
 - **Opdatering fra GitHub** — Cockpit viser installeret commit vs. seneste commit på `main`, tjekker selv kl. 05:00, og "Opdater" laver DB-backup og henter kun projektets filer. Den gamle "hent install.sh og kør den"-vej er fjernet.
 - **nginx / Ultra.cc** — `deploy/nginx-command-center.conf`, `deploy/command-center.user.service` og proxy-header-understøttelse, så appen bliver på `127.0.0.1` bag nginx med korrekte Secure-cookies og rigtig klient-IP.
@@ -5470,8 +5571,8 @@ Cockpit med opdaterings-panel og alarmer. Login-siden og alle 14 faner ligger i 
 
 1. `cp .env.example .env` og udfyld nøgler
 2. `./run.sh` — scriptet udskriver den adresse appen lytter på (samt LAN-IP når `CC_HOST=0.0.0.0`)
-3. Åbn adressen: **første besøg opretter din bruger** (`/setup`) — derefter log ind med brugernavn + adgangskode. Der er ingen token i `.env`.
-4. Nye brugere, sletning og adgangskode-skift klares under fanen **Brugere**
+3. Åbn adressen: **første besøg opretter din bruger** (`/setup`) — derefter log ind med e-mail + adgangskode. Der er ingen token i `.env`.
+4. Nye brugere inviteres på mail, og sletning/adgangskode-skift klares under fanen **Brugere** (kræver `SMTP_HOST` + `SMTP_FROM`); fra serveren kan samme invitation sendes med `python3 scripts/invite.py navn@domaene.dk`
 5. (VPS) kør bag reverse proxy med TLS, eller brug `deploy/command-center.service` + SSH-tunnel
 
 ## Ultra.cc / nginx (reverse proxy)

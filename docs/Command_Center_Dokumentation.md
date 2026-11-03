@@ -32,11 +32,13 @@ install.sh                 # selvstændig installer (indeholder kopier af filern
 3. Lifespan registrerer APScheduler-jobs og starter en selvtest i en worker-tråd (DB-skrivetest, nøgler, ruteantal → kritisk alarm ved fejl)
 4. Alt netværk går gennem én `requests.Session` med **BudgetAdapter**, der tæller kald til SerpAPI/aimlapi
 
-## 3. Auth-model (v7.11)
+## 3. Auth-model (v7.15)
 
 | Emne | Implementering |
 | --- | --- |
-| Brugere | `users(id, username UNIQUE, password_hash, created_at)` |
+| Brugere | `users(id, email UNIQUE, username (legacy, kan vaere NULL), password_hash, must_change_password, created_at, last_login_ip, last_login_at)` |
+| Login-id | e-mail i smaa bogstaver (`normalize_email`); et gammelt brugernavn accepteres stadig, saa migrerede konti ikke laases ude |
+| Invitation | `POST /users/invite` → `send_email()` med en midlertidig adgangskode. Brugeren oprettes **først naar mailen er sendt**; fejler SMTP, oprettes ingen bruger og fejlen bliver en alarm. `must_change_password=1` ryddes af `/users/password` |
 | Hash | `pbkdf2_sha256$240000$<salt>$<hash>` (salt pr. bruger, `hmac.compare_digest`) |
 | Sessioner | `sessions(id=sha256(cookie), user_id, created_at, last_seen, expires_at)`, 30 dage |
 | Cookie | `cc_session`, HttpOnly, SameSite=Lax, `Secure` når scheme er https |
@@ -44,7 +46,7 @@ install.sh                 # selvstændig installer (indeholder kopier af filern
 | Rate limit | 5 fejl pr. IP = 10 min lås (bounded dict) |
 | UI-adgang | Middleware sætter `request.state.user`; ikke-loggede sendes til `/setup` eller `/login` |
 
-`APP_TOKEN` er fjernet. Sessioner slettes ved logout, bruger-sletning og adgangskode-skift (bortset fra den aktuelle session).
+`APP_TOKEN` er fjernet, og der er ingen invite-tokens: en invitation er en mail med en midlertidig adgangskode, som brugeren skifter. Sessioner slettes ved logout, bruger-sletning og adgangskode-skift (bortset fra den aktuelle session).
 
 ## 4. Datalag
 
@@ -117,18 +119,20 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 - Token-sammenligning: `secrets.compare_digest` (sessioner)
 - HTML fra AI/SERP saniteres før `|safe` i skabelonen
 - Netværkskald: alle med timeout; budget-guard stopper betalte API'er
+- Invitationer: midlertidig adgangskode er tilfældig (12 tegn), staar kun i mailen, og `must_change_password` vises som gul bjælke i dashboardet indtil koden er skiftet
 - Kendte, ikke-lukkede punkter (se ROADMAP): udgående requests kan pege på private IP'er (SSRF-flade), Telegram-kald sker inde i en åben DB-transaktion, og der er ingen CSRF-token (SameSite dækker cross-site POST)
 
 ## 11. Test og CI
 
 - `tests/test_v8_features.py` — in-process tests: kvalitetsgate, API-budget, `/health`, sanitering, pris-monitor, crawl-historik/diff, monitor-input og opdaterings-udtræk (whitelist + traversal)
-- `tests/ci_check.sh` — boot mod fake WordPress: opretter bruger via `/setup`, tester anonym adgang (401/303), cookie-login, logout, alle sider, Autopilot-broen og fravær af tracebacks
+- `tests/ci_check.sh` — boot mod fake WordPress: opretter bruger via `/setup` (e-mail), tester anonym adgang (401/303), cookie-login, logout, at en invitation uden SMTP hverken opretter en bruger eller tier stille, alle sider, Autopilot-broen og fravær af tracebacks
 - `tests/check_paths.py` — hver `action`/`href`/`fetch` i skabelonerne skal matche en route (fanger døde knapper)
 - CI kører desuden en diff af `install.sh`s indlejrede kopier mod repo-filerne
 - CI fejler, hvis `app/`, `scripts/`, `deploy/`, requirements eller start-/container-filer ændres uden at `README.md` eller `docs/` også er opdateret (`[skip docs]` i commit-beskeden springer tjekket over). `install.sh` er undtaget, fordi den er genereret og tjekkes af paritetstrinnet
 
 ## 12. Versionshistorik (kort)
 
+- **v7.15** — login med e-mail i stedet for brugernavn (migrering beholder gamle brugernavne som fallback) · invitation på mail med midlertidig adgangskode og `must_change_password` · fælles `send_email()` til alarmer og invitationer
 - **v7.11** — brugere/sessioner i stedet for token, GitHub-opdatering, nginx/Ultra.cc-deploy, sanitering + rettelser fra kodegennemgang, link-audit i CI
 - **v7.10** — kvalitetsgate, API-budget, rigtig `/health`, CI med fake WordPress
 - **v7.9** — DB-backup, opstarts-selvtest, login-rate-limit, HTTPS-advarsel, smoke-test
@@ -220,7 +224,7 @@ ved hvert CI-løb, så tabellen og koden ikke kan glide fra hinanden ubemærket.
 | Område | Ruter |
 | --- | --- |
 | Opstart og auth | `GET /setup`, `POST /setup`, `GET /login`, `POST /login`, `GET /logout` |
-| Brugere | `POST /users/add`, `POST /users/delete`, `POST /users/password` |
+| Brugere | `POST /users/invite` (mail med midlertidig kode), `POST /users/delete`, `POST /users/password` |
 | Dashboard | `GET /` |
 | Domæner | `POST /domains/check`, `POST /domains/add`, `POST /domains/delete`, `GET /api/history/{domain_id}` |
 | SEO og crawl | `POST /seo/audit`, `POST /seo/crawl`, `POST /seo/crawl/delete`, `POST /seo/linksuggest`, `POST /seo/rewrite`, `GET /api/crawl/status`, `GET /api/crawl/diff`, `GET /api/sitemap.xml`, `GET /api/redirects`, `GET /api/duplicates` |

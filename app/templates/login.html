@@ -38,16 +38,15 @@
 <div class="card">
     <h1>⚡ COMMAND CENTER</h1>
     {% if mode == 'setup' %}
-    <p class="sub">Foerste start: opret din bruger. Der er ingen token — kun brugernavn og adgangskode.</p>
+    <p class="sub">Foerste start: opret din bruger med din e-mail og en adgangskode.</p>
     {% else %}
-    <p class="sub">Log ind med din bruger.</p>
+    <p class="sub">Log ind med din e-mail og adgangskode.</p>
     {% endif %}
     {% if error %}<p class="error">{{ error }}</p>{% endif %}
     <form action="{{ '/setup' if mode == 'setup' else '/login' }}" method="POST">
-        <label for="username">Brugernavn</label>
-        <input id="username" type="text" name="username" value="{{ username }}" autocomplete="username"
-               pattern="[A-Za-z0-9._-]{3,32}" title="3-32 tegn: a-z, 0-9, punktum, bindestreg, underscore"
-               required autofocus>
+        <label for="email">E-mail</label>
+        <input id="email" type="email" name="email" value="{{ email }}" autocomplete="email"
+               placeholder="navn@domaene.dk" maxlength="254" required autofocus>
         <label for="password">Adgangskode</label>
         <input id="password" type="password" name="password" autocomplete="{{ 'new-password' if mode == 'setup' else 'current-password' }}"
                minlength="8" required>
@@ -70,7 +69,8 @@
       <div class="row"><span>Nyheder</span><b>{{ report.newest[0] if report.newest else '—' }}</b></div>
     </div>
     {% endif %}
-    <p class="foot">Adgangskoder gemmes som PBKDF2-SHA256-hash. Sessionen varer 30 dage.</p>
+    <p class="foot">Adgangskoder gemmes som PBKDF2-SHA256-hash. Sessionen varer 30 dage.<br>
+      Nye brugere inviteres af en administrator — invitationen kommer paa mail.</p>
 </div>
 </body>
 </html>

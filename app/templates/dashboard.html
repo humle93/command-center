@@ -32,8 +32,11 @@
       }
     </style>
 </head>
-{% if insecure %}<div class="bg-yellow-600 text-black text-xs text-center py-1.5 px-4 font-semibold">&Uacute;t&uacute;n HTTPS &mdash; token sendes ukrypteret. S&aelig;t nginx + TLS op foran CC (se Install-dokumentationen).</div>{% endif %}
+{% if insecure %}<div class="bg-yellow-600 text-black text-xs text-center py-1.5 px-4 font-semibold">&Uacute;t&uacute;n HTTPS &mdash; login og adgangskoder sendes ukrypteret. S&aelig;t nginx + TLS op foran CC (se Install-dokumentationen).</div>{% endif %}
 <body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null, histOpen: false, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
+{% if current_user and current_user.must_change_password %}
+<div class="bg-amber-500/10 border-b border-amber-500/40 text-amber-300 text-xs text-center py-2 px-4">Du er logget ind med en midlertidig adgangskode fra invitationsmailen &mdash; skift den under fanen <b>Brugere</b>.</div>
+{% endif %}
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
@@ -43,7 +46,7 @@
         <div class="flex items-center gap-3">
             <form action="/update/apply" method="POST" onsubmit="return confirm('Hent og installér nyeste version fra GitHub? Der laves en DB-backup først, og appen skal genstartes bagefter.')"><button class="text-xs text-zinc-400 hover:text-emerald-400">⬆️ Opdatér</button></form>
             <a href="/health" class="text-xs text-emerald-400">Systemstatus</a>
-            {% if current_user %}<span class="text-xs text-zinc-500">👤 {{ current_user.username }}</span>
+            {% if current_user %}<span class="text-xs text-zinc-500">👤 {{ current_user.email }}</span>
             {% if client_ip %}<span class="text-xs text-zinc-600" title="Din IP">{{ client_ip }}</span>{% endif %}
             <a href="/logout" class="text-xs text-zinc-500 hover:text-rose-400">Log ud</a>{% endif %}
         </div>
@@ -856,12 +859,12 @@
     <section x-show="tab === 'brugere'" class="space-y-4" style="display: none;">
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Brugere ({{ users|length }})</h2>
-            <p class="text-xs text-zinc-500 mb-3">Adgang sker med brugernavn + adgangskode (PBKDF2-SHA256). Den foerste bruger blev oprettet ved foerste besoeg — opret gerne en ekstra, saa du ikke laaser dig ude.</p>
+            <p class="text-xs text-zinc-500 mb-3">Adgang sker med e-mail + adgangskode (PBKDF2-SHA256). Den foerste bruger blev oprettet ved foerste besoeg — invitér gerne en ekstra, saa du ikke laaser dig ude.</p>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
                 <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3">
                     <div class="text-[11px] uppercase tracking-wider text-zinc-500 mb-2">Seneste login pr. bruger</div>
                     {% for u in users %}
-                    <div class="text-[11px] flex justify-between gap-2"><span>{{ u['username'] }}</span><span class="text-zinc-500">{{ u['last_login_ip'] or '—' }} · {{ (u['last_login_at'] or '')[0:16] }}</span></div>
+                    <div class="text-[11px] flex justify-between gap-2"><span>{{ u['email'] }}</span><span class="text-zinc-500">{{ u['last_login_ip'] or '—' }} · {{ (u['last_login_at'] or '')[0:16] }}</span></div>
                     {% endfor %}
                 </div>
                 <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3">
@@ -880,8 +883,9 @@
                 {% for u in users %}
                 <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs flex justify-between items-center">
                     <div>
-                        <span class="font-medium">{{ u.username }}</span>
+                        <span class="font-medium">{{ u.email }}</span>
                         {% if current_user and u.id == current_user.id %}<span class="text-[10px] text-emerald-400 ml-2">dig</span>{% endif %}
+                        {% if u['must_change_password'] %}<span class="text-[10px] text-amber-400 ml-2">skal skifte kode</span>{% endif %}
                         <div class="text-zinc-500">Oprettet {{ u.created_at }}</div>
                     </div>
                     <form action="/users/delete" method="POST">
@@ -893,12 +897,12 @@
             </div>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
-            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Opret bruger</h2>
-            <form action="/users/add" method="POST" class="grid grid-cols-1 md:grid-cols-3 gap-2">
-                <input type="text" name="username" placeholder="Brugernavn" required pattern="[A-Za-z0-9._-]{3,32}" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
-                <input type="password" name="password" placeholder="Adgangskode (min. 8 tegn)" required minlength="8" autocomplete="new-password" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
-                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Opret bruger</button>
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Inviter bruger</h2>
+            <form action="/users/invite" method="POST" class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                <input type="email" name="email" placeholder="navn@domaene.dk" required maxlength="254" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Send invitation</button>
             </form>
+            <p class="text-[10px] text-zinc-600 mt-2">Invitationen er en mail med en midlertidig adgangskode, som brugeren skifter ved foerste login. Kraever SMTP_HOST + SMTP_FROM i .env — mangler de, oprettes ingen bruger, og fejlen staar under Alarmer.</p>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Skift min adgangskode</h2>

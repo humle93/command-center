@@ -56,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Screenshots af login + alle dashboard-faner.")
     p.add_argument("--base", default=os.environ.get("CC_BASE", "http://127.0.0.1:8000"),
                    help="Appens adresse (default: %(default)s)")
-    p.add_argument("--user", default=os.environ.get("CC_USER", ""), help="Brugernavn")
+    p.add_argument("--user", default=os.environ.get("CC_USER", ""), help="E-mail")
     p.add_argument("--password", default=os.environ.get("CC_PASSWORD", ""), help="Adgangskode")
     p.add_argument("--out", default="docs/img", help="Mappe til billederne (default: %(default)s)")
     p.add_argument("--width", type=int, default=1440, help="Vinduesbredde (default: %(default)s)")
@@ -110,7 +110,7 @@ def capture(pw, args, tabs, out_dir, written, problems) -> None:
 
         # Session via API (samme cookie-jar), saa vi ikke afhaenger af formular-submit
         resp = context.request.post(base + "/login",
-                                    form={"username": args.user, "password": args.password})
+                                    form={"email": args.user, "password": args.password})
         if resp.status >= 400:
             raise SetupError("Login som '%s' fejlede (HTTP %d)." % (args.user, resp.status))
 

@@ -108,10 +108,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.14.0"
+APP_VERSION = "7.15.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.15.0", "Login med e-mail + invitation paa mail med midlertidig adgangskode - ingen tokens"),
     ("7.14.0", "Planlagt tid gemmes som lokal tid + UTC; sommertid afvises i stedet for at gaettes"),
     ("7.13.4", "Agentgrupper rettet til de tre repos: Command Center, Social Autopilot og Android"),
     ("7.13.3", "Fire agenter i tre grupper (app, WordPress-plugin, indhold) + manifest i .agents/"),
@@ -121,7 +122,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Login: IP + sidste koersel i UI'et - opstart printer version og nyheder"
+NEWEST_LINE = "Brugere oprettes med e-mail; nye brugere inviteres paa mail"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -364,8 +365,10 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            username TEXT UNIQUE,
             password_hash TEXT NOT NULL,
+            must_change_password INTEGER DEFAULT 0,
             created_at TEXT
         );
         CREATE TABLE IF NOT EXISTS sessions (
@@ -435,6 +438,22 @@ def migrate_db():
             for c in want:
                 if c not in existing:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {c} TEXT")
+        # v7.15: konti skifter fra brugernavn til e-mail. Gamle raekker beholder brugernavnet i
+        # kolonnen username og kan stadig logge ind med det; de faar en pladsholder-adresse.
+        user_cols = [r[1] for r in db.execute("PRAGMA table_info(users)").fetchall()]
+        if user_cols and "email" not in user_cols:
+            db.execute("DROP TABLE IF EXISTS users_migrate")
+            db.execute("""CREATE TABLE users_migrate (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE NOT NULL, username TEXT UNIQUE,
+                password_hash TEXT NOT NULL, must_change_password INTEGER DEFAULT 0, created_at TEXT,
+                last_login_ip TEXT, last_login_at TEXT
+            )""")
+            db.execute("""INSERT INTO users_migrate (id, email, username, password_hash, created_at,
+                             last_login_ip, last_login_at)
+                SELECT id, lower(username) || '@local', username, password_hash, created_at,
+                       last_login_ip, last_login_at FROM users""")
+            db.execute("DROP TABLE users")
+            db.execute("ALTER TABLE users_migrate RENAME TO users")
         db.execute("""CREATE TABLE IF NOT EXISTS login_attempts (
             id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, ip TEXT, ok INTEGER DEFAULT 0, created_at TEXT
         )""")
@@ -539,13 +558,16 @@ def cleanup_old_data():
 
 
 # ---------- Auth: brugere og sessioner ----------
-# Dashboardet har rigtige brugere: brugernavn + adgangskode (PBKDF2-SHA256 med salt pr. bruger).
-# Foerste besoeg opretter den foerste bruger via /setup - der er ingen delt token i .env.
+# Dashboardet har rigtige brugere: e-mail + adgangskode (PBKDF2-SHA256 med salt pr. bruger).
+# Foerste besoeg opretter den foerste bruger via /setup; derefter inviterer en bruger de naeste
+# med en mail. Der er hverken delt noegle eller invite-token - adgang er altid en adgangskode.
 SESSION_COOKIE = "cc_session"
 SESSION_MAX_AGE = 60 * 60 * 24 * 30        # 30 dage
 PBKDF2_ITERATIONS = 240_000
 MIN_PASSWORD_LEN = 8
-_USERNAME_RE = re.compile(r"[A-Za-z0-9._-]{3,32}")
+EMAIL_MAX_LEN = 254
+CC_PUBLIC_URL = os.environ.get("CC_PUBLIC_URL", "").strip()   # adressen der staar i invitationsmailen
+_USER_EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}")
 
 _LOGIN_FAILS: dict = {}  # IP -> (antal fejl, laas-til)
 _LOGIN_MAX_FAILS = 5
@@ -582,16 +604,81 @@ def user_count() -> int:
         return 0
 
 
-def create_user(username: str, password: str) -> int:
-    username = (username or "").strip()
-    if not _USERNAME_RE.fullmatch(username):
-        raise ValueError("Brugernavn: 3-32 tegn (a-z, 0-9, punktum, bindestreg, underscore)")
+def normalize_email(value: str) -> str:
+    """E-mailen er login-id: trimmet, smaa bogstaver og i et format der kan modtage post."""
+    email = (value or "").strip().lower()
+    if len(email) > EMAIL_MAX_LEN or not _USER_EMAIL_RE.fullmatch(email):
+        raise ValueError("E-mail: brug en gyldig adresse, fx navn@domaene.dk")
+    return email
+
+
+def create_user(email: str, password: str, must_change: bool = False, username: str = "") -> int:
+    """Opretter en bruger. must_change=1 bruges til invitationer med en midlertidig kode."""
+    email = normalize_email(email)
     if len(password or "") < MIN_PASSWORD_LEN:
         raise ValueError(f"Adgangskoden skal vaere mindst {MIN_PASSWORD_LEN} tegn")
     with get_db() as db:
-        cur = db.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?,?,?)",
-                         (username, hash_password(password), now_iso()))
+        cur = db.execute(
+            "INSERT INTO users (email, username, password_hash, must_change_password, created_at) "
+            "VALUES (?,?,?,?,?)",
+            (email, (username or None), hash_password(password), 1 if must_change else 0, now_iso()))
         return cur.lastrowid
+
+
+def find_user(identifier: str):
+    """Brugeren bag en e-mail - eller et brugernavn fra foer v7.15, saa gamle konti ikke laases ude."""
+    ident = (identifier or "").strip()
+    if not ident:
+        return None
+    with get_db() as db:
+        row = db.execute(
+            "SELECT id, email, password_hash, must_change_password FROM users WHERE email=?",
+            (ident.lower(),)).fetchone()
+        if not row:
+            row = db.execute(
+                "SELECT id, email, password_hash, must_change_password FROM users WHERE username=?",
+                (ident,)).fetchone()
+        return row
+
+
+def temporary_password() -> str:
+    """Midlertidig adgangskode til en invitation: tilfaeldig, men til at skrive af (12 tegn)."""
+    return secrets.token_urlsafe(9)
+
+
+def invite_user(email: str, base_url: str = "") -> tuple:
+    """Inviterer en bruger: opretter kontoen med en midlertidig kode og mailer den.
+
+    Returnerer (ok, fejl). Der sendes ingen links og ingen tokens - kun en e-mailadresse og en
+    midlertidig adgangskode, som brugeren skifter ved foerste login."""
+    try:
+        email = normalize_email(email)
+    except ValueError as e:
+        return False, str(e)
+    with get_db() as db:
+        if db.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone():
+            return False, f"Der findes allerede en bruger med {email}"
+    password = temporary_password()
+    body = (
+        "Du er inviteret til Command Center.\n\n"
+        f"Adresse: {CC_PUBLIC_URL or base_url or 'den adresse du har faaet af ejeren'}\n"
+        f"E-mail: {email}\n"
+        f"Midlertidig adgangskode: {password}\n\n"
+        "Log ind og skift adgangskoden med det samme under fanen Brugere.\n"
+        "Adgangskoden staar kun i denne mail."
+    )
+    ok, err = send_email(email, "Invitation til Command Center", body)
+    if not ok:
+        return False, err
+    try:
+        create_user(email, password, must_change=True)
+    except sqlite3.IntegrityError:
+        return False, f"Der findes allerede en bruger med {email}"
+    except ValueError as e:
+        return False, str(e)
+    with get_db() as db:
+        add_alarm(db, "brugere", f"Invitation sendt til {email}", "info")
+    return True, ""
 
 
 def client_ip(request: Request) -> str:
@@ -678,7 +765,7 @@ def current_user(request: Request):
     try:
         with get_db() as db:
             row = db.execute(
-                "SELECT u.id, u.username, s.expires_at FROM sessions s "
+                "SELECT u.id, u.email, u.must_change_password, s.expires_at FROM sessions s "
                 "JOIN users u ON u.id = s.user_id WHERE s.id=?", (key,)
             ).fetchone()
             if not row:
@@ -687,7 +774,8 @@ def current_user(request: Request):
                 db.execute("DELETE FROM sessions WHERE id=?", (key,))
                 return None
             db.execute("UPDATE sessions SET last_seen=? WHERE id=?", (now_iso(), key))
-            return {"id": row["id"], "username": row["username"]}
+            return {"id": row["id"], "email": row["email"],
+                    "must_change_password": bool(row["must_change_password"])}
     except Exception:
         return None
 
@@ -717,7 +805,7 @@ async def auth_middleware(request: Request, call_next):
 async def setup_page(request: Request):
     if user_count() > 0:
         return RedirectResponse("/login", status_code=303)
-    return templates.TemplateResponse("login.html", {"request": request, "mode": "setup", "error": "", "username": "",
+    return templates.TemplateResponse("login.html", {"request": request, "mode": "setup", "error": "", "email": "",
                                                      "report": last_run_report(), "client_ip": client_ip(request),
                                                      "app_version": APP_VERSION})
 
@@ -728,7 +816,7 @@ async def setup_user(request: Request):
     if user_count() > 0:
         return RedirectResponse("/login", status_code=303)
     form = await request.form()
-    username = (form.get("username") or "").strip()
+    email = (form.get("email") or "").strip()
     password = form.get("password") or ""
     confirm = form.get("confirm") or ""
     err = ""
@@ -737,21 +825,21 @@ async def setup_user(request: Request):
         err = "De to adgangskoder er ikke ens"
     else:
         try:
-            user_id = create_user(username, password)
+            user_id = create_user(email, password)
         except ValueError as e:
             err = str(e)
         except sqlite3.IntegrityError:
-            err = "Brugernavnet er allerede taget"
+            err = "E-mailen er allerede oprettet - log ind i stedet"
     if not user_id:
-        return templates.TemplateResponse("login.html", {"request": request, "mode": "setup", "username": username,
+        return templates.TemplateResponse("login.html", {"request": request, "mode": "setup", "email": email,
                                                          "error": err, "report": last_run_report(),
                                                          "client_ip": client_ip(request),
                                                          "app_version": APP_VERSION}, status_code=400)
     ip = client_ip(request)
     with get_db() as db:
-        add_alarm(db, "brugere", f"Foerste bruger '{username}' oprettet", "info")
+        add_alarm(db, "brugere", f"Foerste bruger '{email}' oprettet", "info")
         db.execute("UPDATE users SET last_login_ip=?, last_login_at=? WHERE id=?", (ip, now_iso(), user_id))
-    record_login(ip, username, True)
+    record_login(ip, email, True)
     return session_redirect(request, start_session(user_id, ip))
 
 
@@ -759,7 +847,7 @@ async def setup_user(request: Request):
 async def login_page(request: Request):
     if user_count() == 0:
         return RedirectResponse("/setup", status_code=303)
-    return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "error": "", "username": "",
+    return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "error": "", "email": "",
                                                      "report": last_run_report(), "client_ip": client_ip(request),
                                                      "app_version": APP_VERSION})
 
@@ -770,26 +858,25 @@ async def login(request: Request):
     now = time.time()
     fails, locked_until = _LOGIN_FAILS.get(ip, (0, 0.0))
     if locked_until > now:
-        return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "username": "",
+        return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "email": "",
                                                          "error": "For mange fejlede logins - proev igen om " + str(int(locked_until - now)) + " sek."}, status_code=429)
     form = await request.form()
-    username = (form.get("username") or "").strip()
+    email = (form.get("email") or form.get("username") or "").strip()   # username = gamle installationer
     password = form.get("password") or ""
-    with get_db() as db:
-        user = db.execute("SELECT id, username, password_hash FROM users WHERE username=?", (username,)).fetchone()
+    user = find_user(email)
     if user and verify_password(password, user["password_hash"]):
         _LOGIN_FAILS.pop(ip, None)
         with get_db() as db:
             db.execute("UPDATE users SET last_login_ip=?, last_login_at=? WHERE id=?", (ip, now_iso(), user["id"]))
-        record_login(ip, username, True)
+        record_login(ip, email, True)
         return session_redirect(request, start_session(user["id"], ip))
-    record_login(ip, username, False)
+    record_login(ip, email, False)
     fails += 1
     _LOGIN_FAILS[ip] = (0, now + _LOGIN_LOCK_SECONDS) if fails >= _LOGIN_MAX_FAILS else (fails, locked_until)
     if len(_LOGIN_FAILS) > 2000:  # undgaa at listen vokser ubegraenset
         _LOGIN_FAILS.clear()
-    return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "username": username,
-                                                     "error": "Forkert brugernavn eller adgangskode", "ip": ip,
+    return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "email": email,
+                                                     "error": "Forkert e-mail eller adgangskode", "ip": ip,
                                                      "report": last_run_report(), "client_ip": ip,
                                                      "app_version": APP_VERSION}, status_code=401)
 
@@ -802,16 +889,13 @@ async def logout(request: Request):
     return resp
 
 
-@app.post("/users/add")
-async def users_add(username: str = Form(...), password: str = Form(...)):
-    try:
-        create_user(username, password)
-    except ValueError as e:
+@app.post("/users/invite")
+async def users_invite(request: Request, email: str = Form(...)):
+    """Inviterer en bruger paa mail. Fejler SMTP, oprettes brugeren ikke - fejlen bliver en alarm."""
+    ok, err = invite_user(email, str(request.base_url).rstrip("/"))
+    if not ok:
         with get_db() as db:
-            add_alarm(db, "brugere", f"Kunne ikke oprette bruger '{username}': {str(e)[:120]}", "advarsel")
-    except sqlite3.IntegrityError:
-        with get_db() as db:
-            add_alarm(db, "brugere", f"Kunne ikke oprette bruger '{username}': navnet er optaget", "advarsel")
+            add_alarm(db, "brugere", f"Invitation til '{email.strip()[:64]}' blev ikke sendt: {str(err)[:160]}", "advarsel")
     return RedirectResponse("/", status_code=303)
 
 
@@ -840,12 +924,12 @@ async def users_password(request: Request, current: str = Form(...), new: str = 
     with get_db() as db:
         row = db.execute("SELECT password_hash FROM users WHERE id=?", (me["id"],)).fetchone()
         if not row or not verify_password(current, row["password_hash"]):
-            add_alarm(db, "brugere", f"Fejlet adgangskode-skift for '{me['username']}'", "info")
+            add_alarm(db, "brugere", f"Fejlet adgangskode-skift for '{me['email']}'", "info")
             return RedirectResponse("/", status_code=303)
         if new != confirm or len(new) < MIN_PASSWORD_LEN:
-            add_alarm(db, "brugere", f"Adgangskode-skift afvist for '{me['username']}': mindst {MIN_PASSWORD_LEN} tegn og ens i begge felter", "info")
+            add_alarm(db, "brugere", f"Adgangskode-skift afvist for '{me['email']}': mindst {MIN_PASSWORD_LEN} tegn og ens i begge felter", "info")
             return RedirectResponse("/", status_code=303)
-        db.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(new), me["id"]))
+        db.execute("UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?", (hash_password(new), me["id"]))
         # Log de andre sessioner ud, behold denne.
         db.execute("DELETE FROM sessions WHERE user_id=? AND id<>?",
                    (me["id"], _session_key(request.cookies.get(SESSION_COOKIE) or "")))
@@ -1130,13 +1214,16 @@ def _send_telegram_alert(subject: str, body: str, severity: str) -> tuple:
     return False, "Telegram er ikke konfigureret eller afviste beskeden"
 
 
-def _send_email_alert(subject: str, body: str, severity: str) -> tuple:
-    if not (SMTP_HOST and SMTP_TO and SMTP_FROM):
-        return False, "SMTP_HOST / SMTP_FROM / SMTP_TO mangler"
+def send_email(to: str, subject: str, body: str) -> tuple:
+    """Sender én mail til en konkret modtager (alarmer gaar til SMTP_TO, invitationer til brugeren)."""
+    if not (SMTP_HOST and SMTP_FROM):
+        return False, "SMTP_HOST / SMTP_FROM mangler i .env - der blev ikke sendt noget"
+    if not to:
+        return False, "Modtager mangler"
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = SMTP_FROM
-    msg["To"] = SMTP_TO
+    msg["To"] = to
     msg.set_content(body + f"\n\n--\nCommand Center {APP_VERSION}")
     try:
         if SMTP_TLS == "ssl":
@@ -1154,6 +1241,12 @@ def _send_email_alert(subject: str, body: str, severity: str) -> tuple:
         return True, ""
     except (smtplib.SMTPException, OSError, TimeoutError) as e:
         return False, str(e)[:200]
+
+
+def _send_email_alert(subject: str, body: str, severity: str) -> tuple:
+    if not (SMTP_HOST and SMTP_TO and SMTP_FROM):
+        return False, "SMTP_HOST / SMTP_FROM / SMTP_TO mangler"
+    return send_email(SMTP_TO, subject, body)
 
 
 def _send_ntfy_alert(subject: str, body: str, severity: str) -> tuple:
@@ -3685,7 +3778,8 @@ async def dashboard(request: Request):
         strategy_row = db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone()
         check_row = db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone()
         sgap_row = db.execute("SELECT value FROM settings WHERE key='sgap_snapshot'").fetchone()
-        users = db.execute("SELECT id, username, created_at, last_login_ip, last_login_at FROM users ORDER BY id").fetchall()
+        users = db.execute("SELECT id, email, created_at, last_login_ip, last_login_at, must_change_password "
+                           "FROM users ORDER BY id").fetchall()
         login_rows = db.execute("SELECT username, ip, ok, created_at FROM login_attempts ORDER BY id DESC LIMIT 8").fetchall()
         update_row = db.execute("SELECT value FROM settings WHERE key='github_update'").fetchone()
         alert_outbox = {r["state"]: r["n"] for r in

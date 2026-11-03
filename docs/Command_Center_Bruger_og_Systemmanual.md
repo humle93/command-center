@@ -10,14 +10,24 @@ Selv-hostet SEO- og drifts-center til steamgears.eu (FastAPI + SQLite). Alt kør
 
 ## Login og brugere
 
-Første besøg opretter din bruger (`/setup`): brugernavn (3-32 tegn: a-z, 0-9, punktum, bindestreg, underscore) og adgangskode (min. 8 tegn). Adgangskoder gemmes som PBKDF2-SHA256-hash med salt pr. bruger — der er ingen token i `.env`.
+Første besøg opretter din bruger (`/setup`): **e-mail** (den er dit login-id og gemmes med små bogstaver) og adgangskode (min. 8 tegn). Adgangskoder gemmes som PBKDF2-SHA256-hash med salt pr. bruger — der er ingen token i `.env`.
 
-Derefter logger du ind med brugernavn og adgangskode. Sessionen er en HttpOnly-cookie, der varer 30 dage, og kan tilbagekaldes ved at logge ud, slette brugeren eller skifte adgangskode.
+Derefter logger du ind med e-mail og adgangskode. Konti fra før v7.15 (oprettet med brugernavn) kan stadig logge ind med deres brugernavn; de får adressen `<brugernavn>@local`, indtil de bliver inviteret igen med en rigtig e-mail. Sessionen er en HttpOnly-cookie, der varer 30 dage, og kan tilbagekaldes ved at logge ud, slette brugeren eller skifte adgangskode.
 
 Under fanen **Brugere**:
 
-- **Opret bruger** — fx en ekstra konto, så du ikke låser dig ude
-- **Slet bruger** — den sidste bruger kan ikke slettes; sletter du dig selv, bliver du logget ud
+- **Inviter bruger** — skriv en e-mail, og appen sender en invitation med en midlertidig adgangskode (12 tegn). Brugeren skal skifte den ved første login, og dashboardet viser en gul bjælke indtil da. Invitationen kræver `SMTP_HOST` + `SMTP_FROM` i `.env`: kan mailen ikke sendes, bliver brugeren **ikke** oprettet, og fejlen står under fanen Alarmer
+- **Slet bruger** gør det samme som før, og den sidste bruger kan ikke slettes, så du ikke låser dig ude
+- Sletter du dig selv, bliver du logget ud
+
+Invitationen kan også sendes fra serveren uden browser — samme funktion, samme krav til SMTP:
+
+```bash
+python3 scripts/invite.py cpaleadsis@gmail.com                      # adressen kommer fra CC_PUBLIC_URL
+python3 scripts/invite.py navn@domaene.dk https://cc.example.dk     # eller angiv den selv
+```
+
+Scriptet skriver, hvad der blev sendt, og stopper med en fejl (intet oprettes), hvis mailen ikke kan sendes.
 - **Skift min adgangskode** — kræver den nuværende; dine andre sessioner logges ud
 
 Efter 5 fejlede logins fra samme IP er login låst i 10 minutter.
@@ -111,7 +121,7 @@ Artikel-forhåndsvisningen i dashboardet vises med saniteret HTML: kun formateri
 
 ### 10. Brugere
 
-- Opret og slet brugere, skift adgangskode, og se seneste login samt de seneste forsøg med IP (se "Login og brugere")
+- Inviter og slet brugere, skift adgangskode, og se seneste login samt de seneste forsøg med e-mail og IP (se "Login og brugere")
 
 ### 11. Noter
 
@@ -155,7 +165,7 @@ Billederne i `docs/img/` laves af `scripts/screenshots.py`, så de altid viser d
 
 ```bash
 pip install playwright && python3 -m playwright install chromium   # kun foerste gang
-python3 scripts/screenshots.py --base http://127.0.0.1:8000 --user ditbrugernavn --password 'din-adgangskode'
+python3 scripts/screenshots.py --base http://127.0.0.1:8000 --user din@mail.dk --password 'din-adgangskode'
 ```
 
 Scriptet logger ind, tager `cc-login.png` og skifter derefter gennem alle 14 faner og gemmer
@@ -219,7 +229,7 @@ Rigtige miljøvariabler vinder over `.env`. `.env` læses før appens konfigurat
 | "GITHUB_TOKEN mangler" i opdaterings-panelet | Sæt token i `.env` (privat repo) og genstart appen |
 | 504 fra nginx ved crawl/AI-kald | `proxy_read_timeout 300s` i nginx-blokken |
 | Login låst | 5 fejl = 10 min pr. IP; vent eller genstart appen |
-| Kan ikke oprette bruger | Brugernavn 3-32 tegn, adgangskode min. 8 tegn |
+| Kan ikke invitere en bruger | Gyldig e-mail + `SMTP_HOST`/`SMTP_FROM` i `.env`; fejlen står under Alarmer. Adgangskode ved direkte oprettelse: min. 8 tegn |
 | Ingen adgang til `/api/*` | Log ind igen - API'et kræver en aktiv session (cookie), ikke en token |
 | Appen starter ikke efter opdatering | `pip install -r requirements.txt` (gør `./run.sh`), og se `journalctl --user -u command-center` |
 

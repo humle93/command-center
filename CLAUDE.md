@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 1. november 2026 · **Version:** 7.14.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 3. november 2026 · **Version:** 7.15.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,12 +26,20 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
 
 ## Ændringer i denne arbejdsperiode
 
-### Adgang og brugere
-- Token-login (`APP_TOKEN`) er fjernet. Første besøg opretter bruger via `/setup`; derefter
-  brugernavn + adgangskode (PBKDF2-SHA256, 240k iterationer, salt pr. bruger).
+### Adgang og brugere (v7.15)
+- Token-login (`APP_TOKEN`) er fjernet. Første besøg opretter bruger via `/setup` med **e-mail**;
+  derefter logger man ind med e-mail + adgangskode (PBKDF2-SHA256, 240k iterationer, salt pr. bruger).
+- E-mailen er login-id: `normalize_email()` trimmer, sænker og validerer (max 254 tegn). Migreringen
+  (`migrate_db`) ombygger `users` og giver gamle konti `<brugernavn>@local`; `find_user()` accepterer
+  stadig det gamle brugernavn, så ingen bliver låst ude. `username` findes kun som legacy-kolonne.
+- **Invitation uden tokens:** `POST /users/invite` (fanen Brugere) laver en tilfældig midlertidig
+  adgangskode, mailer den med `send_email()` og opretter **først derefter** brugeren med
+  `must_change_password=1`. Fejler SMTP, oprettes ingen bruger, og fejlen bliver en alarm.
+  `/users/password` rydder flaget; dashboardet viser en gul bjælke indtil da.
+- `send_email(to, subject, body)` er fælles for alarmer (`SMTP_TO`) og invitationer (modtageren).
 - Sessioner ligger i `sessions` som `sha256(id)`, HttpOnly-cookie `cc_session` (30 dage, `Secure` på https).
-- Fane **Brugere**: opret/slet brugere og skift adgangskode (logger andre sessioner ud).
-- Login-lås: 5 fejl pr. IP = 10 min. Brugernavn 3–32 tegn `[A-Za-z0-9._-]`, adgangskode ≥ 8 tegn.
+- Fane **Brugere**: invitér/slet brugere og skift adgangskode (logger andre sessioner ud).
+- Login-lås: 5 fejl pr. IP = 10 min. Adgangskode ≥ 8 tegn; invitationer kræver `SMTP_HOST` + `SMTP_FROM`.
 - **Juno er fjernet helt** (se nedenfor): der findes ingen maskin-nøgle, kun bruger-sessioner.
 
 ### Hosting

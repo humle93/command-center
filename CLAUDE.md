@@ -341,22 +341,24 @@ springer tjekket over til rene undtagelser.
 
 ## Roadmap (kort — detaljer i `docs/ROADMAP.md`)
 
+Roadmappen blev **genoptrænet 3. november 2026**: listens punkter er tjekket mod koden, ikke mod tidligere
+noter, og hvert punkt har nu en verifikationslinje (et grep, en rute eller en tabel).
+
 1. **Google Search Console** (read-only): clicks/impressions/queries/pages, striking distance,
-   content decay, indexation. Største hul efter Juno-fjernelsen.
-2. **Alarm-routing**: email/SMTP, webhook, ntfy/Apprise; dedup pr. `(type, message)` indtil resolved,
-   quiet hours, maintenance windows, ugentlig digest.
-3. **API-nøgler + udgående webhooks (+ lille MCP)**: gendan automations-adgang uden at genindføre en
-   enkelt global token.
-4. **Rank-tracking i dybden**: device, geo, SERP-features (inkl. AI Overviews), konkurrent-positioner,
-   alarm ved fald, "quick wins" (position 8–20).
-5. **Content optimizer**: term-map fra top 10 → 0–100 score → rangeret fix-liste; re-score publicerede
-   artikler for decay.
-6. **Keyword-volumen, intent og clustering** (Google Ads API eller DataForSEO).
-7. **Backlink-monitorering** via GSC/CSV (referring domains, nye/tabte, anchors, disavow-eksport).
-8. **Site-wide change monitoring** med changelog (og evt. screenshot-diff).
-9. **Crawler-opgraderinger**: JS-rendering, hreflang, field Core Web Vitals, IndexNow/indexation.
-10. **Drift**: job-heartbeat (dead-man's switch), backup/restore i UI, multi-projekt/roller,
-    offline dashboard-assets, tag en release.
+   content decay, indexation. Største hul efter Juno-fjernelsen — der findes ingen GSC-kode i dag.
+2. **SSRF-beskyttelse** på de syv URL-felter; ingen IP-/værts-guard findes (`ipaddress` er ikke importeret).
+3. **CSRF + session-rotation**: ingen CSRF-token og ingen session-rotation ved login i dag.
+4. **Offline dashboard-assets**: Tailwind, Alpine og Chart.js hentes stadig fra CDN.
+5. **Backup/restore i UI**: backup skrives på disk, men der er ingen visning eller gendan-rute.
+6. **Månedligt budget i UI**: tallet findes i `/health`, men ikke på Cockpit.
+7. **Job-heartbeat (dead-man's switch)**: ingen pr.-job `last_run`/`next_run`.
+8. **E2E-test af opdateringen** mod en fake GitHub-API.
+9. **Tests for login-rate-limit og job-guards** (dækket indirekte i dag).
+10. **Alarmer, resten**: maintenance windows, ugentlig digest, evt. Apprise. Dedup, stille timer, backoff
+    og fire kanaler er færdige i v7.12.
+
+Færdige punkter fra den gamle liste: alarm-routing (v7.12), API-nøgler/MCP fase 1-2 (v7.16-v7.17) og
+MCP-hærdning (v7.17.1). De står nu under "Færdigt" i roadmappen i stedet for under "Næste".
 
 ## Åbne tråde
 

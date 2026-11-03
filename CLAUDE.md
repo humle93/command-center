@@ -52,6 +52,19 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
   `deploy/command-center.user.service` (systemd --user, `EnvironmentFile`).
 - uvicorn kører med `--proxy-headers --forwarded-allow-ips`, så cookies bliver `Secure` og login-låsen ser klientens IP.
 
+### MCP-adgang (research, ikke implementeret)
+- [`docs/Command_Center_MCP.md`](docs/Command_Center_MCP.md) opsummerer protokollen pr. november 2026
+  (spec `2026-07-28`, stateless, Streamable HTTP; HTTP+SSE er deprecated) og hvordan Command Center
+  bedst får et `/mcp`-endpoint.
+- Anbefaling: officiel Python-SDK (`mcp` 2.3.0, `MCPServer` + `streamable_http_app()`), mounted i den
+  eksisterende FastAPI-app, med `session_manager.run()` i appens lifespan. Kendte faldgruber:
+  mounted lifespan kører ikke, SDK'en svarer `421` uden `TransportSecuritySettings(allowed_hosts=…)`,
+  og nginx buffer SSE uden `X-Accel-Buffering: no` + `proxy_buffering off`.
+- Adgang i fase 1: **personlige nøgler pr. klient** (hash i DB, `read`/`write`-scopes, `Bearer`,
+  `Origin`/`Host`-validering) — ikke én global token. OAuth 2.1 + RFC 9728 er fase 3.
+- Fase 1-værktøjer (læs): `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes`,
+  `history`. Skrivende værktøjer først i fase 2 og med `TASK_ESTIMATES`-kvitteringer.
+
 ### Rettelser fra kodegennemgang
 - `sanitize_article_html()` (allow-list) omkring AI-indhold, der vises med `|safe` — lukker XSS.
 - `.env` læses før konfigurationen, og inline-kommentarer fjernes.
@@ -230,7 +243,10 @@ springer tjekket over til rene undtagelser.
 
 ## Arbejdsform
 
-- Start hver opgave med et tidsestimat (fx "~10 min") og afslut med det faktiske tidsforbrug. Skrider det, sig det straks.
+- Start hver opgave med et tidsestimat (fx "~25 min") — også små opgaver — og afslut med det faktiske
+  tidsforbrug. Skrider det, sig det straks.
+- Rapportér fremgang i **procent** undervejs ("~40 %: reglerne er rettet, research mangler"), så brugeren
+  kan se hvor langt arbejdet er. Procenter i UI'et skal komme fra rigtige data, ikke fra et fastlåst skøn.
 - Rapportér kun det, der faktisk er kørt: hvilke tests, CI-status, og hvad der ikke kunne verificeres her.
 
 ## Kendte begrænsninger

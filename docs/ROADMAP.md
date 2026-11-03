@@ -11,6 +11,7 @@ driftsstabilitet før nye features.
 | [`Command_Center_Bruger_og_Systemmanual.md`](Command_Center_Bruger_og_Systemmanual.md) | Bruger- og systemmanual: faner, moduler, nginx, WP-bro, `.env` |
 | [`Command_Center_Dokumentation.md`](Command_Center_Dokumentation.md) | Arkitektur: ruter, tabeller, jobs og sikkerhedsmodel |
 | [`Command_Center_Install_Script.md`](Command_Center_Install_Script.md) | Installation og `install.sh` |
+| [`Command_Center_MCP.md`](Command_Center_MCP.md) | Research og plan for MCP-adgang: protokol, nøgler, OAuth, værktøjer |
 | `docs/ROADMAP.md` | Dette dokument: dokumentation, færdigt, næste, senere og endgoal |
 | [`CLAUDE.md`](../CLAUDE.md) | Status/handoff, kendte begrænsninger og næste skridt |
 | [`AGENTS.md`](../AGENTS.md) | Faste regler for agenter (docs i samme commit, test før commit) |
@@ -43,6 +44,7 @@ driftsstabilitet før nye features.
 | 7 | **Monthly budget-visning i UI** | Forbruget findes i `/health`, men vises ikke i dashboardet | S |
 | 8 | **Backup/restore i UI** | Backups findes på disk; en liste + "gendan"-knap med bekræftelse gør rollback mulig uden SSH | M |
 | 9 | **Ende-til-ende-test af opdateringen** | Kæden er dækket af enhedstests (mode, opt-out, whitelist), men ikke af en kørsel mod en fake GitHub-API | S |
+| 10 | **MCP-adgang, fase 1 (læs)** | En MCP-klient kan hente health, crawl, keywords, monitorer og alarmer direkte i stedet for at nogen kopierer tal ud af dashboardet. Personlige API-nøgler pr. klient (ingen global token), `Origin`/`Host`-validering og Streamable HTTP på `/mcp` — plan og fund i [`Command_Center_MCP.md`](Command_Center_MCP.md) | M |
 
 ## Senere / idéer
 
@@ -58,6 +60,8 @@ driftsstabilitet før nye features.
 - **Ekstern overvågning**: valgfri heartbeat til Uptime Kuma/healthchecks.io
 - **Alarm-routing (v7.12)**: SMTP, ntfy, signeret webhook, dedupe og stille timer er på plads; mangler
   Apprise, maintenance windows og ugentlig digest
+- **MCP fase 2-3**: skrivende værktøjer med scopes og audit, derefter OAuth 2.1 + Protected Resource
+  Metadata (RFC 9728) og eventuelt `server.json` til MCP-registry — se [`Command_Center_MCP.md`](Command_Center_MCP.md)
 - **SERP-udgiftsprognose**: vis estimeret forbrug for resten af måneden baseret på kørende keywords
 
 ## Kendte begrænsninger (bevidste valg)

@@ -28,7 +28,8 @@ i `app/templates/`, shell-scripts i `scripts/`, dansk dokumentation i `docs/`, t
 6. **Push kun når brugeren beder om det**, og vent på grøn GitHub Actions på commiten.
 7. **Fremdriftskortet bliver.** `#cc-task` i dashboardet er fast UI. Nye handlinger over ~5 s skal have
    en `TASK_ESTIMATES`-post (label + seconds), ellers kører de uden fremdrift.
-8. **Tidsestimater.** Skriv estimat før arbejdet og faktisk tid bagefter.
+8. **Tidsestimat og fremgang.** Skriv estimat før arbejdet (også små opgaver), rapportér fremgang i
+   procent undervejs, og afslut med det faktiske tidsforbrug.
 
 ## Kontrakter
 

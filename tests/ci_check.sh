@@ -38,8 +38,8 @@ check "mcp: uden noegle svarer 401" "$(curl -s -o /dev/null -w '%{http_code}' -X
 KEY=$(python3 scripts/api_key.py create "CI-agent" read | tail -1)
 check "mcp: initialize svarer med protokolversion" "$(mcp '{"jsonrpc":"2.0","id":1,"method":"initialize"}' \
     | python3 -c 'import json,sys;print(json.load(sys.stdin)["result"]["protocolVersion"])')" "2026-07-28"
-check "mcp: tools/list giver 7 vaerktoejer" "$(mcp '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-    | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["result"]["tools"]))')" "7"
+check "mcp: tools/list giver 11 vaerktoejer" "$(mcp '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+    | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["result"]["tools"]))')" "11"
 check "mcp: alarms_open svarer uden fejl" "$(mcp '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"alarms_open","arguments":{}}}' \
     | python3 -c 'import json,sys;print(json.load(sys.stdin)["result"]["isError"])')" "False"
 check "mcp: noeglen er hashet og kun halen gemt" "$(q "SELECT COUNT(*) FROM api_clients WHERE length(key_hash)=64 AND length(key_hint)=4")" "1"
@@ -47,6 +47,28 @@ check "mcp: klartekst-noeglen ligger ikke i databasen" "$(q "SELECT COUNT(*) FRO
 python3 scripts/api_key.py revoke 1 > /dev/null
 check "mcp: tilbagekaldt noegle afvises" "$(curl -s -o /dev/null -w '%{http_code}' -X POST $U/mcp \
     -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":4,"method":"tools/list"}')" "401"
+# --- MCP fase 2: skrivende vaerktoejer + audit pr. noegle ---
+WKEY=$(python3 scripts/api_key.py create "CI-skriver" read,write | tail -1)
+RKEY=$(python3 scripts/api_key.py create "CI-laeser" read | tail -1)
+wmcp() { curl -s -X POST $U/mcp -H "Authorization: Bearer $WKEY" -H 'Content-Type: application/json' -d "$1"; }
+rmcp() { curl -s -X POST $U/mcp -H "Authorization: Bearer $RKEY" -H 'Content-Type: application/json' -d "$1"; }
+NOTE='{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"add_note","arguments":{"content":"MCP-note fra CI"}}}'
+MON='{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"add_monitor","arguments":{"name":"CI-monitor","url":"https://example.dk/pris","type":"price","expected":"199"}}}'
+check "mcp2: write-noegle skriver en note" "$(wmcp "$NOTE" \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["result"]["isError"])')" "False"
+check "mcp2: noten ligger i databasen" "$(q "SELECT COUNT(*) FROM notes WHERE content='MCP-note fra CI'")" "1"
+check "mcp2: read-noegle afvises paa add_note" "$(rmcp "$NOTE" \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["error"]["code"])')" "-32003"
+wmcp "$MON" > /dev/null
+check "mcp2: add_monitor genbruger samme url" "$(wmcp "$MON" \
+    | python3 -c 'import json,sys;print("allerede" in json.load(sys.stdin)["result"]["content"][0]["text"] and "ja" or "nej")')" "ja"
+check "mcp2: kun én monitor blev oprettet" "$(q "SELECT COUNT(*) FROM monitors WHERE name='CI-monitor'")" "1"
+check "mcp2: resolve_alarm loeser alarmen" "$(wmcp '{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"resolve_alarm","arguments":{"id":1}}}' \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["result"]["isError"])')" "False"
+check "mcp2: alarmen er markeret loest i DB" "$(q "SELECT resolved FROM alarms WHERE id=1")" "1"
+check "mcp2: auditten har kald med noeglenavn" "$(q "SELECT COUNT(*) FROM api_audit WHERE tool='add_monitor' AND ok=1")" "2"
+check "mcp2: scope-afvisning staar i auditten" "$(q "SELECT COUNT(*) FROM api_audit WHERE ok=0 AND detail LIKE '%scope: write%'")" "1"
+check "mcp2: auditten gemmer ikke noeglen" "$(q "SELECT COUNT(*) FROM api_audit WHERE detail LIKE '%$WKEY%'")" "0"
 check "update: /api/update is available" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" $U/api/update)" "200"
 check "update: /api/update reports the repo" "$(curl -s -b "$JAR" $U/api/update | python3 -c 'import json,sys;print(bool(json.load(sys.stdin).get("repo")))')" "True"
 

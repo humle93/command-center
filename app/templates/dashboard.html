@@ -915,7 +915,7 @@
                 </form>
             </div>
             {% endif %}
-            <p class="text-xs text-zinc-500 mb-3">Hver MCP-klient får sin egen nøgle (ingen fælles token). Nøglen sendes som <code class="text-zinc-400">Authorization: Bearer …</code> til <code class="text-zinc-400">/mcp</code> og gemmes kun som hash — den kan tilbagekaldes enkeltvis.</p>
+            <p class="text-xs text-zinc-500 mb-3">Hver MCP-klient får sin egen nøgle (ingen fælles token). Nøglen sendes som <code class="text-zinc-400">Authorization: Bearer …</code> til <code class="text-zinc-400">/mcp</code> og gemmes kun som hash — den kan tilbagekaldes enkeltvis. <code class="text-zinc-400">read</code> giver de syv læse-værktøjer; <code class="text-zinc-400">read,write</code> giver også <code class="text-zinc-400">start_crawl</code>, <code class="text-zinc-400">add_monitor</code>, <code class="text-zinc-400">resolve_alarm</code> og <code class="text-zinc-400">add_note</code>. Hvert kald havner i auditten nedenfor.</p>
             <form action="/api-keys/create" method="POST" class="grid grid-cols-1 md:grid-cols-3 gap-2 mb-4">
                 <input type="text" name="name" placeholder="Navn, fx Claude Desktop" required minlength="2" maxlength="60" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
                 <select name="scopes" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
@@ -926,11 +926,13 @@
             </form>
             <div class="space-y-2">
                 {% for c in api_clients %}
+                {% set u = api_usage.get(c.id) or {} %}
                 <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs flex justify-between items-center gap-3">
                     <div>
                         <span class="font-medium">{{ c.name }}</span>
                         <span class="text-zinc-600">…{{ c.key_hint or '????' }}</span>
                         <span class="text-[10px] text-zinc-500 ml-2">{{ c.scopes }}</span>
+                        <span class="text-[10px] text-zinc-500 ml-2">{{ u.get('calls', 0) }} kald{% if u.get('errors') %} · <span class="text-rose-400">{{ u.get('errors') }} fejl</span>{% endif %}</span>
                         {% if c.revoked_at %}<span class="text-[10px] text-rose-400 ml-2">tilbagekaldt</span>{% endif %}
                         <div class="text-zinc-500">Oprettet {{ (c.created_at or '')[0:16] }} · sidst brugt {{ (c.last_used_at or '—')[0:16] }}{% if c.last_used_ip %} fra {{ c.last_used_ip }}{% endif %}</div>
                     </div>
@@ -942,9 +944,20 @@
                     {% endif %}
                 </div>
                 {% else %}
-                <div class="text-[11px] text-zinc-500">Ingen nøgler endnu. Værktøjerne er: health, crawl_summary, keywords, monitors, alarms_open, notes og history.</div>
+                <div class="text-[11px] text-zinc-500">Ingen nøgler endnu. Læse-værktøjer: health, crawl_summary, keywords, monitors, alarms_open, notes, history. Skrive-værktøjer (kræver write): start_crawl, add_monitor, resolve_alarm, add_note.</div>
                 {% endfor %}
             </div>
+            {% if api_audit %}
+            <h3 class="text-[11px] uppercase tracking-wider text-zinc-500 mt-5 mb-2">Seneste MCP-kald (audit)</h3>
+            <div class="space-y-1">
+                {% for a in api_audit %}
+                <div class="text-[11px] flex justify-between gap-3 {{ 'text-zinc-500' if a.ok else 'text-rose-400' }}">
+                    <span class="truncate">{{ a.client or 'ukendt nøgle' }} · <span class="text-zinc-300">{{ a.tool or a.method }}</span>{% if a.detail %} — {{ a.detail }}{% endif %}</span>
+                    <span class="text-zinc-600 shrink-0">{{ (a.created_at or '')[0:16] }}{% if a.duration_ms %} · {{ a.duration_ms }} ms{% endif %}</span>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Skift min adgangskode</h2>

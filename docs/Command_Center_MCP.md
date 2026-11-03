@@ -1,6 +1,6 @@
 # Command Center — MCP-adgang (research)
 
-**Status:** fase 1 implementeret i v7.16 · **Dato:** 3. november 2026 · **Gælder:** v7.16.x
+**Status:** fase 1 (v7.16) og fase 2 (v7.17) implementeret · **Dato:** 3. november 2026 · **Gælder:** v7.17.x
 
 Formålet er at lade en MCP-klient (Claude, Codebuff, en editor) læse og senere styre Command Center
 direkte — uden at nogen kopierer tal ud af dashboardet. Notatet opsummerer protokollen som den ser ud
@@ -116,7 +116,7 @@ applikationsstyrede (værten vælger kontekst), **prompts** er brugerstyrede ska
 
 Fase 1 kan leveres uden at røre dashboardets øvrige funktioner: alt er nye ruter og én ny tabel.
 
-## 6. Sådan er fase 1 bygget (v7.16)
+## 6. Sådan er MCP bygget (v7.16–v7.17)
 
 - **Ingen ny afhængighed.** `mcp==2.3.0` kræver `starlette 1.10`, men appen kører `fastapi==0.115.6`,
   som kræver `starlette<0.42`. `pip install mcp` ødelagde derfor FastAPI-installationen i test, og
@@ -134,9 +134,17 @@ Fase 1 kan leveres uden at røre dashboardets øvrige funktioner: alt er nye rut
   kvitteret i UI'et), og `last_used_at`/`last_used_ip` opdateres ved hvert kald.
 - **Værktøjer:** `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes` og
   `history(domain_id)`; alle læser eksisterende tabeller, og `limit`-parametre klemmes til et loft.
+- **Fase 2 (v7.17): skrivning og audit.** Hvert værktøj har `scope` (`read`/`write`); `start_crawl`,
+  `add_monitor`, `resolve_alarm` og `add_note` kræver `write`, og `tools/list` sender
+  `annotations` (`readOnlyHint`/`destructiveHint`), så klienten kan advare før et kald. Alle kald —
+  også afviste — havner i `api_audit` med nøgle, værktøj, ok/fejl, årsag og varighed; UI'et viser kald
+  og fejl pr. nøgle plus de seneste 10 kald, og `scripts/api_key.py audit` viser dem i terminalen.
+  Rækker ældre end 90 dage ryddes af `cleanup_old_data`. Skrive-værktøjerne genbruger appens egne
+  funktioner (`normalize_url`, dublet-tjek, `site_crawl_sync`), så MCP ikke kan gøre noget, UI'et ikke
+  kan. `start_crawl` afvises, mens et crawl kører.
 - **Ikke med endnu:** `resources/`, `prompts/`, SSE (`subscriptions/listen`), `server/discover` og
-  `Mcp-Method`/`Mcp-Name`-headere. Klienter, der accepterer JSON-svar, virker; en klient, der kræver
-  SSE-streaming eller fuld header-compliance, skal testes mod fase 2.
+  `Mcp-Method`/`Mcp-Name`-headere samt OAuth (fase 3). Klienter, der accepterer JSON-svar, virker; en
+  klient, der kræver SSE-streaming eller fuld header-compliance, er ikke testet.
 - **Ikke testet her:** en rigtig MCP-klient. Verifikationen er HTTP-niveau (`tests/test_v8_features.py`
   og `tests/ci_check.sh`), fordi SDK'ens klient ikke kan installeres sammen med appen.
 

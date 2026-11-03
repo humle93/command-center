@@ -46,7 +46,8 @@ install.sh                 # selvstændig installer (indeholder kopier af filern
 | Rate limit | 5 fejl pr. IP = 10 min lås (bounded dict) |
 | UI-adgang | Middleware sætter `request.state.user`; ikke-loggede sendes til `/setup` eller `/login` |
 | API-nøgler (v7.16) | `api_clients(id, name, key_hash UNIQUE, key_hint, scopes, created_at, last_used_at, last_used_ip, revoked_at)`. Nøglen er `cc_` + 32 tegn, vises **én gang** (gemmes midlertidigt i `settings.api_key_once` indtil den er kvitteret), gemmes som sha256 og kan tilbagekaldes pr. klient |
-| MCP | `POST /mcp` er **uden for** session-middlewaren: `Authorization: Bearer cc_…` → `find_api_client()`, `Origin`/`Host` valideres, svaret er JSON-RPC 2.0 (spec `2026-07-28`, stateless). `read`-scope kræves for `tools/call` |
+| MCP | `POST /mcp` er **uden for** session-middlewaren: `Authorization: Bearer cc_…` → `find_api_client()`, `Origin`/`Host` valideres, svaret er JSON-RPC 2.0 (spec `2026-07-28`, stateless). Hvert værktøj har et `scope` (`read`/`write`), og `tools/call` afvises med `-32003`, hvis nøglen mangler det |
+| MCP-audit (v7.17) | `api_audit(id, client_id, method, tool, ok, detail, duration_ms, created_at)` — ét spor pr. `tools/call`, også afviste kald. Vist i fanen Brugere og via `scripts/api_key.py audit`; ryddes efter 90 dage |
 
 `APP_TOKEN` er fjernet, og der er ingen invite-tokens: en invitation er en mail med en midlertidig adgangskode, som brugeren skifter. Sessioner slettes ved logout, bruger-sletning og adgangskode-skift (bortset fra den aktuelle session).
 
@@ -59,7 +60,7 @@ Tabeller i grupper:
 - **SEO**: `seopages`, `crawl_runs`, `keywords`, `keyword_difficulty`, `keyword_ideas`, `content_gap`, `visibility`, `internal_links`
 - **Indhold**: `articles`, `backlink_prospects`, `outreach`
 - **Drift/integrationer**: `socialqueue`, `competitors`, `linkcheck`, `ai_visibility`
-- **Adgang**: `api_clients` (MCP-nøgler, hash + scopes)
+- **Adgang**: `api_clients` (MCP-nøgler, hash + scopes), `api_audit` (kald pr. nøgle)
 - **System**: `users`, `sessions`, `settings` (nøgle/værdi: moduler, strategi, budget, snapshots, `deployed_commit`, `github_update`), `notes` og `_selftest` (resultat af opstarts-selvtesten)
 
 Alle queries er parameteriserede. `settings` bruges til små tilstande (JSON), så nye funktioner ikke kræver migration.
@@ -124,6 +125,7 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 - Netværkskald: alle med timeout; budget-guard stopper betalte API'er
 - Invitationer: midlertidig adgangskode er tilfældig (12 tegn), staar kun i mailen, og `must_change_password` vises som gul bjælke i dashboardet indtil koden er skiftet
 - MCP-nøgler: `cc_` + 32 tegn, kun `sha256` i DB, `Bearer` i header (aldrig query), `read`/`write`-scopes, tilbagekald pr. nøgle, `Origin`/`Host`-validering mod `CC_PUBLIC_URL` (DNS-rebinding) og samme rate-limit-tænkning som login
+- MCP-skrivning (v7.17): kun nøgler med `write` kan kalde `start_crawl`, `add_monitor`, `resolve_alarm` og `add_note`; handlingerne går gennem de samme funktioner som UI'et (validering, `normalize_url`, dublet-tjek), og alt logges i `api_audit` uden nøglen i klartekst
 - Kendte, ikke-lukkede punkter (se ROADMAP): udgående requests kan pege på private IP'er (SSRF-flade), Telegram-kald sker inde i en åben DB-transaktion, og der er ingen CSRF-token (SameSite dækker cross-site POST)
 
 ## 11. Test og CI
@@ -136,6 +138,7 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 
 ## 12. Versionshistorik (kort)
 
+- **v7.17** — MCP fase 2: fire skrive-værktøjer bag `write`-scope (`start_crawl`, `add_monitor`, `resolve_alarm`, `add_note`), `readOnlyHint`/`destructiveHint` i `tools/list`, audit pr. nøgle i `api_audit` (vist i UI + `scripts/api_key.py audit`) og oprydning efter 90 dage
 - **v7.16** — MCP-adgang fase 1: `api_clients` med hash og scopes, `POST /mcp` (JSON-RPC, Streamable HTTP uden SSE) med syv læse-værktøjer, `Origin`/`Host`-validering og `scripts/api_key.py`
 - **v7.15** — login med e-mail i stedet for brugernavn (migrering beholder gamle brugernavne som fallback) · invitation på mail med midlertidig adgangskode og `must_change_password` · fælles `send_email()` til alarmer og invitationer
 - **v7.11** — brugere/sessioner i stedet for token, GitHub-opdatering, nginx/Ultra.cc-deploy, sanitering + rettelser fra kodegennemgang, link-audit i CI

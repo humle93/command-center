@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 3. november 2026 · **Version:** 7.16.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 3. november 2026 · **Version:** 7.17.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -51,6 +51,24 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - `deploy/nginx-command-center.conf` (proxy-headers, `proxy_read_timeout 300s`, ingen understi) og
   `deploy/command-center.user.service` (systemd --user, `EnvironmentFile`).
 - uvicorn kører med `--proxy-headers --forwarded-allow-ips`, så cookies bliver `Secure` og login-låsen ser klientens IP.
+
+### MCP fase 2 (v7.17) — implementeret
+- Fire skrive-værktøjer med `"scope": "write"`: `start_crawl`, `add_monitor`, `resolve_alarm`,
+  `add_note`. `mcp_tool_start_crawl` er `async` (bruger `run_in_executor` + `site_crawl_sync`) — derfor
+  tjekker `_mcp_handle` nu `inspect.isawaitable(result)`, så både sync- og async-værktøjer virker.
+- Scope-tjekket er pr. værktøj (`tool["scope"]`), ikke længere hardcodet `read`; manglende scope giver
+  `-32003` med scope-navnet. `tools/list` sender `annotations` (`readOnlyHint`, `destructiveHint`,
+  `idempotentHint`).
+- **Audit pr. nøgle:** `api_audit(client_id, method, tool, ok, detail, duration_ms, created_at)` +
+  `idx_api_audit_client`. `log_api_call()` skriver ét spor pr. `tools/call` (også afviste kald, med
+  årsag), `api_usage()` giver kald/fejl pr. nøgle, `api_audit_rows(limit)` de seneste til UI'et.
+  Ingen nøgle i klartekst i auditten; rækker ældre end 90 dage ryddes i `cleanup_old_data`.
+- UI: MCP-kortet viser "N kald · M fejl" pr. nøgle og de seneste 10 kald nederst. CLI:
+  `python3 scripts/api_key.py audit [antal]`.
+- `start_crawl` afvises når `CRAWL_STATE["running"]` (ingen dobbelt-crawl), `add_monitor` svarer
+  `created: false` for samme url+type, `resolve_alarm` svarer `already_resolved` for gamle alarmer.
+- Tests: 11 nye checks i `tests/test_v8_features.py` (annotations, skrivning, scope-afvisning, dublet,
+  alarm, crawl-afvisning, ugyldig URL, audit, usage, ingen nøgle i audit) og 10 i `tests/ci_check.sh`.
 
 ### MCP fase 1 (v7.16) — implementeret
 - `api_clients` (`name`, `key_hash` = sha256, `key_hint`, `scopes`, `last_used_at/ip`, `revoked_at`):

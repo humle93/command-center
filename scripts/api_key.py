@@ -5,6 +5,7 @@ Brug:
     python3 scripts/api_key.py list
     python3 scripts/api_key.py create "Claude Desktop" [read|read,write]
     python3 scripts/api_key.py revoke <id>
+    python3 scripts/api_key.py audit [antal]
 
 Noeglen skrives kun ud ved oprettelse; i databasen ligger der en sha256-hash.
 Klienten sender den som "Authorization: Bearer <noegle>" til /mcp.
@@ -21,7 +22,8 @@ from app import main  # noqa: E402
 USAGE = ('Brug:\n'
          '  python3 scripts/api_key.py list\n'
          '  python3 scripts/api_key.py create "Navn" [read|read,write]\n'
-         '  python3 scripts/api_key.py revoke <id>')
+         '  python3 scripts/api_key.py revoke <id>\n'
+         '  python3 scripts/api_key.py audit [antal]')
 
 
 def run() -> int:
@@ -61,6 +63,18 @@ def run() -> int:
             return 2
         main.revoke_api_client(int(args[1]))
         print(f"Noegle #{args[1]} er tilbagekaldt.")
+        return 0
+    if cmd == "audit":
+        limit = int(args[1]) if len(args) > 1 and args[1].isdigit() else 20
+        rows = main.api_audit_rows(limit)
+        if not rows:
+            print("Ingen MCP-kald endnu.")
+            return 0
+        for r in rows:
+            state = "ok " if r["ok"] else "fejl"
+            detail = f' - {r["detail"]}' if r["detail"] else ""
+            print(f'{(r["created_at"] or "")[0:19]:<19} {state}  {(r["client"] or "ukendt")[:22]:<22} '
+                  f'{r["tool"] or r["method"]:<16} {r["duration_ms"] or 0:>5} ms{detail}')
         return 0
     print(USAGE)
     return 2

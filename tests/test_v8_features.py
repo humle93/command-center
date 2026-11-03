@@ -398,8 +398,9 @@ check("mcp: initialize giver protokolversion og servernavn",
       and r.headers.get("mcp-protocol-version") == main.MCP_PROTOCOL_VERSION, r.text[:200])
 r = m.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, headers=mh)
 names = [t["name"] for t in r.json()["result"]["tools"]]
-check("mcp: tools/list giver de syv laese-vaerktoejer",
-      names == ["health", "crawl_summary", "keywords", "monitors", "alarms_open", "notes", "history"], names)
+check("mcp: tools/list giver syv laese- og fire skrive-vaerktoejer",
+      names == ["health", "crawl_summary", "keywords", "monitors", "alarms_open", "notes", "history",
+                "start_crawl", "add_monitor", "resolve_alarm", "add_note"], names)
 r = m.post("/mcp", json={"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                          "params": {"name": "health", "arguments": {}}}, headers=mh)
 payload = __import__("json").loads(r.json()["result"]["content"][0]["text"])
@@ -434,6 +435,86 @@ r = m.post("/mcp", data="{ikke json", headers={"Authorization": f"Bearer {write_
                                                 "Content-Type": "application/json"})
 check("mcp: ugyldig JSON giver 400 og -32700",
       r.status_code == 400 and r.json()["error"]["code"] == -32700, r.status_code)
+
+# --- v7.17: MCP fase 2 - skrivende vaerktoejer med write-scope og audit pr. noegle ---
+rw_id, rw_key = main.create_api_client("Skrive-agent", "read,write")
+mhw = {"Authorization": f"Bearer {rw_key}"}
+
+
+def mcp_call(tool, args, key=rw_key):
+    return m.post("/mcp", json={"jsonrpc": "2.0", "id": 20, "method": "tools/call",
+                                "params": {"name": tool, "arguments": args}},
+                  headers={"Authorization": f"Bearer {key}"})
+
+
+r = m.post("/mcp", json={"jsonrpc": "2.0", "id": 19, "method": "tools/list"}, headers=mhw)
+tools = {t["name"]: t for t in r.json()["result"]["tools"]}
+check("mcp2: tools/list har annoteringer pr. vaerktoej",
+      tools["health"]["annotations"]["readOnlyHint"] is True
+      and tools["add_note"]["annotations"]["readOnlyHint"] is False
+      and tools["resolve_alarm"]["annotations"]["destructiveHint"] is True,
+      {k: v["annotations"] for k, v in tools.items()})
+
+r = mcp_call("add_note", {"content": "MCP-note fra CI"})
+note_data = __import__("json").loads(r.json()["result"]["content"][0]["text"])
+with main.get_db() as db:
+    note_row = db.execute("SELECT content FROM notes WHERE id=?", (note_data["note_id"],)).fetchone()
+check("mcp2: add_note skriver noten i dashboardet",
+      r.json()["result"]["isError"] is False and note_row and note_row["content"] == "MCP-note fra CI",
+      note_data)
+
+ro_id, ro_key = main.create_api_client("Laese-agent", "read")
+r = mcp_call("add_note", {"content": "skal afvises"}, key=ro_key)
+check("mcp2: read-noegle kan ikke skrive (-32003)",
+      r.json()["error"]["code"] == -32003 and "write" in r.json()["error"]["message"], r.text[:160])
+
+mon_args = {"name": "MCP-monitor", "url": "https://example.dk/pris", "type": "price", "expected": "199"}
+first = __import__("json").loads(mcp_call("add_monitor", mon_args).json()["result"]["content"][0]["text"])
+second = __import__("json").loads(mcp_call("add_monitor", mon_args).json()["result"]["content"][0]["text"])
+with main.get_db() as db:
+    mon_n = db.execute("SELECT COUNT(*) FROM monitors WHERE name='MCP-monitor'").fetchone()[0]
+check("mcp2: add_monitor opretter én monitor og genbruger ved dublet",
+      first["created"] is True and second["created"] is False
+      and first["monitor_id"] == second["monitor_id"] and mon_n == 1, (first, second, mon_n))
+
+with main.get_db() as db:
+    db.execute("INSERT INTO alarms (type, message, severity, created_at) VALUES ('test','MCP-alarm','info',?)",
+               (main.now_iso(),))
+    alarm_id = db.execute("SELECT MAX(id) FROM alarms").fetchone()[0]
+res_data = __import__("json").loads(mcp_call("resolve_alarm", {"id": alarm_id}).json()["result"]["content"][0]["text"])
+with main.get_db() as db:
+    alarm_resolved = db.execute("SELECT resolved FROM alarms WHERE id=?", (alarm_id,)).fetchone()["resolved"]
+check("mcp2: resolve_alarm markerer alamen loest",
+      res_data["ok"] is True and res_data["already_resolved"] is False and alarm_resolved == 1, res_data)
+r = mcp_call("resolve_alarm", {"id": 999999})
+check("mcp2: ukendt alarm giver isError med forklaring",
+      r.json()["result"]["isError"] is True and "findes ikke" in r.json()["result"]["content"][0]["text"],
+      r.json()["result"]["content"][0]["text"])
+
+_crawl_was = main.CRAWL_STATE.get("running")
+main.CRAWL_STATE["running"] = True
+r = mcp_call("start_crawl", {"url": "https://example.dk"})
+check("mcp2: start_crawl afvises naar et crawl koerer",
+      r.json()["result"]["isError"] is True and "kører allerede" in r.json()["result"]["content"][0]["text"],
+      r.json()["result"]["content"][0]["text"])
+main.CRAWL_STATE["running"] = _crawl_was
+r = mcp_call("start_crawl", {"url": "ikke-en-url"})
+check("mcp2: start_crawl afviser en ugyldig URL",
+      r.json()["result"]["isError"] is True, r.json()["result"]["content"][0]["text"])
+
+audit_rows = main.api_audit_rows(100)
+usage = main.api_usage()
+check("mcp2: auditten har ét spor pr. kald med noeglenavn og varighed",
+      any(a["tool"] == "add_note" and a["ok"] == 1 and a["client"] == "Skrive-agent" for a in audit_rows)
+      and any(a["tool"] == "resolve_alarm" and a["ok"] == 1 for a in audit_rows)
+      and all(isinstance(a["duration_ms"], int) for a in audit_rows), audit_rows[:3])
+check("mcp2: afviste kald havner i auditten med scope-aarsag",
+      any(a["tool"] == "add_note" and a["ok"] == 0 and "scope: write" in (a["detail"] or "") for a in audit_rows),
+      [a for a in audit_rows if not a["ok"]][:2])
+check("mcp2: api_usage taeller kald og fejl pr. noegle",
+      usage.get(rw_id, {}).get("calls", 0) >= 3 and usage.get(ro_id, {}).get("errors", 0) >= 1, usage)
+check("mcp2: auditten gemmer ikke noeglen i klartekst",
+      not any((rw_key in (a["detail"] or "")) or (rw_key in (a["tool"] or "")) for a in audit_rows))
 
 main.log_startup("127.0.0.1", 8000)      # lifespan koerer ikke i TestClient uden context manager
 rep = main.last_run_report()

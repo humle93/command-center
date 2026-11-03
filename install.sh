@@ -2,7 +2,7 @@
 set -e
 PROJECT_DIR="$HOME/command-center"
 
-echo "⚡ Command Center v7.16 - installerer i $PROJECT_DIR..."
+echo "⚡ Command Center v7.17 - installerer i $PROJECT_DIR..."
 mkdir -p "$PROJECT_DIR/app/templates" "$PROJECT_DIR/app/data" "$PROJECT_DIR/app/static" "$PROJECT_DIR/deploy" "$PROJECT_DIR/scripts"
 echo "📄 requirements.txt..."
 cat << 'EOF_REQ' > "$PROJECT_DIR/requirements.txt"
@@ -116,6 +116,7 @@ import time
 import re
 import hashlib
 import hmac
+import inspect
 import json as jsonlib
 import subprocess
 import tarfile
@@ -196,10 +197,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.16.0"
+APP_VERSION = "7.17.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.17.0", "MCP fase 2: skrivende vaerktoejer med write-scope og audit pr. noegle"),
     ("7.16.0", "MCP-adgang: hver klient sin egen noegle (hash) og syv laese-vaerktoejer paa /mcp"),
     ("7.15.0", "Login med e-mail + invitation paa mail med midlertidig adgangskode - ingen tokens"),
     ("7.14.0", "Planlagt tid gemmes som lokal tid + UTC; sommertid afvises i stedet for at gaettes"),
@@ -211,7 +213,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "MCP-klienter faar egen noegle og kan laese health, crawl, keywords og alarmer"
+NEWEST_LINE = "MCP-klienter kan nu ogsaa starte crawl, oprette monitorer og noter - med audit pr. noegle"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -471,6 +473,17 @@ def init_db():
             last_used_ip TEXT,
             revoked_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS api_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id INTEGER,
+            method TEXT,
+            tool TEXT,
+            ok INTEGER DEFAULT 1,
+            detail TEXT,
+            duration_ms INTEGER,
+            created_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_audit_client ON api_audit(client_id, id);
         CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
             user_id INTEGER NOT NULL,
@@ -559,6 +572,11 @@ def migrate_db():
             key_hint TEXT, scopes TEXT NOT NULL DEFAULT 'read', created_at TEXT, last_used_at TEXT,
             last_used_ip TEXT, revoked_at TEXT
         )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS api_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, client_id INTEGER, method TEXT, tool TEXT,
+            ok INTEGER DEFAULT 1, detail TEXT, duration_ms INTEGER, created_at TEXT
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_api_audit_client ON api_audit(client_id, id)")
         db.execute("""CREATE TABLE IF NOT EXISTS login_attempts (
             id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, ip TEXT, ok INTEGER DEFAULT 0, created_at TEXT
         )""")
@@ -660,6 +678,7 @@ def cleanup_old_data():
         db.execute("DELETE FROM alarms WHERE resolved=1 AND created_at < ?", (cutoff(30),))
         db.execute("DELETE FROM health_history WHERE checked_at < ?", (cutoff(180),))
         db.execute("DELETE FROM keyword_ideas WHERE created_at < ?", (cutoff(180),))
+        db.execute("DELETE FROM api_audit WHERE created_at < ?", (cutoff(90),))
 
 
 # ---------- Auth: brugere og sessioner ----------
@@ -871,6 +890,40 @@ def pending_api_key():
 def clear_api_key() -> None:
     with get_db() as db:
         db.execute("DELETE FROM settings WHERE key='api_key_once'")
+
+
+def log_api_call(client_id: int, method: str, tool: str, ok: bool, detail: str = "",
+                 duration_ms: int = 0) -> None:
+    """Audit pr. noegle: ét spor pr. vaerktoejskald, saa et misbrugt noegle kan ses i UI'et."""
+    try:
+        with get_db() as db:
+            db.execute("INSERT INTO api_audit (client_id, method, tool, ok, detail, duration_ms, created_at) "
+                       "VALUES (?,?,?,?,?,?,?)",
+                       (client_id, (method or "")[:40], (tool or "")[:60], 1 if ok else 0,
+                        (detail or "")[:300], int(duration_ms or 0), now_iso()))
+    except Exception:
+        pass
+
+
+def api_usage() -> dict:
+    """Kald og fejl pr. noegle - vist i MCP-kortet."""
+    with get_db() as db:
+        rows = db.execute("SELECT client_id, COUNT(*) AS calls, "
+                          "SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END) AS errors, MAX(created_at) AS last_at "
+                          "FROM api_audit GROUP BY client_id").fetchall()
+    return {r["client_id"]: dict(r) for r in rows}
+
+
+def api_audit_rows(limit: int = 8) -> list:
+    try:
+        limit = max(1, min(int(limit), 100))
+    except (TypeError, ValueError):
+        limit = 8
+    with get_db() as db:
+        return [dict(r) for r in db.execute(
+            "SELECT a.created_at, a.method, a.tool, a.ok, a.detail, a.duration_ms, c.name AS client "
+            "FROM api_audit a LEFT JOIN api_clients c ON c.id = a.client_id "
+            "ORDER BY a.id DESC LIMIT ?", (limit,)).fetchall()]
 
 
 def client_ip(request: Request) -> str:
@@ -4016,6 +4069,8 @@ async def dashboard(request: Request):
         "users": users,
         "api_clients": api_client_rows(),
         "api_key_once": pending_api_key(),
+        "api_usage": api_usage(),
+        "api_audit": api_audit_rows(10),
         "login_rows": login_rows,
         "app_version": APP_VERSION,
         "newest": NEWEST,
@@ -4252,6 +4307,83 @@ def mcp_tool_history(args: dict) -> dict:
                                 (domain_id, _mcp_limit(args, 20, 100)))}
 
 
+# --- fase 2: skrivende vaerktoejer (kraever write-scope) ---
+MCP_MAX_PAGES = {"quick": 10, "standard": 30, "deep": 60}
+
+
+def mcp_tool_add_note(args: dict) -> dict:
+    content = str(args.get("content") or "").strip()
+    if len(content) < 2:
+        raise ValueError("content: mindst 2 tegn")
+    ts = now_iso()
+    with get_db() as db:
+        cur = db.execute("INSERT INTO notes (content, created_at) VALUES (?,?)", (content[:2000], ts))
+    return {"ok": True, "note_id": cur.lastrowid, "created_at": ts}
+
+
+def mcp_tool_resolve_alarm(args: dict) -> dict:
+    try:
+        alarm_id = int(args.get("id"))
+    except (TypeError, ValueError):
+        raise ValueError("id skal vaere et tal (se alarms_open)")
+    with get_db() as db:
+        row = db.execute("SELECT id, message, resolved FROM alarms WHERE id=?", (alarm_id,)).fetchone()
+        if not row:
+            raise ValueError(f"Alarm #{alarm_id} findes ikke (se alarms_open)")
+        db.execute("UPDATE alarms SET resolved=1 WHERE id=?", (alarm_id,))
+        left = db.execute("SELECT COUNT(*) FROM alarms WHERE resolved=0").fetchone()[0]
+    return {"ok": True, "resolved": alarm_id, "already_resolved": bool(row["resolved"]),
+            "message": (row["message"] or "")[:200], "alarms_open": left}
+
+
+def mcp_tool_add_monitor(args: dict) -> dict:
+    name = str(args.get("name") or "").strip()[:60]
+    url = str(args.get("url") or "").strip()
+    expected = str(args.get("expected") or "").strip()[:200]
+    mtype = str(args.get("type") or "contains").strip().lower()
+    if len(name) < 2 or not url or not expected:
+        raise ValueError("name, url og expected er paakraevet")
+    if mtype not in ("contains", "json", "price"):
+        raise ValueError("type skal vaere contains, json eller price")
+    try:
+        clean = normalize_url(url)
+    except ValueError as e:
+        raise ValueError(str(e))
+    with get_db() as db:
+        dup = db.execute("SELECT id FROM monitors WHERE url=? AND type=?", (clean, mtype)).fetchone()
+        if dup:
+            return {"ok": True, "created": False, "monitor_id": dup["id"], "url": clean,
+                    "note": "monitoren findes allerede - intet nyt blev oprettet"}
+        cur = db.execute("INSERT INTO monitors (name, url, type, expected) VALUES (?,?,?,?)",
+                         (name, clean, mtype, expected))
+        add_alarm(db, "monitor", f"MCP: monitor '{name}' oprettet", "info")
+    return {"ok": True, "created": True, "monitor_id": cur.lastrowid, "name": name, "url": clean, "type": mtype}
+
+
+async def mcp_tool_start_crawl(args: dict) -> dict:
+    url = str(args.get("url") or "").strip()
+    try:
+        clean = normalize_url(url)
+    except ValueError as e:
+        raise ValueError(str(e))
+    level = str(args.get("level") or "standard").strip().lower()
+    if level not in MCP_MAX_PAGES:
+        level = "standard"
+    try:
+        max_pages = int(args.get("max_pages") or MCP_MAX_PAGES[level])
+    except (TypeError, ValueError):
+        raise ValueError("max_pages skal vaere et tal")
+    max_pages = max(5, min(max_pages, 100))
+    if CRAWL_STATE.get("running"):
+        raise RuntimeError("Crawl kører allerede - vent på den (se crawl_summary eller /api/crawl/status)")
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(executor, site_crawl_sync, clean, max_pages)
+    return {"ok": True, "started": clean, "max_pages": max_pages, "level": level,
+            "status_url": "/api/crawl/status",
+            "estimate": f"~{max(1, round(max_pages * 0.4))} min",
+            "note": "Crawlen koerer i baggrunden - spoerg crawl_summary om resultatet"}
+
+
 MCP_TOOLS = [
     {"name": "health", "description": "Status for Command Center: version, database, brugere, aabne alarmer "
                                       "og seneste crawl.",
@@ -4282,7 +4414,42 @@ MCP_TOOLS = [
                                                       "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
                      "required": ["domain_id"], "additionalProperties": False},
      "fn": mcp_tool_history},
+    {"name": "start_crawl", "scope": "write",
+     "description": "Start et site-crawl i baggrunden (kræver write-scope). Afvises hvis et crawl kører.",
+     "inputSchema": {"type": "object",
+                     "properties": {"url": {"type": "string", "description": "Startside, fx https://site.dk"},
+                                    "level": {"type": "string", "enum": ["quick", "standard", "deep"]},
+                                    "max_pages": {"type": "integer", "minimum": 5, "maximum": 100}},
+                     "required": ["url"], "additionalProperties": False},
+     "fn": mcp_tool_start_crawl},
+    {"name": "add_monitor", "scope": "write",
+     "description": "Opret en monitor (kræver write-scope). Samme url+type oprettes ikke to gange.",
+     "inputSchema": {"type": "object",
+                     "properties": {"name": {"type": "string"},
+                                    "url": {"type": "string"},
+                                    "type": {"type": "string", "enum": ["contains", "json", "price"]},
+                                    "expected": {"type": "string", "description": "Tekst, JSON-nøgle eller pris"}},
+                     "required": ["name", "url", "expected"], "additionalProperties": False},
+     "fn": mcp_tool_add_monitor},
+    {"name": "resolve_alarm", "scope": "write",
+     "description": "Markér en alarm som løst (kræver write-scope).",
+     "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}},
+                     "required": ["id"], "additionalProperties": False},
+     "fn": mcp_tool_resolve_alarm},
+    {"name": "add_note", "scope": "write",
+     "description": "Skriv en note i dashboardet (kræver write-scope).",
+     "inputSchema": {"type": "object",
+                     "properties": {"content": {"type": "string", "minLength": 2, "maxLength": 2000}},
+                     "required": ["content"], "additionalProperties": False},
+     "fn": mcp_tool_add_note},
 ]
+
+# annoteringer foelger MCP-spec (readOnlyHint/destructiveHint), saa klienten kan advare foer kald
+for _tool in MCP_TOOLS:
+    _tool.setdefault("scope", "read")
+    _tool["annotations"] = {"readOnlyHint": _tool["scope"] == "read",
+                            "destructiveHint": _tool["name"] in ("resolve_alarm",),
+                            "idempotentHint": _tool["name"] in ("resolve_alarm",)}
 
 
 def _mcp_host_allowed(host: str) -> bool:
@@ -4326,7 +4493,7 @@ async def _mcp_handle(msg, client) -> dict | None:
     if method == "ping":
         return _mcp_result(mid, {})
     if method == "tools/list":
-        return _mcp_result(mid, {"tools": [{k: t[k] for k in ("name", "description", "inputSchema")}
+        return _mcp_result(mid, {"tools": [{k: t[k] for k in ("name", "description", "inputSchema", "annotations")}
                                            for t in MCP_TOOLS]})
     if method == "tools/call":
         name = str(params.get("name") or "").strip()
@@ -4334,12 +4501,21 @@ async def _mcp_handle(msg, client) -> dict | None:
         tool = next((t for t in MCP_TOOLS if t["name"] == name), None)
         if not tool:
             return _mcp_error(mid, -32602, f"Ukendt vaerktoej: {name}")
-        if "read" not in (client["scopes"] or "").split(","):
-            return _mcp_error(mid, -32003, "Noeglen mangler scope: read")
+        scope = tool.get("scope", "read")
+        if scope not in [x for x in (client["scopes"] or "").split(",") if x]:
+            log_api_call(client["id"], "tools/call", name, False, f"mangler scope: {scope}")
+            return _mcp_error(mid, -32003, f"Noeglen mangler scope: {scope}")
+        started = time.perf_counter()
         try:
             data = tool["fn"](args if isinstance(args, dict) else {})
+            if inspect.isawaitable(data):
+                data = await data
         except Exception as e:
+            log_api_call(client["id"], "tools/call", name, False, f"fejl: {str(e)[:200]}",
+                         int((time.perf_counter() - started) * 1000))
             return _mcp_result(mid, {"content": [{"type": "text", "text": f"Fejl: {str(e)[:200]}"}], "isError": True})
+        log_api_call(client["id"], "tools/call", name, True, "",
+                     int((time.perf_counter() - started) * 1000))
         return _mcp_result(mid, {"content": [{"type": "text",
                                              "text": jsonlib.dumps(data, ensure_ascii=False, indent=2)}],
                                  "isError": False})
@@ -5375,7 +5551,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                 </form>
             </div>
             {% endif %}
-            <p class="text-xs text-zinc-500 mb-3">Hver MCP-klient får sin egen nøgle (ingen fælles token). Nøglen sendes som <code class="text-zinc-400">Authorization: Bearer …</code> til <code class="text-zinc-400">/mcp</code> og gemmes kun som hash — den kan tilbagekaldes enkeltvis.</p>
+            <p class="text-xs text-zinc-500 mb-3">Hver MCP-klient får sin egen nøgle (ingen fælles token). Nøglen sendes som <code class="text-zinc-400">Authorization: Bearer …</code> til <code class="text-zinc-400">/mcp</code> og gemmes kun som hash — den kan tilbagekaldes enkeltvis. <code class="text-zinc-400">read</code> giver de syv læse-værktøjer; <code class="text-zinc-400">read,write</code> giver også <code class="text-zinc-400">start_crawl</code>, <code class="text-zinc-400">add_monitor</code>, <code class="text-zinc-400">resolve_alarm</code> og <code class="text-zinc-400">add_note</code>. Hvert kald havner i auditten nedenfor.</p>
             <form action="/api-keys/create" method="POST" class="grid grid-cols-1 md:grid-cols-3 gap-2 mb-4">
                 <input type="text" name="name" placeholder="Navn, fx Claude Desktop" required minlength="2" maxlength="60" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
                 <select name="scopes" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
@@ -5386,11 +5562,13 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             </form>
             <div class="space-y-2">
                 {% for c in api_clients %}
+                {% set u = api_usage.get(c.id) or {} %}
                 <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs flex justify-between items-center gap-3">
                     <div>
                         <span class="font-medium">{{ c.name }}</span>
                         <span class="text-zinc-600">…{{ c.key_hint or '????' }}</span>
                         <span class="text-[10px] text-zinc-500 ml-2">{{ c.scopes }}</span>
+                        <span class="text-[10px] text-zinc-500 ml-2">{{ u.get('calls', 0) }} kald{% if u.get('errors') %} · <span class="text-rose-400">{{ u.get('errors') }} fejl</span>{% endif %}</span>
                         {% if c.revoked_at %}<span class="text-[10px] text-rose-400 ml-2">tilbagekaldt</span>{% endif %}
                         <div class="text-zinc-500">Oprettet {{ (c.created_at or '')[0:16] }} · sidst brugt {{ (c.last_used_at or '—')[0:16] }}{% if c.last_used_ip %} fra {{ c.last_used_ip }}{% endif %}</div>
                     </div>
@@ -5402,9 +5580,20 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                     {% endif %}
                 </div>
                 {% else %}
-                <div class="text-[11px] text-zinc-500">Ingen nøgler endnu. Værktøjerne er: health, crawl_summary, keywords, monitors, alarms_open, notes og history.</div>
+                <div class="text-[11px] text-zinc-500">Ingen nøgler endnu. Læse-værktøjer: health, crawl_summary, keywords, monitors, alarms_open, notes, history. Skrive-værktøjer (kræver write): start_crawl, add_monitor, resolve_alarm, add_note.</div>
                 {% endfor %}
             </div>
+            {% if api_audit %}
+            <h3 class="text-[11px] uppercase tracking-wider text-zinc-500 mt-5 mb-2">Seneste MCP-kald (audit)</h3>
+            <div class="space-y-1">
+                {% for a in api_audit %}
+                <div class="text-[11px] flex justify-between gap-3 {{ 'text-zinc-500' if a.ok else 'text-rose-400' }}">
+                    <span class="truncate">{{ a.client or 'ukendt nøgle' }} · <span class="text-zinc-300">{{ a.tool or a.method }}</span>{% if a.detail %} — {{ a.detail }}{% endif %}</span>
+                    <span class="text-zinc-600 shrink-0">{{ (a.created_at or '')[0:16] }}{% if a.duration_ms %} · {{ a.duration_ms }} ms{% endif %}</span>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Skift min adgangskode</h2>
@@ -5901,15 +6090,16 @@ EOF_USERSVC
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.16 PRO
+# Command Center v7.17 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
 
-## Nyheder i v7.16
+## Nyheder i v7.17
 
+- **MCP skriver nu også (fase 2)** — med `read,write` på nøglen kan en agent starte et site-crawl, oprette en monitor, løse en alarm og skrive en note (`start_crawl`, `add_monitor`, `resolve_alarm`, `add_note`). Hvert kald — også afviste — havner i en **audit pr. nøgle** (`api_audit`) med værktøj, varighed og fejl, som du ser i fanen **Brugere** og med `python3 scripts/api_key.py audit`. Værktøjerne har `readOnlyHint`/`destructiveHint`, så klienten kan advare før et kald.
 - **MCP-adgang (fase 1)** — agenter og editorer kan læse Command Center direkte. Under fanen **Brugere** opretter du en nøgle pr. klient (ingen fælles token); den vises én gang, gemmes kun som sha256 og kan tilbagekaldes enkeltvis. `POST /mcp` tilbyder syv læse-værktøjer: `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes` og `history`. Endpointet validerer `Origin`/`Host` (DNS-rebinding) og svarer `401` med `WWW-Authenticate` uden nøgle — se [docs/Command_Center_MCP.md](docs/Command_Center_MCP.md).
 - **E-mail er login (v7.15)** — første besøg opretter din bruger med e-mail + adgangskode (`/setup`), derefter logger du ind med e-mail og adgangskode (PBKDF2-SHA256, salt pr. bruger, 30 dages HttpOnly-session). Gamle konti fra brugernavn-tiden kan stadig logge ind med deres brugernavn, indtil de får en e-mail.
 - **Invitation på mail (v7.15)** — fanen **Brugere** har "Inviter bruger": du skriver en e-mail, og appen sender en invitation med en midlertidig adgangskode, som brugeren skifter ved første login (dashboardet minder om det). Der er ingen invite-links og ingen tokens - kun en adgangskode.
@@ -5956,7 +6146,8 @@ Cockpit med opdaterings-panel og alarmer. Login-siden og alle 14 faner ligger i 
 
 ## MCP-adgang (v7.16)
 
-Fase 1 er **læse-adgang**: syv værktøjer over MCP (Streamable HTTP, JSON-svar) på `/mcp`.
+Fase 1 er **læse-adgang** (syv værktøjer); fase 2 tilføjer fire **skrive-værktøjer** med `write`-scope
+og audit pr. nøgle. Alt over MCP (Streamable HTTP, JSON-svar) på `/mcp`.
 
 ```bash
 # nøgle fra terminalen (samme tabel som UI'et) - vises kun én gang
@@ -5969,10 +6160,11 @@ curl -s https://<din-adresse>/mcp -H "Authorization: Bearer cc_..." \
 ```
 
 - Nøglen sendes altid i `Authorization: Bearer …` (aldrig i query string) og gemmes kun som hash.
-- `scopes`: `read` (fase 1) eller `read,write` (til fase 2). En nøgle uden `read` afvises med `-32003`.
+- `scopes`: `read` (kun læsning) eller `read,write` (læsning + de fire skrive-værktøjer). Manglende scope giver `-32003`.
 - `Origin`/`Host` valideres mod `CC_PUBLIC_URL`; ukendt vært giver `421`, fremmed origin `403`.
-- `python3 scripts/api_key.py list` viser nøglerne (kun halen), `revoke <id>` slår dem fra med det samme.
-- Værktøjer: `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes`, `history`.
+- `python3 scripts/api_key.py list` viser nøglerne (kun halen), `revoke <id>` slår dem fra med det samme, og `audit [antal]` viser de seneste kald pr. nøgle.
+- Læse-værktøjer: `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes`, `history`.
+- Skrive-værktøjer (`write`): `start_crawl` (afvises hvis et crawl kører), `add_monitor` (samme url+type oprettes ikke to gange), `resolve_alarm`, `add_note`.
 
 ## Ultra.cc / nginx (reverse proxy)
 

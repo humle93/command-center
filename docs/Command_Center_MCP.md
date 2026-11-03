@@ -1,6 +1,6 @@
 # Command Center — MCP-adgang (research)
 
-**Status:** research, ikke implementeret · **Dato:** 3. november 2026 · **Gælder:** v7.15.x
+**Status:** fase 1 implementeret i v7.16 · **Dato:** 3. november 2026 · **Gælder:** v7.16.x
 
 Formålet er at lade en MCP-klient (Claude, Codebuff, en editor) læse og senere styre Command Center
 direkte — uden at nogen kopierer tal ud af dashboardet. Notatet opsummerer protokollen som den ser ud
@@ -116,7 +116,31 @@ applikationsstyrede (værten vælger kontekst), **prompts** er brugerstyrede ska
 
 Fase 1 kan leveres uden at røre dashboardets øvrige funktioner: alt er nye ruter og én ny tabel.
 
-## 6. Kilder
+## 6. Sådan er fase 1 bygget (v7.16)
+
+- **Ingen ny afhængighed.** `mcp==2.3.0` kræver `starlette 1.10`, men appen kører `fastapi==0.115.6`,
+  som kræver `starlette<0.42`. `pip install mcp` ødelagde derfor FastAPI-installationen i test, og
+  `fastmcp` har samme problem. Endpointet taler derfor JSON-RPC selv: ~200 linjer i `app/main.py`
+  (`mcp_endpoint`, `_mcp_handle`, `MCP_TOOLS`), uden SSE og uden sessioner — hvilket passer fint med,
+  at spec `2026-07-28` netop har fjernet begge dele.
+- **Ruter og adgang:** `POST /mcp` er undtaget session-middlewaren og bruger `Authorization: Bearer
+  cc_…` → `find_api_client()` (sha256-opslag, `revoked_at IS NULL`). `Host` valideres mod
+  `CC_PUBLIC_URL` (ellers `421`), `Origin` mod samme vært (ellers `403`); er `CC_PUBLIC_URL` tom,
+  springes værtstjekket over, så lokal udvikling og `TestClient` virker.
+- **Svar:** JSON-RPC 2.0 med `MCP-Protocol-Version: 2026-07-28` og `X-Accel-Buffering: no` i headeren.
+  `initialize`, `ping`, `tools/list`, `tools/call`; notifikationer besvares med `202`; ukendt metode
+  giver `-32601`, ukendt værktøj `-32602`, manglende `read`-scope `-32003`, ugyldig JSON `-32700`.
+- **Nøgler:** tabel `api_clients`, nøglen vises én gang (via `settings.api_key_once` indtil den er
+  kvitteret i UI'et), og `last_used_at`/`last_used_ip` opdateres ved hvert kald.
+- **Værktøjer:** `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes` og
+  `history(domain_id)`; alle læser eksisterende tabeller, og `limit`-parametre klemmes til et loft.
+- **Ikke med endnu:** `resources/`, `prompts/`, SSE (`subscriptions/listen`), `server/discover` og
+  `Mcp-Method`/`Mcp-Name`-headere. Klienter, der accepterer JSON-svar, virker; en klient, der kræver
+  SSE-streaming eller fuld header-compliance, skal testes mod fase 2.
+- **Ikke testet her:** en rigtig MCP-klient. Verifikationen er HTTP-niveau (`tests/test_v8_features.py`
+  og `tests/ci_check.sh`), fordi SDK'ens klient ikke kan installeres sammen med appen.
+
+## 7. Kilder
 
 - Spec, transports: <https://modelcontextprotocol.io/specification/2026-07-28/basic/transports>
 - Streamable HTTP: <https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http>

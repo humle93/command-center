@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 3. november 2026 · **Version:** 7.15.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 3. november 2026 · **Version:** 7.16.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -52,7 +52,24 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
   `deploy/command-center.user.service` (systemd --user, `EnvironmentFile`).
 - uvicorn kører med `--proxy-headers --forwarded-allow-ips`, så cookies bliver `Secure` og login-låsen ser klientens IP.
 
-### MCP-adgang (research, ikke implementeret)
+### MCP fase 1 (v7.16) — implementeret
+- `api_clients` (`name`, `key_hash` = sha256, `key_hint`, `scopes`, `last_used_at/ip`, `revoked_at`):
+  én nøgle pr. klient, `cc_` + 32 tegn, vises **én gang** via `settings.api_key_once` i fanen Brugere.
+  `scripts/api_key.py create|list|revoke` gør det samme fra terminalen.
+- `POST /mcp` ligger **uden for** session-middlewaren (Bearer i stedet for cookie): JSON-RPC 2.0 med
+  `initialize`, `ping`, `tools/list`, `tools/call`. Svar er almindelig JSON (ingen SSE), med
+  `MCP-Protocol-Version: 2026-07-28` og `X-Accel-Buffering: no`.
+- Syv læse-værktøjer: `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes`,
+  `history(domain_id)`. `tools/call` kræver `read`-scope, ellers `-32003`.
+- Sikkerhed: ukendt nøgle → `401` + `WWW-Authenticate`, fremmed `Origin` → `403`, ukendt `Host` →
+  `421` (valideres kun når `CC_PUBLIC_URL` er sat), og `last_used_at` opdateres ved hvert kald.
+- **Ingen ny afhængighed:** SDK'en `mcp==2.3.0` kræver `starlette 1.10`, som `fastapi==0.115.6` ikke kan
+  bruge (den kræver `<0.42`). Vi taler derfor JSON-RPC selv; skift til SDK'en når FastAPI understøtter
+  starlette 1.x, og husk at et mounted sub-app kræver `session_manager.run()` i appens lifespan.
+- Tests: `tests/test_v8_features.py` (13 checks) og `tests/ci_check.sh` (7 checks) dækker hash, scopes,
+  tilbagekald, Origin, ugyldig JSON og at klartekst-nøglen ikke ligger i databasen.
+
+### MCP-research (baggrund)
 - [`docs/Command_Center_MCP.md`](docs/Command_Center_MCP.md) opsummerer protokollen pr. november 2026
   (spec `2026-07-28`, stateless, Streamable HTTP; HTTP+SSE er deprecated) og hvordan Command Center
   bedst får et `/mcp`-endpoint.

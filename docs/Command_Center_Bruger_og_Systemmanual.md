@@ -125,6 +125,7 @@ Artikel-forhåndsvisningen i dashboardet vises med saniteret HTML: kun formateri
 ### 10. Brugere
 
 - Inviter og slet brugere, skift adgangskode, og se seneste login samt de seneste forsøg med e-mail og IP (se "Login og brugere")
+- **MCP-adgang**: opret en nøgle pr. klient (navn + scopes), se hvornår den sidst blev brugt og tilbagekald den med ✕. Nøglen vises kun én gang efter oprettelse — gem den med det samme
 
 ### 11. Noter
 
@@ -200,6 +201,35 @@ Proxy-blokken skal sende `X-Forwarded-Proto` (ellers bliver cookien ikke `Secure
 
 
 
+## MCP-adgang (v7.16)
+
+Agenter og editorer (Claude, Codebuff m.fl.) kan læse Command Center over **MCP** på `/mcp`
+(Streamable HTTP med JSON-svar). Fase 1 er kun læsning.
+
+1. Fanen **Brugere → MCP-adgang**: skriv et navn (fx "Claude Desktop"), vælg `read` og tryk
+   **Opret nøgle**. Nøglen (`cc_…`) vises én gang — kopiér den med det samme.
+2. Peg klienten på `https://<din-adresse>/mcp` og send nøglen som `Authorization: Bearer cc_…`.
+3. Vil du hellere gøre det fra terminalen:
+
+```bash
+python3 scripts/api_key.py create "Claude Desktop" read   # nøglen skrives ud én gang
+python3 scripts/api_key.py list                           # navn, halen af nøglen, scopes, sidst brugt
+python3 scripts/api_key.py revoke 2                        # virker med det samme
+```
+
+Værktøjerne i fase 1: `health` (version, DB, brugere, åbne alarmer, seneste crawl), `crawl_summary`,
+`keywords`, `monitors`, `alarms_open`, `notes` og `history` (kræver `domain_id`).
+
+- Nøglen gemmes kun som sha256; databasen kan ikke genskabe den. Selve nøglen har ingen udløbsdato —
+  tilbagekald den, når klienten ikke skal have adgang mere.
+- `scopes` er `read` eller `read,write`; skrivende værktøjer kommer i fase 2, så `write` giver i dag
+  ingen ekstra rettigheder.
+- Endpointet validerer `Host` mod `CC_PUBLIC_URL` (ellers `421`) og `Origin` (fremmed origin giver `403`),
+  så en fremmed webside ikke kan bruge nøglen fra browseren. Uden nøgle svarer det `401` med
+  `WWW-Authenticate: Bearer`.
+- Brug af en nøgle opdaterer "sidst brugt" i tabellen, så en glemt nøgle er nem at få øje på.
+- Plan og baggrund: [`Command_Center_MCP.md`](Command_Center_MCP.md).
+
 ## API (til automatisering)
 
 Alle routes kræver en indlogget bruger (cookie) - samme session som UI'et. Vigtigste:
@@ -208,6 +238,7 @@ Alle routes kræver en indlogget bruger (cookie) - samme session som UI'et. Vigt
 - `POST /keywords/add` · `GET /api/visibility` · `GET /api/health-history`
 - `POST /backlinks/prospect` · `POST /seo/audit` · `POST /seo/crawl`
 - `GET /health` · `POST /settings/module` · `GET /api/update` · `POST /update/check` · `POST /update/apply`
+- `POST /mcp` (MCP, kræver `Authorization: Bearer cc_…` i stedet for cookie) · `POST /api-keys/create`, `/api-keys/revoke`, `/api-keys/dismiss` (cookie)
 - `POST /self-update` (alias for `/update/apply`)
 
 ## Environment-variabler (.env)

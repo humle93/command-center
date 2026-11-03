@@ -1,6 +1,6 @@
 # Command Center — Roadmap
 
-Status pr. **november 2026 (v7.15.x)**. Rækkefølgen i "Næste" er den anbefalede prioritering: sikkerhed og
+Status pr. **november 2026 (v7.16.x)**. Rækkefølgen i "Næste" er den anbefalede prioritering: sikkerhed og
 driftsstabilitet før nye features.
 
 ## Dokumentation i repoet
@@ -20,6 +20,7 @@ driftsstabilitet før nye features.
 
 | Version | Indhold |
 | --- | --- |
+| **v7.16** | **MCP-adgang, fase 1**: hver klient får sin egen nøgle (`api_clients`, kun sha256, `read`/`write`-scopes, tilbagekald pr. nøgle) i fanen **Brugere** · `POST /mcp` taler JSON-RPC 2.0 efter spec `2026-07-28` (Streamable HTTP med JSON-svar) med syv læse-værktøjer: `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes`, `history` · `Origin`/`Host`-validering mod `CC_PUBLIC_URL`, `401` + `WWW-Authenticate` uden nøgle, `-32003` uden `read`-scope · `scripts/api_key.py` til serveren · begge testsuiter dækker nøgler, værktøjer, scopes, tilbagekald og ugyldig JSON |
 | **v7.15** | E-mail er login-id (små bogstaver, valideret) i stedet for brugernavn; gamle brugernavne virker stadig som fallback efter migreringen · **Inviter bruger** sender en mail med en midlertidig adgangskode via `send_email()`; brugeren oprettes først når mailen er sendt, og skal skifte koden ved første login (`must_change_password` + gul bjælke) · ingen invite-tokens eller links · begge testsuiter dækker mail-login og invitationens fejlsti uden SMTP |
 | **v7.14.x** | Planlagt tid gemmes som lokal tid + UTC, og ugyldig sommertid afvises i stedet for at gættes · **Autopilot-broen er idempotent**: `/social/to-autopilot` låser rækken (`social_claim()`) før kaldet, så et dobbeltklik eller et genforsøg ikke giver to kladder; svar fra WordPress frigiver låsen igen, mens en timeout blokerer med status `sendt? (svar udeblev)` · begge testsuiter dækker dobbeltklik |
 | **v7.13.x** | Screenshot-værktøj (`scripts/screenshots.py`, alle 14 faner + login) · CI advarer når `docs/img/` er ældre end dashboard-skabelonen · CI-badge og screenshot-afsnit i README · `docs/img/` opdateret til den kørende UI |
@@ -44,7 +45,6 @@ driftsstabilitet før nye features.
 | 7 | **Monthly budget-visning i UI** | Forbruget findes i `/health`, men vises ikke i dashboardet | S |
 | 8 | **Backup/restore i UI** | Backups findes på disk; en liste + "gendan"-knap med bekræftelse gør rollback mulig uden SSH | M |
 | 9 | **Ende-til-ende-test af opdateringen** | Kæden er dækket af enhedstests (mode, opt-out, whitelist), men ikke af en kørsel mod en fake GitHub-API | S |
-| 10 | **MCP-adgang, fase 1 (læs)** | En MCP-klient kan hente health, crawl, keywords, monitorer og alarmer direkte i stedet for at nogen kopierer tal ud af dashboardet. Personlige API-nøgler pr. klient (ingen global token), `Origin`/`Host`-validering og Streamable HTTP på `/mcp` — plan og fund i [`Command_Center_MCP.md`](Command_Center_MCP.md) | M |
 
 ## Senere / idéer
 
@@ -60,8 +60,10 @@ driftsstabilitet før nye features.
 - **Ekstern overvågning**: valgfri heartbeat til Uptime Kuma/healthchecks.io
 - **Alarm-routing (v7.12)**: SMTP, ntfy, signeret webhook, dedupe og stille timer er på plads; mangler
   Apprise, maintenance windows og ugentlig digest
-- **MCP fase 2-3**: skrivende værktøjer med scopes og audit, derefter OAuth 2.1 + Protected Resource
-  Metadata (RFC 9728) og eventuelt `server.json` til MCP-registry — se [`Command_Center_MCP.md`](Command_Center_MCP.md)
+- **MCP fase 2**: skrivende værktøjer (`start_crawl`, `add_monitor`, `resolve_alarm`, `add_note`) med
+  `write`-scope, audit pr. nøgle og kvittering med fremdrift — se [`Command_Center_MCP.md`](Command_Center_MCP.md)
+- **MCP fase 3**: OAuth 2.1 + Protected Resource Metadata (RFC 9728) hvis fremmede klienter skal kunne
+  koble sig på uden en nøgle, og eventuelt `server.json` til MCP-registry
 - **SERP-udgiftsprognose**: vis estimeret forbrug for resten af måneden baseret på kørende keywords
 
 ## Kendte begrænsninger (bevidste valg)

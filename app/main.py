@@ -108,10 +108,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.15.0"
+APP_VERSION = "7.16.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.16.0", "MCP-adgang: hver klient sin egen noegle (hash) og syv laese-vaerktoejer paa /mcp"),
     ("7.15.0", "Login med e-mail + invitation paa mail med midlertidig adgangskode - ingen tokens"),
     ("7.14.0", "Planlagt tid gemmes som lokal tid + UTC; sommertid afvises i stedet for at gaettes"),
     ("7.13.4", "Agentgrupper rettet til de tre repos: Command Center, Social Autopilot og Android"),
@@ -122,7 +123,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Brugere oprettes med e-mail; nye brugere inviteres paa mail"
+NEWEST_LINE = "MCP-klienter faar egen noegle og kan laese health, crawl, keywords og alarmer"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -371,6 +372,17 @@ def init_db():
             must_change_password INTEGER DEFAULT 0,
             created_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS api_clients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            key_hash TEXT UNIQUE NOT NULL,
+            key_hint TEXT,
+            scopes TEXT NOT NULL DEFAULT 'read',
+            created_at TEXT,
+            last_used_at TEXT,
+            last_used_ip TEXT,
+            revoked_at TEXT
+        );
         CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
             user_id INTEGER NOT NULL,
@@ -454,6 +466,11 @@ def migrate_db():
                        last_login_ip, last_login_at FROM users""")
             db.execute("DROP TABLE users")
             db.execute("ALTER TABLE users_migrate RENAME TO users")
+        db.execute("""CREATE TABLE IF NOT EXISTS api_clients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, key_hash TEXT UNIQUE NOT NULL,
+            key_hint TEXT, scopes TEXT NOT NULL DEFAULT 'read', created_at TEXT, last_used_at TEXT,
+            last_used_ip TEXT, revoked_at TEXT
+        )""")
         db.execute("""CREATE TABLE IF NOT EXISTS login_attempts (
             id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, ip TEXT, ok INTEGER DEFAULT 0, created_at TEXT
         )""")
@@ -692,6 +709,82 @@ def invite_user(email: str, base_url: str = "", deliver=None) -> tuple:
     return True, ""
 
 
+# ---------- API-noegler: personlige noegler pr. MCP-klient (ingen global token) ----------
+API_KEY_PREFIX = "cc_"
+API_SCOPES = ("read", "write")
+
+
+def hash_api_key(key: str) -> str:
+    return hashlib.sha256((key or "").encode()).hexdigest()
+
+
+def normalize_scopes(value: str) -> str:
+    parts = [p.strip().lower() for p in (value or "").replace(";", ",").split(",")]
+    keep = sorted({p for p in parts if p in API_SCOPES})
+    return ",".join(keep) or "read"
+
+
+def create_api_client(name: str, scopes: str = "read") -> tuple:
+    """Ny klient-noegle. Returnerer (id, noegle) - noeglen findes kun i klartekst her."""
+    name = (name or "").strip()[:60]
+    if len(name) < 2:
+        raise ValueError("Navn: mindst 2 tegn")
+    key = API_KEY_PREFIX + secrets.token_urlsafe(24)
+    with get_db() as db:
+        cur = db.execute(
+            "INSERT INTO api_clients (name, key_hash, key_hint, scopes, created_at) VALUES (?,?,?,?,?)",
+            (name, hash_api_key(key), key[-4:], normalize_scopes(scopes), now_iso()))
+        return cur.lastrowid, key
+
+
+def find_api_client(token: str):
+    token = (token or "").strip()
+    if not token.startswith(API_KEY_PREFIX):
+        return None
+    with get_db() as db:
+        return db.execute("SELECT id, name, scopes, last_used_at FROM api_clients "
+                          "WHERE key_hash=? AND revoked_at IS NULL", (hash_api_key(token),)).fetchone()
+
+
+def touch_api_client(client_id: int, ip: str) -> None:
+    with get_db() as db:
+        db.execute("UPDATE api_clients SET last_used_at=?, last_used_ip=? WHERE id=?",
+                   (now_iso(), ip, client_id))
+
+
+def revoke_api_client(client_id: int) -> None:
+    with get_db() as db:
+        db.execute("UPDATE api_clients SET revoked_at=? WHERE id=? AND revoked_at IS NULL",
+                   (now_iso(), client_id))
+
+
+def api_client_rows() -> list:
+    with get_db() as db:
+        return db.execute("SELECT id, name, key_hint, scopes, created_at, last_used_at, last_used_ip, revoked_at "
+                          "FROM api_clients ORDER BY id DESC").fetchall()
+
+
+def remember_api_key(name: str, key: str) -> None:
+    """Noeglen vises én gang i UI'et - den ligger kun i settings, indtil den er kvitteret."""
+    with get_db() as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('api_key_once', ?)",
+                   (jsonlib.dumps({"name": name, "key": key}),))
+
+
+def pending_api_key():
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT value FROM settings WHERE key='api_key_once'").fetchone()
+        return jsonlib.loads(row["value"]) if row and row["value"] else None
+    except Exception:
+        return None
+
+
+def clear_api_key() -> None:
+    with get_db() as db:
+        db.execute("DELETE FROM settings WHERE key='api_key_once'")
+
+
 def client_ip(request: Request) -> str:
     """Klientens IP. uvicorn --proxy-headers saetter client.host ud fra X-Forwarded-For;
     vi laeser headeren selv som reserve (foerste hop) og falder tilbage til socket-adressen."""
@@ -803,7 +896,7 @@ async def auth_middleware(request: Request, call_next):
     # scheme er allerede X-Forwarded-Proto-resolveret af uvicorn/starlette.
     request.state.insecure = request.url.scheme == "http" and host not in ("127.0.0.1", "::1", "localhost")
     request.state.user = current_user(request)
-    if any(path.startswith(p) for p in ("/login", "/setup", "/health", "/static")):
+    if any(path.startswith(p) for p in ("/login", "/setup", "/health", "/static", "/mcp")):
         return await call_next(request)
     if request.state.user:
         return await call_next(request)
@@ -3833,6 +3926,8 @@ async def dashboard(request: Request):
         "task_estimates": TASK_ESTIMATES,
         "current_commit": deployed_commit(),
         "users": users,
+        "api_clients": api_client_rows(),
+        "api_key_once": pending_api_key(),
         "login_rows": login_rows,
         "app_version": APP_VERSION,
         "newest": NEWEST,
@@ -3993,6 +4088,232 @@ async def health():
         "started_at": last_run_report().get("last_start", ""),
     }
     return JSONResponse(body, status_code=503 if status == "kritisk" else 200)
+
+# ---------- MCP (fase 1): laese-vaerktoejer paa /mcp ----------
+# Spec 2026-07-28 er stateless: hver request beskriver sig selv, og svaret er almindelig JSON.
+# Vi daekker tools/list + tools/call (ingen SSE, ingen sessioner), saa endpointet kan ligge i
+# denne proces uden nye afhaengigheder. Den officielle SDK kraever starlette 1.x, som fastapi
+# 0.115.6 ikke kan bruge - se docs/Command_Center_MCP.md.
+MCP_PROTOCOL_VERSION = "2026-07-28"
+MCP_SERVER_NAME = "command-center"
+_MCP_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "testserver")
+
+
+def _mcp_limit(args: dict, default: int, maximum: int) -> int:
+    try:
+        value = int(args.get("limit", default))
+    except (TypeError, ValueError):
+        value = default
+    return max(1, min(value, maximum))
+
+
+def _mcp_rows(sql: str, params: tuple = ()) -> list:
+    with get_db() as db:
+        return [dict(r) for r in db.execute(sql, params).fetchall()]
+
+
+def mcp_tool_health(args: dict) -> dict:
+    with get_db() as db:
+        alarms_open = db.execute("SELECT COUNT(*) FROM alarms WHERE resolved=0").fetchone()[0]
+        crawl = db.execute("SELECT host, pages, avg_score, started_at FROM crawl_runs "
+                           "ORDER BY id DESC LIMIT 1").fetchone()
+    try:
+        size_mb = round(os.path.getsize(DB_PATH) / 1048576, 2)
+    except OSError:
+        size_mb = None
+    return {"version": APP_VERSION, "status": "ok" if user_count() else "uden brugere",
+            "db_mb": size_mb, "users": user_count(), "alarms_open": alarms_open,
+            "latest_crawl": dict(crawl) if crawl else None,
+            "newest": [f"{v}: {t}" for v, t in NEWEST[:3]]}
+
+
+def mcp_tool_crawl_summary(args: dict) -> dict:
+    return {"runs": _mcp_rows("SELECT id, host, pages, avg_score, sitemap_urls, started_at, finished_at "
+                              "FROM crawl_runs ORDER BY id DESC LIMIT ?", (_mcp_limit(args, 5, 50),))}
+
+
+def mcp_tool_keywords(args: dict) -> dict:
+    return {"keywords": _mcp_rows("SELECT keyword, position, target_url, checked_at FROM keywords "
+                                  "ORDER BY (position IS NULL), position LIMIT ?",
+                                  (_mcp_limit(args, 20, 200),))}
+
+
+def mcp_tool_monitors(args: dict) -> dict:
+    return {"monitors": _mcp_rows("SELECT name, url, type, last_status, last_result, last_checked "
+                                  "FROM monitors ORDER BY id LIMIT ?", (_mcp_limit(args, 50, 200),))}
+
+
+def mcp_tool_alarms_open(args: dict) -> dict:
+    return {"alarms": _mcp_rows("SELECT type, message, severity, created_at FROM alarms "
+                                "WHERE resolved=0 ORDER BY id DESC LIMIT ?", (_mcp_limit(args, 20, 200),))}
+
+
+def mcp_tool_notes(args: dict) -> dict:
+    return {"notes": _mcp_rows("SELECT content, created_at FROM notes ORDER BY id DESC LIMIT ?",
+                               (_mcp_limit(args, 10, 100),))}
+
+
+def mcp_tool_history(args: dict) -> dict:
+    try:
+        domain_id = int(args.get("domain_id"))
+    except (TypeError, ValueError):
+        raise ValueError("domain_id skal vaere et tal (se /api/history eller fanen Domæner)")
+    return {"domain_id": domain_id,
+            "checks": _mcp_rows("SELECT status, response_time, ssl_days, checked_at FROM check_history "
+                                "WHERE domain_id=? ORDER BY id DESC LIMIT ?",
+                                (domain_id, _mcp_limit(args, 20, 100)))}
+
+
+MCP_TOOLS = [
+    {"name": "health", "description": "Status for Command Center: version, database, brugere, aabne alarmer "
+                                      "og seneste crawl.",
+     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+     "fn": mcp_tool_health},
+    {"name": "crawl_summary", "description": "De seneste crawl-koersler med sideantal og gennemsnitlig score.",
+     "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 50}},
+                     "additionalProperties": False},
+     "fn": mcp_tool_crawl_summary},
+    {"name": "keywords", "description": "Nøgleord med seneste position, sorteret efter position.",
+     "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200}},
+                     "additionalProperties": False},
+     "fn": mcp_tool_keywords},
+    {"name": "monitors", "description": "Pris- og indholdsmonitorer med seneste status.",
+     "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200}},
+                     "additionalProperties": False},
+     "fn": mcp_tool_monitors},
+    {"name": "alarms_open", "description": "Aabne alarmer (uløste) med type, tekst og alvorsgrad.",
+     "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200}},
+                     "additionalProperties": False},
+     "fn": mcp_tool_alarms_open},
+    {"name": "notes", "description": "De nyeste noter fra dashboardet.",
+     "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+                     "additionalProperties": False},
+     "fn": mcp_tool_notes},
+    {"name": "history", "description": "Historik for et domæne (status, svartid og SSL-dage pr. tjek).",
+     "inputSchema": {"type": "object", "properties": {"domain_id": {"type": "integer"},
+                                                      "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+                     "required": ["domain_id"], "additionalProperties": False},
+     "fn": mcp_tool_history},
+]
+
+
+def _mcp_host_allowed(host: str) -> bool:
+    """Host-validering mod DNS-rebinding. Er CC_PUBLIC_URL tom, er vi i udvikling og lader alt passere."""
+    name = (host or "").split(":")[0].strip().lower()
+    if name in _MCP_LOCAL_HOSTS:
+        return True
+    if not CC_PUBLIC_URL:
+        return True
+    want = (urlparse(CC_PUBLIC_URL).hostname or "").lower()
+    return bool(want) and name == want
+
+
+def _mcp_origin_allowed(origin: str) -> bool:
+    if not origin:
+        return True
+    parts = urlparse(origin)
+    return parts.scheme in ("http", "https") and bool(parts.hostname) and _mcp_host_allowed(parts.hostname)
+
+
+def _mcp_result(mid, result: dict) -> dict:
+    return {"jsonrpc": "2.0", "id": mid, "result": result}
+
+
+def _mcp_error(mid, code: int, message: str) -> dict:
+    return {"jsonrpc": "2.0", "id": mid, "error": {"code": code, "message": message}}
+
+
+async def _mcp_handle(msg, client) -> dict | None:
+    if not isinstance(msg, dict):
+        return _mcp_error(None, -32600, "Ugyldig request")
+    mid = msg.get("id")
+    method = str(msg.get("method") or "")
+    params = msg.get("params") or {}
+    if method.startswith("notifications/"):
+        return None                      # notifikationer besvares ikke
+    if method == "initialize":
+        return _mcp_result(mid, {"protocolVersion": MCP_PROTOCOL_VERSION,
+                                 "capabilities": {"tools": {"listChanged": False}},
+                                 "serverInfo": {"name": MCP_SERVER_NAME, "version": APP_VERSION}})
+    if method == "ping":
+        return _mcp_result(mid, {})
+    if method == "tools/list":
+        return _mcp_result(mid, {"tools": [{k: t[k] for k in ("name", "description", "inputSchema")}
+                                           for t in MCP_TOOLS]})
+    if method == "tools/call":
+        name = str(params.get("name") or "").strip()
+        args = params.get("arguments") or {}
+        tool = next((t for t in MCP_TOOLS if t["name"] == name), None)
+        if not tool:
+            return _mcp_error(mid, -32602, f"Ukendt vaerktoej: {name}")
+        if "read" not in (client["scopes"] or "").split(","):
+            return _mcp_error(mid, -32003, "Noeglen mangler scope: read")
+        try:
+            data = tool["fn"](args if isinstance(args, dict) else {})
+        except Exception as e:
+            return _mcp_result(mid, {"content": [{"type": "text", "text": f"Fejl: {str(e)[:200]}"}], "isError": True})
+        return _mcp_result(mid, {"content": [{"type": "text",
+                                             "text": jsonlib.dumps(data, ensure_ascii=False, indent=2)}],
+                                 "isError": False})
+    return _mcp_error(mid, -32601, f"Ukendt metode: {method}")
+
+
+@app.post("/mcp")
+async def mcp_endpoint(request: Request):
+    """MCP over Streamable HTTP (JSON-svar): Bearer-noegle pr. klient, Origin/Host-valideret."""
+    if not _mcp_origin_allowed(request.headers.get("origin") or ""):
+        return JSONResponse({"error": "origin ikke tilladt"}, status_code=403)
+    if not _mcp_host_allowed(request.headers.get("host") or ""):
+        return JSONResponse({"error": "host ikke tilladt"}, status_code=421)
+    auth = request.headers.get("authorization") or ""
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    client = find_api_client(token)
+    if not client:
+        return JSONResponse({"error": "unauthorized"}, status_code=401,
+                            headers={"WWW-Authenticate": 'Bearer realm="command-center"'})
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(_mcp_error(None, -32700, "Ugyldig JSON"), status_code=400)
+    touch_api_client(client["id"], client_ip(request))
+    items = payload if isinstance(payload, list) else [payload]
+    answers = []
+    for item in items:
+        answer = await _mcp_handle(item, client)
+        if answer is not None:
+            answers.append(answer)
+    headers = {"MCP-Protocol-Version": MCP_PROTOCOL_VERSION, "X-Accel-Buffering": "no"}
+    if not answers:
+        return Response(status_code=202, headers=headers)
+    return JSONResponse(answers if isinstance(payload, list) else answers[0], headers=headers)
+
+
+@app.post("/api-keys/create")
+async def api_keys_create(name: str = Form(...), scopes: str = Form("read")):
+    try:
+        client_id, key = create_api_client(name, scopes)
+        remember_api_key((name or "").strip()[:60], key)
+        with get_db() as db:
+            add_alarm(db, "brugere", f"API-noegle #{client_id} oprettet til '{(name or '').strip()[:40]}'", "info")
+    except ValueError as e:
+        with get_db() as db:
+            add_alarm(db, "brugere", f"API-noegle ikke oprettet: {str(e)[:120]}", "advarsel")
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/api-keys/dismiss")
+async def api_keys_dismiss():
+    clear_api_key()
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/api-keys/revoke")
+async def api_keys_revoke(client_id: int = Form(...)):
+    revoke_api_client(client_id)
+    with get_db() as db:
+        add_alarm(db, "brugere", f"API-noegle #{client_id} tilbagekaldt", "info")
+    return RedirectResponse("/", status_code=303)
+
 
 
 # ---------- Scheduler ----------

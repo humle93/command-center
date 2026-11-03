@@ -376,6 +376,65 @@ check("invite: --print opretter brugeren uden SMTP og giver en kode der virker",
       (ok_print, err_print, ptemp))
 main.send_email = _orig_send
 
+# --- v7.16: MCP fase 1 - laese-vaerktoejer paa /mcp med personlige noegler ---
+client_id, api_key = main.create_api_client("CI-agent", "read")
+with main.get_db() as db:
+    stored = db.execute("SELECT key_hash, key_hint, scopes FROM api_clients WHERE id=?", (client_id,)).fetchone()
+check("mcp: noeglen gemmes som hash, ikke i klartekst",
+      stored and stored["key_hash"] == main.hash_api_key(api_key) and api_key not in (stored["key_hash"], stored["key_hint"])
+      and stored["scopes"] == "read", dict(stored) if stored else None)
+check("mcp: ukendt noegle afvises", main.find_api_client("cc_findes-ikke") is None
+      and main.find_api_client("") is None)
+
+m = TestClient(main.app)
+r = m.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+check("mcp: uden noegle svarer 401 med WWW-Authenticate",
+      r.status_code == 401 and "Bearer" in (r.headers.get("www-authenticate") or ""), r.status_code)
+mh = {"Authorization": f"Bearer {api_key}"}
+r = m.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize"}, headers=mh)
+check("mcp: initialize giver protokolversion og servernavn",
+      r.status_code == 200 and r.json()["result"]["protocolVersion"] == main.MCP_PROTOCOL_VERSION
+      and r.json()["result"]["serverInfo"]["name"] == "command-center"
+      and r.headers.get("mcp-protocol-version") == main.MCP_PROTOCOL_VERSION, r.text[:200])
+r = m.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, headers=mh)
+names = [t["name"] for t in r.json()["result"]["tools"]]
+check("mcp: tools/list giver de syv laese-vaerktoejer",
+      names == ["health", "crawl_summary", "keywords", "monitors", "alarms_open", "notes", "history"], names)
+r = m.post("/mcp", json={"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                         "params": {"name": "health", "arguments": {}}}, headers=mh)
+payload = __import__("json").loads(r.json()["result"]["content"][0]["text"])
+check("mcp: health-vaerktoejet svarer med version og alarmer",
+      r.json()["result"]["isError"] is False and payload["version"] == main.APP_VERSION
+      and "alarms_open" in payload, payload)
+r = m.post("/mcp", json={"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                         "params": {"name": "finnes-ikke", "arguments": {}}}, headers=mh)
+check("mcp: ukendt vaerktoej giver -32602", r.json()["error"]["code"] == -32602, r.text[:160])
+check("mcp: sidste brug bliver noteret",
+      main.find_api_client(api_key)["last_used_at"] is not None)
+
+_public = main.CC_PUBLIC_URL
+main.CC_PUBLIC_URL = "https://cc.example.dk"
+r = m.post("/mcp", json={"jsonrpc": "2.0", "id": 5, "method": "ping"},
+           headers={**mh, "Origin": "https://ondskab.example"})
+check("mcp: fremmed Origin afvises med 403", r.status_code == 403, r.status_code)
+r = m.post("/mcp", json={"jsonrpc": "2.0", "id": 6, "method": "ping"},
+           headers={**mh, "Origin": "https://cc.example.dk"})
+check("mcp: egen Origin og ping virker", r.status_code == 200 and r.json()["result"] == {}, r.text[:120])
+main.CC_PUBLIC_URL = _public
+
+only_write, write_key = main.create_api_client("Skrive-klient", "write")
+r = m.post("/mcp", json={"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                         "params": {"name": "health", "arguments": {}}},
+           headers={"Authorization": f"Bearer {write_key}"})
+check("mcp: noegle uden read-scope afvises", r.json()["error"]["code"] == -32003, r.text[:160])
+main.revoke_api_client(client_id)
+r = m.post("/mcp", json={"jsonrpc": "2.0", "id": 8, "method": "tools/list"}, headers=mh)
+check("mcp: tilbagekaldt noegle virker ikke laengere", r.status_code == 401, r.status_code)
+r = m.post("/mcp", data="{ikke json", headers={"Authorization": f"Bearer {write_key}",
+                                                "Content-Type": "application/json"})
+check("mcp: ugyldig JSON giver 400 og -32700",
+      r.status_code == 400 and r.json()["error"]["code"] == -32700, r.status_code)
+
 main.log_startup("127.0.0.1", 8000)      # lifespan koerer ikke i TestClient uden context manager
 rep = main.last_run_report()
 check("report: version, taellinger, tidsstempler og db-stoerrelse",

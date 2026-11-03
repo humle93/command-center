@@ -31,6 +31,22 @@ check "auth: session cookie opens the dashboard" "$(curl -s -o /dev/null -w '%{h
 curl -s -o /dev/null -b "$JAR" -X POST $U/users/invite -d email=ci2@example.dk
 check "invite: no user without SMTP" "$(q "SELECT COUNT(*) FROM users")" "1"
 check "invite: the failure is visible as an alarm" "$(q "SELECT COUNT(*) FROM alarms WHERE message LIKE '%blev ikke sendt%'")" "1"
+# --- MCP fase 1: personlige noegler + laese-vaerktoejer paa /mcp ---
+mcp() { curl -s -X POST $U/mcp -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d "$1"; }
+check "mcp: uden noegle svarer 401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST $U/mcp \
+    -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')" "401"
+KEY=$(python3 scripts/api_key.py create "CI-agent" read | tail -1)
+check "mcp: initialize svarer med protokolversion" "$(mcp '{"jsonrpc":"2.0","id":1,"method":"initialize"}' \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["result"]["protocolVersion"])')" "2026-07-28"
+check "mcp: tools/list giver 7 vaerktoejer" "$(mcp '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+    | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["result"]["tools"]))')" "7"
+check "mcp: alarms_open svarer uden fejl" "$(mcp '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"alarms_open","arguments":{}}}' \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["result"]["isError"])')" "False"
+check "mcp: noeglen er hashet og kun halen gemt" "$(q "SELECT COUNT(*) FROM api_clients WHERE length(key_hash)=64 AND length(key_hint)=4")" "1"
+check "mcp: klartekst-noeglen ligger ikke i databasen" "$(q "SELECT COUNT(*) FROM api_clients WHERE key_hash='$KEY' OR key_hint='$KEY'")" "0"
+python3 scripts/api_key.py revoke 1 > /dev/null
+check "mcp: tilbagekaldt noegle afvises" "$(curl -s -o /dev/null -w '%{http_code}' -X POST $U/mcp \
+    -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":4,"method":"tools/list"}')" "401"
 check "update: /api/update is available" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" $U/api/update)" "200"
 check "update: /api/update reports the repo" "$(curl -s -b "$JAR" $U/api/update | python3 -c 'import json,sys;print(bool(json.load(sys.stdin).get("repo")))')" "True"
 

@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "steamgears": {
+      "type": "stdio",
+      "command": "python3",
+      "args": [
+        "scripts/mcp_proxy.py"
+      ],
+      "env": {
+        "STEAMGEARS_MCP_ENDPOINT": "https://steamgears.eu/wp-json/mcp/v1/http"
+      }
+    }
+  }
+}

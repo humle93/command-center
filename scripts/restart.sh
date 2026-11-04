@@ -1,6 +1,7 @@
-#!/bin/bash
-# Genstarter Command Center. Bruges af opdateringen (POST /update/apply) og kan koeres manuelt.
+#!/usr/bin/env bash
+# restart.sh - genstarter Command Center. Bruges af opdateringen (POST /update/apply) og manuelt.
 #
+# Brug:
 #   bash scripts/restart.sh              # genstart med det samme
 #   bash scripts/restart.sh --delay 2    # vent 2 s (saa HTTP-svaret kan naa frem)
 #
@@ -9,6 +10,8 @@
 #   2. systemd --user unit "command-center"  (Ultra.cc)
 #   3. systemd system unit "command-center"
 #   4. pidfile app/data/cc.pid + ./run.sh    (naar appen er startet med ./run.sh)
+# Kraever: intet ud over bash - det foerste trin der findes, bliver brugt.
+# Sidst aendret: 4. november 2026
 set -u
 cd "$(dirname "$0")/.."
 

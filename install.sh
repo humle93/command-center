@@ -6267,6 +6267,7 @@ skriver alle filer (inkl. `deploy/nginx-command-center.conf` og `deploy/command-
 - **Tests**: `python3 tests/test_v8_features.py` (enhedstests), `bash tests/ci_check.sh` (boot + alle sider + auth + WordPress-bro + link-audit)
 - **Screenshots**: `python3 scripts/screenshots.py` tager login-siden og alle 14 faner ind i `docs/img/` (kræver `pip install playwright` + `python3 -m playwright install chromium`; kør mod en kørende app med `--base/--user/--password`). CI advarer, hvis billederne er ældre end dashboard-skabelonen
 - **Fælles agentregler i alle repoer**: `bash scripts/agents_md_rollout.sh --dry-run` viser planen, og uden `--dry-run` lægger den `AGENTS.md` ind i alle dine repoer som branch + PR (kræver `gh` logget ind). En eksisterende fil overskrives kun med `--overwrite`, og `main` røres aldrig
+- **Scripts i `scripts/`**: alle otte har samme header — `navn - formål`, `Brug:`, `Kraever:` og `Sidst aendret` — og er eksekverbare. `bash scripts/update.sh -h` (og `--help` på de øvrige med flag) læser headeren, så hjælpen ikke kan drive fra scriptet. Versionsnumre står ikke i headere: de læses fra `APP_VERSION` i `app/main.py`
 
 ## Alarmer (v7.12)
 
@@ -6340,9 +6341,10 @@ EOF_README
 
 echo "📄 scripts/smoke_test.sh..."
 cat << 'EOF_RESTART' > scripts/restart.sh
-#!/bin/bash
-# Genstarter Command Center. Bruges af opdateringen (POST /update/apply) og kan koeres manuelt.
+#!/usr/bin/env bash
+# restart.sh - genstarter Command Center. Bruges af opdateringen (POST /update/apply) og manuelt.
 #
+# Brug:
 #   bash scripts/restart.sh              # genstart med det samme
 #   bash scripts/restart.sh --delay 2    # vent 2 s (saa HTTP-svaret kan naa frem)
 #
@@ -6351,6 +6353,8 @@ cat << 'EOF_RESTART' > scripts/restart.sh
 #   2. systemd --user unit "command-center"  (Ultra.cc)
 #   3. systemd system unit "command-center"
 #   4. pidfile app/data/cc.pid + ./run.sh    (naar appen er startet med ./run.sh)
+# Kraever: intet ud over bash - det foerste trin der findes, bliver brugt.
+# Sidst aendret: 4. november 2026
 set -u
 cd "$(dirname "$0")/.."
 
@@ -6424,14 +6428,19 @@ banner
 exit 0
 EOF_RESTART
 cat << 'EOF_UPDATE' > scripts/update.sh
-#!/bin/bash
-# Opdaterer Command Center fra GitHub: tjek -> filer (med DB-backup) -> requirements -> genstart.
-# Koerer appens opdateringsfunktioner direkte i venv'en, saa der kraves hverken token eller login.
-# Viser foerst hvilken version der koerer, og hvor man logger ind (CC_PUBLIC_URL via nginx).
+#!/usr/bin/env bash
+# update.sh - opdaterer Command Center fra GitHub: tjek -> filer (med DB-backup) -> requirements ->
+# genstart.
 #
+# Brug:
 #   bash scripts/update.sh              # opdater + genstart, vent til /health svarer
 #   bash scripts/update.sh --no-restart # opdater, men genstart selv bagefter
 #   bash scripts/update.sh --check      # kun tjek, skriv intet
+#
+# Viser foerst hvilken version der koerer (/health) ved siden af filernes, og hvor man logger ind
+# (CC_PUBLIC_URL via nginx). Koerer appens funktioner direkte i venv'en - ingen token eller login.
+# Kraever: venv (./venv) og GITHUB_TOKEN i .env til tjekket.
+# Sidst aendret: 4. november 2026
 set -u
 cd "$(dirname "$0")/.."
 
@@ -6439,11 +6448,14 @@ if [ -f .env ]; then
     set -a; source .env; set +a
 fi
 
+# Hjaelpen er header-kommentarerne efter shebang: retter man dem, retter man hjaelpen.
+usage() { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; }
+
 MODE="apply"
 case "${1:-}" in
     --no-restart) MODE="apply-no-restart" ;;
     --check) MODE="check" ;;
-    -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//' | sed '/^set -u$/d'; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
     "") ;;
     *) echo "Ukendt argument: $1 (brug --check, --no-restart eller -h)" >&2; exit 64 ;;
 esac
@@ -6552,9 +6564,15 @@ echo "⚠️  Appen svarede ikke inden 60 s. Se logs: journalctl --user -u comma
 exit 6
 EOF_UPDATE
 cat << 'EOF_SMOKE' > "$PROJECT_DIR/scripts/smoke_test.sh"
-#!/bin/bash
-# Command Center smoke-test - koer efter install eller self-update.
-# Brug: bash scripts/smoke_test.sh   (CC_HOST/CC_PORT overstyrer adressen)
+#!/usr/bin/env bash
+# smoke_test.sh - tjekker at appen svarer efter install eller self-update.
+#
+# Brug:
+#   bash scripts/smoke_test.sh                           # 127.0.0.1:8000
+#   CC_HOST=0.0.0.0 CC_PORT=8000 bash scripts/smoke_test.sh
+#
+# Kraever: en koerende app. CC_PUBLIC_URL vises som den offentlige adresse, hvis den er sat.
+# Sidst aendret: 4. november 2026
 HOST="${CC_HOST:-127.0.0.1}"
 PORT="${CC_PORT:-8000}"
 PUBLIC="${CC_PUBLIC_URL:-}"

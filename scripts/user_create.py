@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Opretter en bruger direkte i databasen - samme tabel og hash som fanen Brugere.
+"""user_create.py - opretter en bruger direkte i databasen. Samme tabel og hash som fanen Brugere.
 
 Brug:
     python3 scripts/user_create.py cpaleadsis@gmail.com --username humle91
@@ -9,8 +9,9 @@ Brug:
 Uden --password spoerges der (skjult input, to gange). Koden skal vaere mindst 8 tegn - samme regel
 som i UI'et (MIN_PASSWORD_LEN). Brugeren kan logge ind med e-mailen eller med brugernavnet, og
 adressen i svaret kommer fra CC_PUBLIC_URL i .env (ellers den lokale adresse).
-
-Noeglen gemmes kun som PBKDF2-hash med salt pr. bruger - derfor staar koden aldrig i databasen.
+Koden gemmes kun som PBKDF2-hash med salt pr. bruger - derfor staar den aldrig i databasen.
+Kraever: venv (./venv) - scriptet importerer app.main og skriver i den samme DB.
+Sidst aendret: 4. november 2026
 """
 import argparse
 import getpass

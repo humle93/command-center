@@ -1,11 +1,16 @@
-#!/bin/bash
-# Opdaterer Command Center fra GitHub: tjek -> filer (med DB-backup) -> requirements -> genstart.
-# Koerer appens opdateringsfunktioner direkte i venv'en, saa der kraves hverken token eller login.
-# Viser foerst hvilken version der koerer, og hvor man logger ind (CC_PUBLIC_URL via nginx).
+#!/usr/bin/env bash
+# update.sh - opdaterer Command Center fra GitHub: tjek -> filer (med DB-backup) -> requirements ->
+# genstart.
 #
+# Brug:
 #   bash scripts/update.sh              # opdater + genstart, vent til /health svarer
 #   bash scripts/update.sh --no-restart # opdater, men genstart selv bagefter
 #   bash scripts/update.sh --check      # kun tjek, skriv intet
+#
+# Viser foerst hvilken version der koerer (/health) ved siden af filernes, og hvor man logger ind
+# (CC_PUBLIC_URL via nginx). Koerer appens funktioner direkte i venv'en - ingen token eller login.
+# Kraever: venv (./venv) og GITHUB_TOKEN i .env til tjekket.
+# Sidst aendret: 4. november 2026
 set -u
 cd "$(dirname "$0")/.."
 
@@ -13,11 +18,14 @@ if [ -f .env ]; then
     set -a; source .env; set +a
 fi
 
+# Hjaelpen er header-kommentarerne efter shebang: retter man dem, retter man hjaelpen.
+usage() { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; }
+
 MODE="apply"
 case "${1:-}" in
     --no-restart) MODE="apply-no-restart" ;;
     --check) MODE="check" ;;
-    -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//' | sed '/^set -u$/d'; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
     "") ;;
     *) echo "Ukendt argument: $1 (brug --check, --no-restart eller -h)" >&2; exit 64 ;;
 esac

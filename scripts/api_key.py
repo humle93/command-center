@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Styrer MCP-noegler fra terminalen - samme tabel og hash som fanen Brugere.
+"""api_key.py - styrer MCP-noegler fra terminalen. Samme tabel og hash som fanen Brugere.
 
 Brug:
     python3 scripts/api_key.py list
@@ -9,6 +9,8 @@ Brug:
 
 Noeglen skrives kun ud ved oprettelse; i databasen ligger der en sha256-hash.
 Klienten sender den som "Authorization: Bearer <noegle>" til /mcp.
+Kraever: venv (./venv) - scriptet importerer app.main og skriver i den samme DB.
+Sidst aendret: 4. november 2026
 """
 import os
 import sys

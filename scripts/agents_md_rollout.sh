@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Lægger den fælles AGENTS.md ind i alle repoer under en GitHub-konto — som PR, aldrig direkte på main.
+# agents_md_rollout.sh — lægger den fælles AGENTS.md ind i alle repoer under en GitHub-konto, som PR.
 #
+# Brug:
 #   bash scripts/agents_md_rollout.sh --dry-run          # vis hvad der ville ske, rør intet
 #   bash scripts/agents_md_rollout.sh                    # spørg om lov, og kør
 #   bash scripts/agents_md_rollout.sh --yes              # uden bekræftelse
@@ -8,10 +9,10 @@
 #   bash scripts/agents_md_rollout.sh --owner humle93 --skip thredup-cart-hoarding
 #   bash scripts/agents_md_rollout.sh --source ~/AGENTS.md --branch chore/delte-regler
 #
-# Krav: gh (https://cli.github.com/) logget ind med adgang til repoerne, og git.
-# For hvert repo laves branchen (standard: chore/agents-md) med AGENTS.md, og der åbnes en PR.
-# Findes filen allerede og er identisk, springes repoet over. Afviger den, springes det også over —
-# medmindre du giver --overwrite, så den nye fil erstatter den gamle i PR'en.
+# Hvert repo får branchen (standard: chore/agents-md) med AGENTS.md, og der åbnes en PR — main røres
+# aldrig. Er filen identisk, springes repoet over; afviger den, også — medmindre du giver --overwrite.
+# Kraever: gh (https://cli.github.com/) logget ind med adgang til repoerne, og git.
+# Sidst ændret: 4. november 2026
 set -euo pipefail
 
 OWNER="${OWNER:-humle93}"

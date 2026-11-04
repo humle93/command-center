@@ -26,6 +26,17 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
 
 ## Ændringer i denne arbejdsperiode
 
+### Scripts-mappen ryddet op (4. november)
+- Alle otte filer i `scripts/` har nu samme header: `navn - formål`, `Brug:`, `Kraever:` og
+  `Sidst aendret: 4. november 2026`. Fire bash-scripts skiftede `#!/bin/bash` til
+  `#!/usr/bin/env bash`, og `user_create.py` fik eksekverbar-bit (den var 644).
+- `bash scripts/update.sh -h` læser nu header-kommentarerne med `awk` i stedet for `sed -n '2,8p'`:
+  det faste interval printede `set -u` med og blev forkert, så snart headeren fik en linje mere.
+- Bevidst valg: **ingen versionsnumre i headere**. `APP_VERSION` læses dynamisk i `run.sh`,
+  `run.bat`, `restart.sh` og `update.sh`; en hardkodet version ville drive som roadmap-punkterne.
+  Datoen er et snapshot — `git log -1 -- scripts/<fil>` er sandheden.
+- `install.sh` er regenereret for `EOF_UPDATE`, `EOF_RESTART` og `EOF_SMOKE` (17/17 par matcher).
+
 ### Drift: version, login-adresse og brugere fra terminalen (4. november)
 - `scripts/update.sh` viser nu øverst **hvilken version der kører** (fra `/health`, altså processen) ved
   siden af versionen i filerne, advarer hvis de er forskellige ("genstart mangler"), og skriver

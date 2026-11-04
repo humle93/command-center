@@ -6187,7 +6187,7 @@ Cockpit med opdaterings-panel og alarmer. Login-siden og alle 14 faner ligger i 
 1. `cp .env.example .env` og udfyld nøgler
 2. `./run.sh` — scriptet udskriver den adresse appen lytter på (samt LAN-IP når `CC_HOST=0.0.0.0`)
 3. Åbn adressen: **første besøg opretter din bruger** (`/setup`) — derefter log ind med e-mail + adgangskode. Der er ingen token i `.env`.
-4. Nye brugere inviteres på mail, og sletning/adgangskode-skift klares under fanen **Brugere** (kræver `SMTP_HOST` + `SMTP_FROM`); fra serveren kan samme invitation sendes med `python3 scripts/invite.py navn@domaene.dk` — og med `--print` udskrives mailen i stedet, så den kan sendes fra en anden mailkonto når SMTP ikke er sat op
+4. Nye brugere inviteres på mail, og sletning/adgangskode-skift klares under fanen **Brugere** (kræver `SMTP_HOST` + `SMTP_FROM`); fra serveren kan samme invitation sendes med `python3 scripts/invite.py navn@domaene.dk` — og med `--print` udskrives mailen i stedet, så den kan sendes fra en anden mailkonto når SMTP ikke er sat op. Helt uden mail kan brugeren oprettes direkte med `python3 scripts/user_create.py navn@domaene.dk --username humle91` (koden skrives skjult og skal være min. 8 tegn)
 5. (VPS) kør bag reverse proxy med TLS, eller brug `deploy/command-center.service` + SSH-tunnel
 6. Vil du have en agent på? Opret en nøgle under **Brugere → MCP-adgang** og peg klienten på `https://<din-adresse>/mcp` (se nedenfor)
 
@@ -6235,7 +6235,7 @@ Panelet i Cockpit sammenligner installeret commit med seneste commit på `main`:
 - **Tjek for nye commits** (`POST /update/check`) — viser SHA, dato og commit-besked, eller den præcise fejl (manglende token, 401/403, 404). Kører også automatisk kl. 05:00.
 - **Opdater** (`POST /update/apply`) — tager en `pre-update`-backup af databasen, henter commit-tarballen og skriver **kun** projektets filer (`app/`, `scripts/`, `deploy/`, requirements, start-scripts, `install.sh`, Dockerfile, compose, `.env.example`). `.env`, databasen og `..`-stier røres ikke.
 - **Alt i ét hug**: er `requirements.txt` ændret, køres `pip install -r` automatisk, og appen **genstarter sig selv** ~1,5 s efter svaret (systemd-unit, ellers `scripts/restart.sh` med pidfile + `run.sh`). Fjern fluebenet "genstart" i panelet, eller sæt `UPDATE_AUTO_RESTART=0`, for at genstarte manuelt. `UPDATE_RESTART_CMD` overstyrer kommandoen (fx din egen supervisor).
-- **Fra terminalen**: `bash scripts/update.sh` gør hele kæden (tjek → filer → requirements → genstart) og venter til `/health` svarer igen; `--check` tjekker kun, `--no-restart` springer genstarten over. `bash scripts/restart.sh` genstarter uden at opdatere.
+- **Fra terminalen**: `bash scripts/update.sh` gør hele kæden (tjek → filer → requirements → genstart) og venter til `/health` svarer igen; `--check` tjekker kun, `--no-restart` springer genstarten over. Øverst viser scriptet hvilken version der **faktisk kører** (fra `/health`) ved siden af versionen på disken — er de forskellige, er appen ikke genstartet — og login-adressen fra `CC_PUBLIC_URL`. `bash scripts/restart.sh` genstarter uden at opdatere.
 - Status som JSON: `GET /api/update` (inkl. `restart_mode` og `auto_restart`). Kræver `GITHUB_TOKEN` (privat repo). `/self-update` findes stadig som alias for `/update/apply`.
 
 ## Steamgears Autopilot-bro (WordPress-plugin 7.5+)
@@ -6286,7 +6286,9 @@ testalarmer og GitHub-opdatering.
 Ved hver opstart skriver appen version og de nyeste aendringer til skaermen, til
 `app/data/startup.log` og til `settings.last_start` - og de samme nyheder er med i `GET /health`.
 `run.sh`, `run.bat`, `scripts/restart.sh`, `scripts/update.sh` og `install.sh` viser version + nyheder,
-saa man ikke skal huske hvilken version der kører.
+saa man ikke skal huske hvilken version der kører. `scripts/update.sh` går et skridt videre: den viser
+versionen på disken **og** den version processen svarer med i `/health`, advarer hvis de er forskellige,
+og skriver login-adressen (`CC_PUBLIC_URL` + `/login`, dvs. den adresse nginx videresender).
 
 Login logger nu IP: `users.last_login_ip`/`last_login_at`, `sessions.ip` og tabellen `login_attempts`
 (ok/fejl, 30 dage) - vist under fanen **Brugere** sammen med de seneste forsoeg. IP'en hentes fra
@@ -6425,6 +6427,7 @@ cat << 'EOF_UPDATE' > scripts/update.sh
 #!/bin/bash
 # Opdaterer Command Center fra GitHub: tjek -> filer (med DB-backup) -> requirements -> genstart.
 # Koerer appens opdateringsfunktioner direkte i venv'en, saa der kraves hverken token eller login.
+# Viser foerst hvilken version der koerer, og hvor man logger ind (CC_PUBLIC_URL via nginx).
 #
 #   bash scripts/update.sh              # opdater + genstart, vent til /health svarer
 #   bash scripts/update.sh --no-restart # opdater, men genstart selv bagefter
@@ -6440,7 +6443,7 @@ MODE="apply"
 case "${1:-}" in
     --no-restart) MODE="apply-no-restart" ;;
     --check) MODE="check" ;;
-    -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//' | sed '/^set -u$/d'; exit 0 ;;
     "") ;;
     *) echo "Ukendt argument: $1 (brug --check, --no-restart eller -h)" >&2; exit 64 ;;
 esac
@@ -6458,6 +6461,37 @@ case "$HOST" in
     *) PROBE="$HOST" ;;
 esac
 BASE="http://$PROBE:$PORT"
+
+# ---------- Version og login-adresse ----------
+# APP_VERSION i app/main.py er FILERNE; /health svarer med den proces der faktisk koerer. Er de to
+# forskellige, er appen ikke genstartet efter en opdatering - og det er praecis den forskel scriptet
+# her skal goere synlig, saa man ikke tror man koerer den nye version naar man ikke goer.
+login_url() { local b="${CC_PUBLIC_URL:-$BASE}"; echo "${b%/}/login"; }
+file_version() { sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' app/main.py 2>/dev/null | head -1; }
+running_version() {
+    local h
+    h="$(curl -sf --max-time 3 "$BASE/health" 2>/dev/null || true)"
+    [ -n "$h" ] || return 0
+    printf '%s' "$h" | "$PY" -c 'import json,sys;print(json.load(sys.stdin).get("version",""))' 2>/dev/null || true
+}
+show_versions() {
+    local run file
+    run="$(running_version)"
+    file="$(file_version)"
+    echo "Command Center"
+    if [ -n "$run" ]; then echo "   kører nu:    v$run"; else echo "   kører nu:    ukendt - appen svarer ikke på $BASE/health"; fi
+    if [ -n "$file" ]; then echo "   filer:       v$file"; else echo "   filer:       ukendt"; fi
+    if [ -n "$run" ] && [ -n "$file" ] && [ "$run" != "$file" ]; then
+        echo "   forskel:     filerne er nyere end processen - genstart mangler (bash scripts/restart.sh)"
+    fi
+    if [ -n "${CC_PUBLIC_URL:-}" ]; then
+        echo "   login:       $(login_url)   (via nginx)"
+    else
+        echo "   login:       $(login_url)   (lokal adresse - sæt CC_PUBLIC_URL i .env for den offentlige)"
+    fi
+    echo
+}
+show_versions
 
 # Et felt ud af JSON paa stdin ("None" -> tom)
 field() { "$PY" -c 'import json,sys;d=json.load(sys.stdin);v=d.get(sys.argv[1]);print("" if v is None else v)' "$1"; }
@@ -6498,7 +6532,7 @@ if [ "$(printf '%s' "$RESULT" | field ok)" != "True" ]; then
 fi
 
 if [ "$MODE" = "apply-no-restart" ]; then
-    echo "✅ Filer opdateret. Genstart selv: bash scripts/restart.sh"
+    echo "✅ Filer opdateret til v$(file_version) (processen kører stadig den gamle). Genstart selv: bash scripts/restart.sh"
     exit 0
 fi
 
@@ -6509,16 +6543,13 @@ for _ in $(seq 1 60); do
     sleep 1
     if curl -sf -o /dev/null --max-time 3 "$BASE/health"; then
         echo "✅ Opdateret og genstartet - $BASE svarer igen."
+        echo "   kører nu:    v$(running_version)"
+        echo "   login:       $(login_url)"
         exit 0
     fi
 done
 echo "⚠️  Appen svarede ikke inden 60 s. Se logs: journalctl --user -u command-center (eller nohup.out)" >&2
 exit 6
-
-# CC_BANNER: version + nyheder efter en gennemfoert opdatering
-V="$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' app/main.py 2>/dev/null | head -1)"
-N="$(sed -n 's/^NEWEST_LINE = "\(.*\)"/\1/p' app/main.py 2>/dev/null | head -1)"
-echo "   Version:     v${V:-?} - ${N:-se app/data/startup.log}"
 EOF_UPDATE
 cat << 'EOF_SMOKE' > "$PROJECT_DIR/scripts/smoke_test.sh"
 #!/bin/bash

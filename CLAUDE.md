@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 3. november 2026 · **Version:** 7.17.2 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 4. november 2026 · **Version:** 7.17.2 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -25,6 +25,17 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Drift: version, login-adresse og brugere fra terminalen (4. november)
+- `scripts/update.sh` viser nu øverst **hvilken version der kører** (fra `/health`, altså processen) ved
+  siden af versionen i filerne, advarer hvis de er forskellige ("genstart mangler"), og skriver
+  **login-adressen** (`CC_PUBLIC_URL` + `/login`, dvs. den adresse nginx videresender). Fejlen var, at
+  version-blokken nederst i scriptet lå **efter** alle `exit`-kald og derfor aldrig kørte; den er nu en
+  funktion (`show_versions`), der kaldes før tjekket og igen efter en genstart.
+- `scripts/user_create.py` (nyt): opretter en bruger direkte i DB'en med e-mail, `--username`,
+  `--password` (ellers skjult prompt to gange) og `--must-change`. Bruger `create_user()`, så reglen om
+  min. 8 tegn og PBKDF2-hashing er den samme som i UI'et. Ikke en del af `install.sh` (som `invite.py`
+  og `api_key.py`); filen kommer med ved første self-update.
 
 ### Adgang og brugere (v7.15)
 - Token-login (`APP_TOKEN`) er fjernet. Første besøg opretter bruger via `/setup` med **e-mail**;
@@ -140,7 +151,11 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
   `scripts/restart.sh` (systemd-unit → pidfile + `run.sh`). Slås fra med `UPDATE_AUTO_RESTART=0`;
   `UPDATE_RESTART_CMD` overstyrer kommandoen.
 - `scripts/update.sh` kører tjek → filer → requirements → genstart og venter på `/health`.
-  Den kalder funktionerne direkte i venv'en, så der kræves hverken token eller login.
+  Den kalder funktionerne direkte i venv'en, så der kræves hverken token eller login. Øverst viser den
+  kørende version (fra `/health`) + filernes version + login-adressen, så man ikke fejrer en opdatering
+  der aldrig blev genstartet.
+- `scripts/user_create.py <email> [--username x] [--password y] [--must-change]` opretter en bruger
+  uden invitation/SMTP; koden skal være min. 8 tegn.
 - Den gamle "hent `install.sh` og kør `bash`"-vej er fjernet.
 
 ### UI-audit og fremdrift

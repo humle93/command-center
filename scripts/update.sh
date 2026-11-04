@@ -1,6 +1,7 @@
 #!/bin/bash
 # Opdaterer Command Center fra GitHub: tjek -> filer (med DB-backup) -> requirements -> genstart.
 # Koerer appens opdateringsfunktioner direkte i venv'en, saa der kraves hverken token eller login.
+# Viser foerst hvilken version der koerer, og hvor man logger ind (CC_PUBLIC_URL via nginx).
 #
 #   bash scripts/update.sh              # opdater + genstart, vent til /health svarer
 #   bash scripts/update.sh --no-restart # opdater, men genstart selv bagefter
@@ -16,7 +17,7 @@ MODE="apply"
 case "${1:-}" in
     --no-restart) MODE="apply-no-restart" ;;
     --check) MODE="check" ;;
-    -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//' | sed '/^set -u$/d'; exit 0 ;;
     "") ;;
     *) echo "Ukendt argument: $1 (brug --check, --no-restart eller -h)" >&2; exit 64 ;;
 esac
@@ -34,6 +35,37 @@ case "$HOST" in
     *) PROBE="$HOST" ;;
 esac
 BASE="http://$PROBE:$PORT"
+
+# ---------- Version og login-adresse ----------
+# APP_VERSION i app/main.py er FILERNE; /health svarer med den proces der faktisk koerer. Er de to
+# forskellige, er appen ikke genstartet efter en opdatering - og det er praecis den forskel scriptet
+# her skal goere synlig, saa man ikke tror man koerer den nye version naar man ikke goer.
+login_url() { local b="${CC_PUBLIC_URL:-$BASE}"; echo "${b%/}/login"; }
+file_version() { sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' app/main.py 2>/dev/null | head -1; }
+running_version() {
+    local h
+    h="$(curl -sf --max-time 3 "$BASE/health" 2>/dev/null || true)"
+    [ -n "$h" ] || return 0
+    printf '%s' "$h" | "$PY" -c 'import json,sys;print(json.load(sys.stdin).get("version",""))' 2>/dev/null || true
+}
+show_versions() {
+    local run file
+    run="$(running_version)"
+    file="$(file_version)"
+    echo "Command Center"
+    if [ -n "$run" ]; then echo "   kører nu:    v$run"; else echo "   kører nu:    ukendt - appen svarer ikke på $BASE/health"; fi
+    if [ -n "$file" ]; then echo "   filer:       v$file"; else echo "   filer:       ukendt"; fi
+    if [ -n "$run" ] && [ -n "$file" ] && [ "$run" != "$file" ]; then
+        echo "   forskel:     filerne er nyere end processen - genstart mangler (bash scripts/restart.sh)"
+    fi
+    if [ -n "${CC_PUBLIC_URL:-}" ]; then
+        echo "   login:       $(login_url)   (via nginx)"
+    else
+        echo "   login:       $(login_url)   (lokal adresse - sæt CC_PUBLIC_URL i .env for den offentlige)"
+    fi
+    echo
+}
+show_versions
 
 # Et felt ud af JSON paa stdin ("None" -> tom)
 field() { "$PY" -c 'import json,sys;d=json.load(sys.stdin);v=d.get(sys.argv[1]);print("" if v is None else v)' "$1"; }
@@ -74,7 +106,7 @@ if [ "$(printf '%s' "$RESULT" | field ok)" != "True" ]; then
 fi
 
 if [ "$MODE" = "apply-no-restart" ]; then
-    echo "✅ Filer opdateret. Genstart selv: bash scripts/restart.sh"
+    echo "✅ Filer opdateret til v$(file_version) (processen kører stadig den gamle). Genstart selv: bash scripts/restart.sh"
     exit 0
 fi
 
@@ -85,13 +117,10 @@ for _ in $(seq 1 60); do
     sleep 1
     if curl -sf -o /dev/null --max-time 3 "$BASE/health"; then
         echo "✅ Opdateret og genstartet - $BASE svarer igen."
+        echo "   kører nu:    v$(running_version)"
+        echo "   login:       $(login_url)"
         exit 0
     fi
 done
 echo "⚠️  Appen svarede ikke inden 60 s. Se logs: journalctl --user -u command-center (eller nohup.out)" >&2
 exit 6
-
-# CC_BANNER: version + nyheder efter en gennemfoert opdatering
-V="$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' app/main.py 2>/dev/null | head -1)"
-N="$(sed -n 's/^NEWEST_LINE = "\(.*\)"/\1/p' app/main.py 2>/dev/null | head -1)"
-echo "   Version:     v${V:-?} - ${N:-se app/data/startup.log}"

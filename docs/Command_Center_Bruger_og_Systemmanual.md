@@ -31,6 +31,22 @@ python3 scripts/invite.py cpaleadsis@gmail.com --print              # ingen SMTP
 Scriptet skriver, hvad der blev sendt, og stopper med en fejl (intet oprettes), hvis mailen ikke kan sendes.
 Med `--print` kræves ingen SMTP: brugeren oprettes med en midlertidig kode, og den færdige mail
 (emne + tekst med koden) skrives til skærmen, så den kan sendes fra en anden mailkonto.
+
+### Opret en bruger uden mail
+
+Skal der ikke sendes en invitation — fx din egen konto — kan brugeren oprettes direkte i databasen med
+samme tabel og samme PBKDF2-hash som fanen Brugere:
+
+```bash
+python3 scripts/user_create.py cpaleadsis@gmail.com --username humle91   # koden spørges der om
+python3 scripts/user_create.py navn@domaene.dk --password 'en-lang-kode' # til scripts/automation
+python3 scripts/user_create.py navn@domaene.dk --must-change            # skal skifte ved login
+```
+
+Koden skrives skjult (to gange, så en tastefejl ikke låser kontoen) og skal være **mindst 8 tegn** —
+samme regel som i UI'et. Brugeren kan logge ind med e-mailen **eller** brugernavnet. Koden gemmes kun
+som hash med salt pr. bruger, så scriptet skriver den ikke ud igen; glemmer du den, sætter du en ny
+under fanen **Brugere**. Adressen i svaret kommer fra `CC_PUBLIC_URL` i `.env`.
 - **Skift min adgangskode** — kræver den nuværende; dine andre sessioner logges ud
 
 Efter 5 fejlede logins fra samme IP er login låst i 10 minutter.
@@ -185,7 +201,7 @@ Cockpit-panelet viser **installeret commit** og **seneste commit på `main`**:
 - **Opdater** (`POST /update/apply`) — tager en `pre-update`-backup af databasen, henter commit-tarballen fra GitHub og skriver **kun** projektets filer (`app/`, `scripts/`, `deploy/`, `requirements.txt`, `run.sh`, `run.bat`, `install.sh`, `Dockerfile`, `docker-compose.yml`, `.env.example`). `.env`, databasen, `app/backups/` og `..`-stier røres ikke
 - **Requirements og genstart klarer den selv**: er `requirements.txt` ændret, køres `pip install -r` i venv'en (5 min timeout, resultatet vises i panelet), og appen genstarter ~1,5 s efter svaret — via systemd-unit hvis den findes, ellers `scripts/restart.sh` (pidfile `app/data/cc.pid` + `run.sh`). Genindlæs siden om et øjeblik
 - **Fravalg**: fjern fluebenet “genstart” i panelet, sæt `UPDATE_AUTO_RESTART=0`, eller brug `UPDATE_RESTART_CMD` til din egen supervisor-kommando
-- **Fra terminalen**: `bash scripts/update.sh` (tjek + filer + requirements + genstart, venter til `/health` svarer), `--check` kun tjek, `--no-restart` uden genstart. `bash scripts/restart.sh` genstarter uden at opdatere
+- **Fra terminalen**: `bash scripts/update.sh` (tjek + filer + requirements + genstart, venter til `/health` svarer), `--check` kun tjek, `--no-restart` uden genstart. Øverst i svaret står tre linjer: hvilken version der **kører nu** (fra `/health`), hvilken version **filerne** indeholder, og **login-adressen** fra `CC_PUBLIC_URL` (dvs. den adresse nginx sender videre til). Er de to versioner forskellige, advarer scriptet om at genstarten mangler — det er den fejl, hvor man tror man kører den nye version. `bash scripts/restart.sh` genstarter uden at opdatere
 - Status som JSON: `GET /api/update` (inkl. `restart_mode`/`auto_restart`), `POST /api/update/check`, `POST /api/update/apply` (bruges af scriptet). `/self-update` er alias for `/update/apply`
 
 ## nginx / Ultra.cc
@@ -284,7 +300,7 @@ Rigtige miljøvariabler vinder over `.env`. `.env` læses før appens konfigurat
 | "GITHUB_TOKEN mangler" i opdaterings-panelet | Sæt token i `.env` (privat repo) og genstart appen |
 | 504 fra nginx ved crawl/AI-kald | `proxy_read_timeout 300s` i nginx-blokken |
 | Login låst | 5 fejl = 10 min pr. IP; vent eller genstart appen |
-| Kan ikke invitere en bruger | Gyldig e-mail + `SMTP_HOST`/`SMTP_FROM` i `.env`; fejlen står nu direkte i formularen (og under Alarmer). Uden SMTP: `python3 scripts/invite.py adresse --print` og send mailen selv. Adgangskode ved direkte oprettelse: min. 8 tegn |
+| Kan ikke invitere en bruger | Gyldig e-mail + `SMTP_HOST`/`SMTP_FROM` i `.env`; fejlen står nu direkte i formularen (og under Alarmer). Uden SMTP: `python3 scripts/invite.py adresse --print` og send mailen selv. Adgangskode ved direkte oprettelse: min. 8 tegn. Uden SMTP og uden invitation: `python3 scripts/user_create.py adresse --username navn` |
 | Ingen adgang til `/api/*` | Log ind igen - API'et kræver en aktiv session (cookie), ikke en token |
 | Appen starter ikke efter opdatering | `pip install -r requirements.txt` (gør `./run.sh`), og se `journalctl --user -u command-center` |
 
@@ -324,7 +340,9 @@ Webhooken kan verificeres med `webhook-signature`-headeren, hvis modtageren kend
 
 Ved opstart printer appen version og de nyeste ændringer. Samme tekst havner i `app/data/startup.log`,
 og `run.sh`, `run.bat`, `scripts/restart.sh`, `scripts/update.sh` og `install.sh` viser versionen, så
-du altid kan se hvad der kører.
+du altid kan se hvad der kører. `scripts/update.sh` viser både versionen på disken og den kørende
+proces' svar fra `/health`, advarer når de ikke følges ad, og skriver login-adressen med, så du ikke
+skal grave `CC_PUBLIC_URL` op i `.env` for at finde ind.
 
 Login registrerer IP'en bag hvert forsøg: under fanen **Brugere** ser du seneste login pr. bruger
 (IP + tid) og de sidste otte forsøg, inkl. fejlede. Bag nginx kræver det, at `CC_FORWARDED_ALLOW_IPS`

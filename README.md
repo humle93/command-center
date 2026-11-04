@@ -78,10 +78,12 @@ curl -s https://<din-adresse>/mcp -H "Authorization: Bearer cc_..." \
 
 ## Ultra.cc / nginx (reverse proxy)
 
-1. `.env`: udfyld nøgler, sæt `CC_PUBLIC_URL=https://<din-adresse>`, lad `CC_HOST=127.0.0.1` og `CC_FORWARDED_ALLOW_IPS=127.0.0.1`
+1. `.env`: `cp .env.example .env` og udfyld nøglerne. Sæt `CC_PUBLIC_URL` til **præcis** den adresse du åbner i browseren — med `https://`, uden anførselstegn og uden sti (`CC_PUBLIC_URL=https://humle91.ultra.cc`). Lad `CC_HOST=127.0.0.1` og `CC_FORWARDED_ALLOW_IPS=127.0.0.1` stå. `install.sh` skriver kun `.env.example`, og opdateringer rører aldrig `.env` — så linjen forbliver tom, indtil du selv udfylder den
 2. Start appen: `./run.sh`, eller `deploy/command-center.user.service` med `systemctl --user enable --now command-center`
 3. Læg `deploy/nginx-command-center.conf` ind i den `server { }` du bruger (Ultra.cc: `~/.apps/nginx/proxy.d/`), og genindlæs nginx
 4. Åbn `CC_PUBLIC_URL` — første besøg opretter din bruger
+
+`CC_PUBLIC_URL` styrer login-linket i `scripts/update.sh` og `scripts/user_create.py`, adressen i invitationsmailen og Host-tjekket på `/mcp`. Tjek med `bash scripts/update.sh --check`: står der `127.0.0.1` som login-adresse, er linjen tom eller skrevet forkert. Er `/mcp` utilgængelig med `421`, er det samme linje — værten skal matche ord for ord, og et sæt anførselstegn omkring værdien er nok til at ødelægge den.
 
 Det skal med i proxy-blokken:
 

@@ -18,16 +18,23 @@ EOF_REQ
 
 echo "📄 .env.example..."
 cat << 'EOF_ENVDOT' > "$PROJECT_DIR/.env.example"
-# Command Center v7.15 - kopier til .env og udfyld
+# Command Center - kopier til .env og udfyld (hele listen staar i README og i manualen)
 # Login: der er ingen token. Foerste besoeg i browseren opretter din bruger (/setup) med e-mail,
 # derefter logger du ind med e-mail + adgangskode. Nye brugere inviteres paa mail under fanen
 # "Brugere" og kraever SMTP_HOST + SMTP_FROM nedenfor.
 # Hvor run.sh lytter. 127.0.0.1 = kun denne maskine; 0.0.0.0 = ogsaa fra netvaerket (kraever TLS/proxy).
 CC_HOST=127.0.0.1
 CC_PORT=8000
-# Adressen du aabner i browseren bag nginx (bruges kun til at printe den rigtige adresse).
-# Ultra.cc: fx https://<bruger>.<server>.ultra.cc - tom = ingen nginx. Bruges ogsaa som adresse
-# i invitationsmailen.
+# Den adresse DU aabner i browseren - den offentlige adresse bag nginx, ikke 127.0.0.1.
+# Styrer tre ting: login-linket i scripts/update.sh og scripts/user_create.py, adressen i
+# invitationsmailen, og Host-tjekket paa /mcp (MCP-noegler afvises med 421, hvis vaerten ikke
+# matcher noejagtigt).
+# Format: med https://, kun vaerten, uden anfoerselstegn og uden kommentar paa samme linje:
+#     CC_PUBLIC_URL=https://humle91.ultra.cc
+# Ultra.cc: brug praecis den adresse du selv skriver i browseren (den staar typisk i panelet
+# under fanen Network/Domains). Sti som /apps/cc virker ikke - brug subdomaene eller egen port.
+# Tom betyder "kun lokal": login-linket bliver http://127.0.0.1:8000/login, og Host-tjekket paa
+# /mcp slaaes HELT fra - det er kun OK paa en maskine, ingen andre kan naa.
 CC_PUBLIC_URL=
 # Stoler paa X-Forwarded-* fra disse IP'er (nginx paa samme maskine = 127.0.0.1).
 CC_FORWARDED_ALLOW_IPS=127.0.0.1
@@ -6216,10 +6223,12 @@ curl -s https://<din-adresse>/mcp -H "Authorization: Bearer cc_..." \
 
 ## Ultra.cc / nginx (reverse proxy)
 
-1. `.env`: udfyld nøgler, sæt `CC_PUBLIC_URL=https://<din-adresse>`, lad `CC_HOST=127.0.0.1` og `CC_FORWARDED_ALLOW_IPS=127.0.0.1`
+1. `.env`: `cp .env.example .env` og udfyld nøglerne. Sæt `CC_PUBLIC_URL` til **præcis** den adresse du åbner i browseren — med `https://`, uden anførselstegn og uden sti (`CC_PUBLIC_URL=https://humle91.ultra.cc`). Lad `CC_HOST=127.0.0.1` og `CC_FORWARDED_ALLOW_IPS=127.0.0.1` stå. `install.sh` skriver kun `.env.example`, og opdateringer rører aldrig `.env` — så linjen forbliver tom, indtil du selv udfylder den
 2. Start appen: `./run.sh`, eller `deploy/command-center.user.service` med `systemctl --user enable --now command-center`
 3. Læg `deploy/nginx-command-center.conf` ind i den `server { }` du bruger (Ultra.cc: `~/.apps/nginx/proxy.d/`), og genindlæs nginx
 4. Åbn `CC_PUBLIC_URL` — første besøg opretter din bruger
+
+`CC_PUBLIC_URL` styrer login-linket i `scripts/update.sh` og `scripts/user_create.py`, adressen i invitationsmailen og Host-tjekket på `/mcp`. Tjek med `bash scripts/update.sh --check`: står der `127.0.0.1` som login-adresse, er linjen tom eller skrevet forkert. Er `/mcp` utilgængelig med `421`, er det samme linje — værten skal matche ord for ord, og et sæt anførselstegn omkring værdien er nok til at ødelægge den.
 
 Det skal med i proxy-blokken:
 

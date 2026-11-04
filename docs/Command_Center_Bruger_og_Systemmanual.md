@@ -213,6 +213,22 @@ Appen skal blive på `127.0.0.1`; nginx står for TLS:
 3. `deploy/nginx-command-center.conf` ind i den `server { }` du bruger, derefter genindlæs nginx
 4. Åbn `CC_PUBLIC_URL` — første besøg opretter din bruger
 
+### Hvorfor `CC_PUBLIC_URL` ofte er tom — og hvad den skal indeholde
+
+`install.sh` skriver kun `.env.example`; den kopierer aldrig til `.env` og spørger ikke om adressen. Opdateringer rører bevidst aldrig `.env`. Kopierer man skabelonen, står der derfor `CC_PUBLIC_URL=` fra dag ét, og den bliver tom, indtil man selv retter linjen. Det ses på tre måder: login-linket i `scripts/update.sh` og `scripts/user_create.py` viser `127.0.0.1`, invitationsmailen får en lokal adresse — og `/mcp` afviser med `421` (eller, når feltet er helt tomt, slår Host-tjekket slet ikke til).
+
+Rigtig form: `CC_PUBLIC_URL=https://humle91.ultra.cc` — med scheme, kun værten, **uden** anførselstegn og uden kommentar på samme linje. På Ultra.cc er det præcis den adresse, der står i panelet, og som du selv skriver i browseren; en sti som `/apps/cc` virker ikke.
+
+| Skrevet som | Resultat |
+|---|---|
+| `CC_PUBLIC_URL=` (tom) | login-link = `http://127.0.0.1:8000/login`; Host-tjekket på `/mcp` slås fra |
+| `CC_PUBLIC_URL="https://x.ultra.cc"` | `urlparse` finder ingen vært → `/mcp` svarer `421` på alle ikke-lokale værter |
+| `CC_PUBLIC_URL=x.ultra.cc` (uden scheme) | samme `421`, og login-linket bliver uden `https://` |
+| `CC_PUBLIC_URL=https://x.ultra.cc/` | virker; login-linket får ikke dobbelt `/` |
+| `CC_PUBLIC_URL=https://x.ultra.cc/app` | virker for `/mcp`, men login-linket peger på `/app/login` |
+
+Tjek altid med `bash scripts/update.sh --check`: står der `127.0.0.1` som login-adresse, er linjen tom eller forkert skrevet.
+
 Proxy-blokken skal sende `X-Forwarded-Proto` (ellers bliver cookien ikke `Secure`, og der vises en HTTPS-advarsel), `X-Forwarded-For` (så login-låsen rammer klienten) og have `proxy_read_timeout 300s` (crawl/AI-kald tager minutter). Understi (`/apps/cc/`) virker ikke — brug subdomæne eller egen port.
 
 

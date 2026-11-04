@@ -26,6 +26,20 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
 
 ## Ændringer i denne arbejdsperiode
 
+### `CC_PUBLIC_URL`: hvorfor den kan være tom (4. november)
+- **Årsag 1 (den hyppige):** `install.sh` skriver kun `.env.example` — den kopierer aldrig til
+  `.env` og spørger ikke om adressen — og self-update rører bevidst aldrig `.env`. En kopieret
+  skabelon har derfor `CC_PUBLIC_URL=` fra dag ét, uden at noget siger til.
+- **Årsag 2-4 (udfyldt, men virkningsløs), målt med `urlparse`:** `"https://x"` og `x` (uden scheme)
+  giver begge `hostname = None` → `/mcp` svarer `421` på alle ikke-lokale værter; en sti
+  (`https://x/app`) virker for `/mcp`, men login-linket bliver `…/app/login`.
+- **Tom betyder ikke usynlig:** `_mcp_host_allowed()` returnerer `True`, når `CC_PUBLIC_URL` er tom,
+  så Host-tjekket (DNS-rebinding) på `/mcp` slås helt fra. Det var ikke dokumenteret som en
+  konsekvens, kun som "lokal udvikling virker".
+- Retttet i dokumentationen: `.env.example` (format + hvad tom betyder), `README.md`,
+  `docs/Command_Center_Bruger_og_Systemmanual.md` (nyt afsnit + tabel pr. skrivefejl) og
+  `docs/Command_Center_MCP.md` (hvad man gør ved `421`). Ingen kodeændring — adfærden er den samme.
+
 ### Scripts-mappen ryddet op (4. november)
 - Alle otte filer i `scripts/` har nu samme header: `navn - formål`, `Brug:`, `Kraever:` og
   `Sidst aendret: 4. november 2026`. Fire bash-scripts skiftede `#!/bin/bash` til

@@ -99,7 +99,7 @@ Panelet i Cockpit sammenligner installeret commit med seneste commit på `main`:
 - **Tjek for nye commits** (`POST /update/check`) — viser SHA, dato og commit-besked, eller den præcise fejl (manglende token, 401/403, 404). Kører også automatisk kl. 05:00.
 - **Opdater** (`POST /update/apply`) — tager en `pre-update`-backup af databasen, henter commit-tarballen og skriver **kun** projektets filer (`app/`, `scripts/`, `deploy/`, requirements, start-scripts, `install.sh`, Dockerfile, compose, `.env.example`). `.env`, databasen og `..`-stier røres ikke.
 - **Alt i ét hug**: er `requirements.txt` ændret, køres `pip install -r` automatisk, og appen **genstarter sig selv** ~1,5 s efter svaret (systemd-unit, ellers `scripts/restart.sh` med pidfile + `run.sh`). Fjern fluebenet "genstart" i panelet, eller sæt `UPDATE_AUTO_RESTART=0`, for at genstarte manuelt. `UPDATE_RESTART_CMD` overstyrer kommandoen (fx din egen supervisor).
-- **Fra terminalen**: `bash scripts/update.sh` gør hele kæden (tjek → filer → requirements → genstart) og venter til `/health` svarer igen; `--check` tjekker kun, `--no-restart` springer genstarten over. Øverst viser scriptet hvilken version der **faktisk kører** (fra `/health`) ved siden af versionen på disken — er de forskellige, er appen ikke genstartet — og login-adressen fra `CC_PUBLIC_URL`. `bash scripts/restart.sh` genstarter uden at opdatere.
+- **Fra terminalen**: `bash scripts/update.sh` gør hele kæden (tjek → filer → requirements → genstart) og venter til `/health` svarer igen; `--check` tjekker kun, `--no-restart` springer genstarten over. Øverst viser scriptet **tre** versioner ved siden af hinanden: den der **kører nu** (fra `/health`), den **filerne** indeholder (`app/main.py`), og den **installatøren** vil skrive (`install.sh`s indlejrede `app/main.py`) — plus login-adressen fra `CC_PUBLIC_URL`. `bash scripts/update.sh --version` er den samme kontrol som rent svar: kode 0 kun når alle tre stemmer, ellers kode 1 med en linje om hvad der er galt. `bash scripts/restart.sh` genstarter uden at opdatere.
 - Status som JSON: `GET /api/update` (inkl. `restart_mode` og `auto_restart`). Kræver `GITHUB_TOKEN` (privat repo). `/self-update` findes stadig som alias for `/update/apply`.
 
 ## Steamgears Autopilot-bro (WordPress-plugin 7.5+)
@@ -151,9 +151,12 @@ testalarmer og GitHub-opdatering.
 Ved hver opstart skriver appen version og de nyeste aendringer til skaermen, til
 `app/data/startup.log` og til `settings.last_start` - og de samme nyheder er med i `GET /health`.
 `run.sh`, `run.bat`, `scripts/restart.sh`, `scripts/update.sh` og `install.sh` viser version + nyheder,
-saa man ikke skal huske hvilken version der kører. `scripts/update.sh` går et skridt videre: den viser
-versionen på disken **og** den version processen svarer med i `/health`, advarer hvis de er forskellige,
-og skriver login-adressen (`CC_PUBLIC_URL` + `/login`, dvs. den adresse nginx videresender).
+saa man ikke skal huske hvilken version der kører. `scripts/update.sh` går to skridt videre: den viser
+versionen på disken, den version processen svarer med i `/health` **og** den version `install.sh` vil
+skrive, advarer hvis de er forskellige, og skriver login-adressen (`CC_PUBLIC_URL` + `/login`, dvs. den
+adresse nginx videresender). `bash scripts/update.sh --version` giver samme kontrol som rent svar:
+kode 0 kun når alle tre stemmer, ellers kode 1 med en linje om hvad der er galt — så en gammel
+`install.sh`, der ville overskrive koden med en ældre version, bliver opdaget før man kører den.
 
 Login logger nu IP: `users.last_login_ip`/`last_login_at`, `sessions.ip` og tabellen `login_attempts`
 (ok/fejl, 30 dage) - vist under fanen **Brugere** sammen med de seneste forsoeg. IP'en hentes fra

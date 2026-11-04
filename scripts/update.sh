@@ -6,10 +6,13 @@
 #   bash scripts/update.sh              # opdater + genstart, vent til /health svarer
 #   bash scripts/update.sh --no-restart # opdater, men genstart selv bagefter
 #   bash scripts/update.sh --check      # kun tjek, skriv intet
+#   bash scripts/update.sh --version    # sammenlign de tre versioner og stop med kode 1 ved uenighed
 #
-# Viser foerst hvilken version der koerer (/health) ved siden af filernes, og hvor man logger ind
-# (CC_PUBLIC_URL via nginx). Koerer appens funktioner direkte i venv'en - ingen token eller login.
-# Kraever: venv (./venv) og GITHUB_TOKEN i .env til tjekket.
+# Viser foerst hvilken version der koerer (/health) ved siden af filernes og installatoerens, og hvor
+# man logger ind (CC_PUBLIC_URL via nginx). --version er den strenge kontrol: den stopper med kode 1,
+# hvis en gammel install.sh eller en manglende genstart kan snige sig ind.
+# Koerer appens funktioner direkte i venv'en - ingen token eller login.
+# Kraever: venv (./venv) og GITHUB_TOKEN i .env til opdateringen; --version kraever ingen af dem.
 # Sidst aendret: 4. november 2026
 set -u
 cd "$(dirname "$0")/.."
@@ -25,16 +28,11 @@ MODE="apply"
 case "${1:-}" in
     --no-restart) MODE="apply-no-restart" ;;
     --check) MODE="check" ;;
+    --version) MODE="version" ;;
     -h|--help) usage; exit 0 ;;
     "") ;;
-    *) echo "Ukendt argument: $1 (brug --check, --no-restart eller -h)" >&2; exit 64 ;;
+    *) echo "Ukendt argument: $1 (brug --version, --check, --no-restart eller -h)" >&2; exit 64 ;;
 esac
-
-PY="./venv/bin/python"
-if [ ! -x "$PY" ]; then
-    echo "❌ venv mangler ($PY) - start appen en gang med ./run.sh foerst." >&2
-    exit 2
-fi
 
 HOST="${CC_HOST:-127.0.0.1}"
 PORT="${CC_PORT:-8000}"
@@ -44,28 +42,72 @@ case "$HOST" in
 esac
 BASE="http://$PROBE:$PORT"
 
-# ---------- Version og login-adresse ----------
-# APP_VERSION i app/main.py er FILERNE; /health svarer med den proces der faktisk koerer. Er de to
-# forskellige, er appen ikke genstartet efter en opdatering - og det er praecis den forskel scriptet
-# her skal goere synlig, saa man ikke tror man koerer den nye version naar man ikke goer.
+# ---------- Version: filer, proces og installatoer ----------
+# Tre kilder kan vaere uenige, og alle tre kan snige sig ind: app/main.py (det der ligger paa disken),
+# /health (den proces der svarer lige nu) og install.sh (installatoeren nogen maaske koerer bagefter og
+# overskriver det hele med). --version tjekker alle tre og stopper med kode 1 ved uenighed.
+RUN=""; FILE=""; INST=""
 login_url() { local b="${CC_PUBLIC_URL:-$BASE}"; echo "${b%/}/login"; }
 file_version() { sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' app/main.py 2>/dev/null | head -1; }
+# Versionen af den proces der svarer - laeses ud af JSON uden python, saa --version ogsaa virker uden venv.
 running_version() {
-    local h
-    h="$(curl -sf --max-time 3 "$BASE/health" 2>/dev/null || true)"
-    [ -n "$h" ] || return 0
-    printf '%s' "$h" | "$PY" -c 'import json,sys;print(json.load(sys.stdin).get("version",""))' 2>/dev/null || true
+    curl -sf --max-time 3 "$BASE/health" 2>/dev/null \
+        | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+}
+# Versionen installatoeren vil skrive: APP_VERSION i install.sh's indlejrede app/main.py. Linjen staar
+# i spalte 0 i den indlejrede fil, saa den findes uden at parse heredocs (og uden at skrive
+# heredoc-markoeren her - den streng leder paritetstjekket i CI efter).
+installer_version() {
+    [ -f install.sh ] || return 0
+    sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' install.sh 2>/dev/null | head -1
+}
+read_versions() { RUN="$(running_version)"; FILE="$(file_version)"; INST="$(installer_version)"; }
+# 0 hvis $1 er nyere end $2 - sammenlignet tal for tal, saa 7.9 er aeldre end 7.17.
+ver_gt() {
+    awk -v a="$1" -v b="$2" 'BEGIN{n=split(a,x,".");m=split(b,y,".");k=(n>m?n:m)
+        for(i=1;i<=k;i++){if(x[i]+0>y[i]+0)exit 0; if(x[i]+0<y[i]+0)exit 1} exit 1}'
+}
+# Etiketterne har selv deres polstring (13 tegn): printf '%-13s' taelier bytes, ikke tegn, saa de
+# danske bogstaver skubbede kolonnen ud af flugt.
+ver_row() { if [ -n "$2" ]; then echo "   $1v$2   ($3)"; else echo "   $1ukendt   ($3)"; fi; }
+version_rows() {
+    ver_row "kører nu:    " "$RUN" "processen, fra $BASE/health"
+    ver_row "filer:       " "$FILE" "app/main.py på disken"
+    if [ -f install.sh ]; then
+        ver_row "installatør: " "$INST" "install.sh, indlejret app/main.py"
+    else
+        echo "   installatør:  ingen install.sh i denne mappe"
+    fi
+}
+# Forklarer uenigheden i klartekst; ingen linjer betyder at alt stemmer. Kode 1 = der er en forskel.
+version_diff() {
+    local bad=0
+    if [ -z "$RUN" ]; then
+        echo "   forskel:     processen svarer ikke på $BASE/health - kan ikke sammenlignes"
+        bad=1
+    elif [ -n "$FILE" ] && [ "$RUN" != "$FILE" ]; then
+        if ver_gt "$FILE" "$RUN"; then
+            echo "   forskel:     filerne er nyere end processen - genstart mangler (bash scripts/restart.sh)"
+        else
+            echo "   forskel:     processen kører nyere kode end filerne - filerne er rullet tilbage, kør opdateringen igen"
+        fi
+        bad=1
+    fi
+    if [ -n "$INST" ] && [ -n "$FILE" ] && [ "$INST" != "$FILE" ]; then
+        if ver_gt "$INST" "$FILE"; then
+            echo "   forskel:     install.sh er nyere end koden - kør den for at skrive de nye filer"
+        else
+            echo "   forskel:     install.sh er ældre (v$INST) end koden (v$FILE) - kør den IKKE; den overskriver app/main.py med den gamle version. Brug git pull eller scripts/update.sh."
+        fi
+        bad=1
+    fi
+    return $bad
 }
 show_versions() {
-    local run file
-    run="$(running_version)"
-    file="$(file_version)"
+    read_versions
     echo "Command Center"
-    if [ -n "$run" ]; then echo "   kører nu:    v$run"; else echo "   kører nu:    ukendt - appen svarer ikke på $BASE/health"; fi
-    if [ -n "$file" ]; then echo "   filer:       v$file"; else echo "   filer:       ukendt"; fi
-    if [ -n "$run" ] && [ -n "$file" ] && [ "$run" != "$file" ]; then
-        echo "   forskel:     filerne er nyere end processen - genstart mangler (bash scripts/restart.sh)"
-    fi
+    version_rows
+    version_diff || true
     if [ -n "${CC_PUBLIC_URL:-}" ]; then
         echo "   login:       $(login_url)   (via nginx)"
     else
@@ -73,6 +115,31 @@ show_versions() {
     fi
     echo
 }
+# Den strenge kontrol: kode 0 kun naar alle tre kilder svarer med samme version.
+version_check() {
+    read_versions
+    echo "Command Center - versionskontrol"
+    version_rows
+    if version_diff; then
+        [ -n "$FILE" ] || { echo "❌ Kan ikke læse APP_VERSION fra app/main.py."; exit 1; }
+        echo "✅ Alle kilder stemmer: v$FILE."
+        exit 0
+    fi
+    echo
+    echo "❌ Versionskontrol fejlede - se 'forskel' ovenfor."
+    exit 1
+}
+
+if [ "$MODE" = "version" ]; then
+    version_check
+fi
+
+PY="./venv/bin/python"
+if [ ! -x "$PY" ]; then
+    echo "❌ venv mangler ($PY) - start appen en gang med ./run.sh foerst." >&2
+    exit 2
+fi
+
 show_versions
 
 # Et felt ud af JSON paa stdin ("None" -> tom)

@@ -19,12 +19,29 @@ dashboard (Alpine.js), APScheduler-jobs og integrationer til SerpAPI, aimlapi, W
 python3 tests/test_v8_features.py    # in-process enhedstests
 bash tests/ci_check.sh              # boot + alle sider + auth + WordPress-bro + link-audit
 bash scripts/update.sh --check      # GitHub-opdatering (kraever GITHUB_TOKEN i .env)
+bash scripts/update.sh --version    # filer vs. koerende proces vs. install.sh (kode 1 ved uenighed)
 ```
 
 Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/workflows/ci.yml`)
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Versionskontrol: filer, proces og installatør (4. november)
+- **Baggrund:** på en server lå en gammel `install.sh` (v7.9) i projektmappen, mens processen kørte
+  v8.3. At køre den installatør overskrev koden på disken med den gamle version — usynligt indtil
+  næste genstart. Paritetstjekket i CI fanger en installatør der ikke matcher repoet, men intet
+  sammenlignede *versionerne* i en kørende installation.
+- **Nyt:** `bash scripts/update.sh --version` sammenligner tre kilder — `app/main.py` på disken,
+  `/health` fra den kørende proces, og `APP_VERSION` i `install.sh`s indlejrede `app/main.py` — og
+  stopper med kode 1 ved uenighed med en `forskel`-linje der siger hvad der er galt (genstart
+  mangler / installatøren er ældre / filerne er rullet tilbage). Virker uden venv, token og netværk:
+  versionen læses med `sed` ud af `/health`, ikke med python.
+- `install.sh` henter nu sit versionsnummer fra sin egen indlejrede `app/main.py` i stedet for den
+  faste tekst på linje 5, så den ikke kan påstå en anden version end den skriver.
+- `tests/ci_check.sh` kører `--version` mod CI-serveren, så tjekket selv er dækket.
+- `scripts/update.sh` viser stadig de tre versioner øverst ved en rigtig opdatering, men fejler ikke
+  der: under en opdatering *skal* processen være ældre end filerne indtil genstarten.
 
 ### `CC_PUBLIC_URL`: hvorfor den kan være tom (4. november)
 - **Årsag 1 (den hyppige):** `install.sh` skriver kun `.env.example` — den kopierer aldrig til

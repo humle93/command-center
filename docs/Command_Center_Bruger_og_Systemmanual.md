@@ -201,7 +201,7 @@ Cockpit-panelet viser **installeret commit** og **seneste commit på `main`**:
 - **Opdater** (`POST /update/apply`) — tager en `pre-update`-backup af databasen, henter commit-tarballen fra GitHub og skriver **kun** projektets filer (`app/`, `scripts/`, `deploy/`, `requirements.txt`, `run.sh`, `run.bat`, `install.sh`, `Dockerfile`, `docker-compose.yml`, `.env.example`). `.env`, databasen, `app/backups/` og `..`-stier røres ikke
 - **Requirements og genstart klarer den selv**: er `requirements.txt` ændret, køres `pip install -r` i venv'en (5 min timeout, resultatet vises i panelet), og appen genstarter ~1,5 s efter svaret — via systemd-unit hvis den findes, ellers `scripts/restart.sh` (pidfile `app/data/cc.pid` + `run.sh`). Genindlæs siden om et øjeblik
 - **Fravalg**: fjern fluebenet “genstart” i panelet, sæt `UPDATE_AUTO_RESTART=0`, eller brug `UPDATE_RESTART_CMD` til din egen supervisor-kommando
-- **Fra terminalen**: `bash scripts/update.sh` (tjek + filer + requirements + genstart, venter til `/health` svarer), `--check` kun tjek, `--no-restart` uden genstart. Øverst i svaret står tre linjer: hvilken version der **kører nu** (fra `/health`), hvilken version **filerne** indeholder, og **login-adressen** fra `CC_PUBLIC_URL` (dvs. den adresse nginx sender videre til). Er de to versioner forskellige, advarer scriptet om at genstarten mangler — det er den fejl, hvor man tror man kører den nye version. `bash scripts/restart.sh` genstarter uden at opdatere
+- **Fra terminalen**: `bash scripts/update.sh` (tjek + filer + requirements + genstart, venter til `/health` svarer), `--check` kun tjek, `--no-restart` uden genstart. Øverst i svaret står tre linjer: hvilken version der **kører nu** (fra `/health`), hvilken version **filerne** indeholder, og hvilken version **installatøren** vil skrive (`install.sh`s indlejrede `app/main.py`) — plus **login-adressen** fra `CC_PUBLIC_URL` (dvs. den adresse nginx sender videre til). Er de forskellige, skriver scriptet en `forskel`-linje: filerne nyere end processen = genstart mangler; `install.sh` ældre end koden = kør den ikke, den ruller koden tilbage. `bash scripts/update.sh --version` er den samme kontrol som rent svar — kode 0 kun når alle tre stemmer, ellers kode 1 — så den kan bruges i et cron-job eller et deploy-trin. `bash scripts/restart.sh` genstarter uden at opdatere
 - Status som JSON: `GET /api/update` (inkl. `restart_mode`/`auto_restart`), `POST /api/update/check`, `POST /api/update/apply` (bruges af scriptet). `/self-update` er alias for `/update/apply`
 
 ## nginx / Ultra.cc
@@ -356,9 +356,12 @@ Webhooken kan verificeres med `webhook-signature`-headeren, hvis modtageren kend
 
 Ved opstart printer appen version og de nyeste ændringer. Samme tekst havner i `app/data/startup.log`,
 og `run.sh`, `run.bat`, `scripts/restart.sh`, `scripts/update.sh` og `install.sh` viser versionen, så
-du altid kan se hvad der kører. `scripts/update.sh` viser både versionen på disken og den kørende
-proces' svar fra `/health`, advarer når de ikke følges ad, og skriver login-adressen med, så du ikke
-skal grave `CC_PUBLIC_URL` op i `.env` for at finde ind.
+du altid kan se hvad der kører. `scripts/update.sh` viser versionen på disken, den kørende proces'
+svar fra `/health` **og** den version `install.sh` vil skrive, advarer når de ikke følges ad, og
+skriver login-adressen med, så du ikke skal grave `CC_PUBLIC_URL` op i `.env` for at finde ind.
+`bash scripts/update.sh --version` giver svaret som kode: 0 = de tre kilder stemmer, 1 = mindst én
+afviger (med en `forskel`-linje der siger hvilken). Det er den kontrol, der fanger en gammel
+`install.sh`, inden den overskriver koden med en ældre version.
 
 Login registrerer IP'en bag hvert forsøg: under fanen **Brugere** ser du seneste login pr. bruger
 (IP + tid) og de sidste otte forsøg, inkl. fejlede. Bag nginx kræver det, at `CC_FORWARDED_ALLOW_IPS`

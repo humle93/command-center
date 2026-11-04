@@ -91,6 +91,11 @@ check "mcp3: noeglen er slettet fra DB efter visning" "$(q "SELECT COUNT(*) FROM
 check "mcp3: dismiss-ruten er væk" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -X POST $U/api-keys/dismiss)" "404"
 check "update: /api/update is available" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" $U/api/update)" "200"
 check "update: /api/update reports the repo" "$(curl -s -b "$JAR" $U/api/update | python3 -c 'import json,sys;print(bool(json.load(sys.stdin).get("repo")))')" "True"
+# Versionskontrollen: filer, koerende proces og installatoer skal sige det samme. Koeres mod
+# CI-serveren paa 8765, saa den ogsaa daekker /health-linjen - ikke kun de to filer.
+CC_PORT=8765 bash scripts/update.sh --version > "$TMP/version.log" 2>&1; VRC=$?
+check "version: filer, proces og installatoer stemmer" "$VRC" "0"
+[ "$VRC" = 0 ] || cat "$TMP/version.log"
 
 CC_PORT=8765 bash scripts/smoke_test.sh > /dev/null && echo "PASS smoke test" || { echo "FAIL smoke test"; FAIL=1; }
 for r in $(grep -oE '@app\.get\("[^"\{]+"\)' app/main.py | sed 's/@app.get("//;s/")$//' | sort -u); do

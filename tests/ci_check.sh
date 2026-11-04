@@ -96,6 +96,17 @@ check "update: /api/update reports the repo" "$(curl -s -b "$JAR" $U/api/update 
 CC_PORT=8765 bash scripts/update.sh --version > "$TMP/version.log" 2>&1; VRC=$?
 check "version: filer, proces og installatoer stemmer" "$VRC" "0"
 [ "$VRC" = 0 ] || cat "$TMP/version.log"
+# Guarden foer skrivning: en aeldre install.sh skal stoppe en rigtig opdatering, foer den roerer
+# filer - og uden venv, token eller netvaerk, saa den kan testes her. Kode 7 = naegtet.
+VT="$(mktemp -d)"; mkdir -p "$VT/scripts" "$VT/app"
+cp scripts/update.sh "$VT/scripts/"; cp app/main.py "$VT/app/"; cp install.sh "$VT/"
+awk 'BEGIN{d=0} /^APP_VERSION = /{if(!d){print "APP_VERSION = \"0.0.1\""; d=1; next}} {print}' "$VT/install.sh" > "$VT/i" && mv "$VT/i" "$VT/install.sh"
+SUM_BEFORE="$(cksum "$VT/app/main.py")"
+(cd "$VT" && bash scripts/update.sh --no-restart > "$TMP/guard.log" 2>&1); GRC=$?
+check "version: opdateringen naegter naar install.sh er aeldre" "$GRC" "7"
+[ "$GRC" = 7 ] || cat "$TMP/guard.log"
+check "version: naegtelsen skriver intet" "$(cksum "$VT/app/main.py")" "$SUM_BEFORE"
+rm -rf "$VT"
 
 CC_PORT=8765 bash scripts/smoke_test.sh > /dev/null && echo "PASS smoke test" || { echo "FAIL smoke test"; FAIL=1; }
 for r in $(grep -oE '@app\.get\("[^"\{]+"\)' app/main.py | sed 's/@app.get("//;s/")$//' | sort -u); do

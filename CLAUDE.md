@@ -40,6 +40,12 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - `install.sh` henter nu sit versionsnummer fra sin egen indlejrede `app/main.py` i stedet for den
   faste tekst på linje 5, så den ikke kan påstå en anden version end den skriver.
 - `tests/ci_check.sh` kører `--version` mod CI-serveren, så tjekket selv er dækket.
+- **Guarden i opdateringen:** `installer_guard()` kører i skrive-stierne (`apply` og `--no-restart`)
+  *før* venv-, token- og netværkstrinnet. Er `install.sh` ældre end `app/main.py`, skriver
+  opdateringen intet og stopper med **kode 7** (2 = venv, 3-6 = tjek/filer/genstart). `--check` og
+  `--version` skriver intet og går uden om guarden, så de kan bruges til at diagnosticere. Ingen
+  `--force`: vejen ud er `git checkout -- install.sh` (eller `git pull`), som beskeden siger.
+  `ci_check` tester både at opdateringen nægter (kode 7) og at den ikke rører `app/main.py`.
 - `scripts/update.sh` viser stadig de tre versioner øverst ved en rigtig opdatering, men fejler ikke
   der: under en opdatering *skal* processen være ældre end filerne indtil genstarten.
 

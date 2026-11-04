@@ -10,7 +10,8 @@
 #
 # Viser foerst hvilken version der koerer (/health) ved siden af filernes og installatoerens, og hvor
 # man logger ind (CC_PUBLIC_URL via nginx). --version er den strenge kontrol: den stopper med kode 1,
-# hvis en gammel install.sh eller en manglende genstart kan snige sig ind.
+# hvis en gammel install.sh eller en manglende genstart kan snige sig ind. Opdateringen selv skriver
+# intet, hvis install.sh paa disken er aeldre end koden (kode 7) - hent den fra git foerst.
 # Koerer appens funktioner direkte i venv'en - ingen token eller login.
 # Kraever: venv (./venv) og GITHUB_TOKEN i .env til opdateringen; --version kraever ingen af dem.
 # Sidst aendret: 4. november 2026
@@ -97,7 +98,7 @@ version_diff() {
         if ver_gt "$INST" "$FILE"; then
             echo "   forskel:     install.sh er nyere end koden - kør den for at skrive de nye filer"
         else
-            echo "   forskel:     install.sh er ældre (v$INST) end koden (v$FILE) - kør den IKKE; den overskriver app/main.py med den gamle version. Brug git pull eller scripts/update.sh."
+            echo "   forskel:     install.sh er ældre (v$INST) end koden (v$FILE) - kør den IKKE; den overskriver app/main.py med den gamle version. Hent den fra git (git checkout -- install.sh eller git pull); opdateringen nægter selv at skrive, indtil den er rettet."
         fi
         bad=1
     fi
@@ -133,6 +134,25 @@ version_check() {
 if [ "$MODE" = "version" ]; then
     version_check
 fi
+
+# ---------- Guard foer skrivning: en installatoer der ruller koden tilbage ----------
+# install.sh skriver app/main.py med den version der ligger indlejret i den selv. Er den aeldre end
+# koden paa disken, rulles koden tilbage hvis nogen koerer den. Derfor skrives der ikke filer oven paa
+# en saadan installation: stop foerst, ret installatoren, koer igen. Kode 7 = naegtet, intet er roert.
+installer_guard() {
+    local inst file
+    inst="$(installer_version)"; file="$(file_version)"
+    [ -n "$inst" ] && [ -n "$file" ] || return 0
+    ver_gt "$file" "$inst" || return 0
+    echo "❌ Stopper før der bliver skrevet filer: install.sh på disken er ældre (v$inst) end koden (v$file)."
+    echo "   Den installatør ville overskrive app/main.py med v$inst, hvis nogen kørte den nu."
+    echo "   Hent den rette version først:   git checkout -- install.sh   (eller git pull)"
+    echo "   Intet er ændret - kør scriptet igen bagefter. (--check og --version skriver intet og virker stadig.)"
+    exit 7
+}
+case "$MODE" in
+    apply|apply-no-restart) installer_guard ;;
+esac
 
 PY="./venv/bin/python"
 if [ ! -x "$PY" ]; then

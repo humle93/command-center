@@ -125,6 +125,20 @@ echo "PASS GET routes swept"
 curl -s -o /dev/null -b "$JAR" -X POST $U/autopilot/sync
 check "bridge: snapshot ok" "$(q "SELECT json_extract(value,'\$.ok') FROM settings WHERE key='sgap_snapshot'")" "1"
 check "bridge: dashboard shows panel" "$(curl -s -b "$JAR" $U/ | grep -c 'Kladder venter')" "1"
+check "bridge: reads the full /snapshot" "$(q "SELECT json_extract(value,'\$.source') FROM settings WHERE key='sgap_snapshot'")" "snapshot"
+check "bridge: plugin version from the snapshot" "$(q "SELECT json_extract(value,'\$.version') FROM settings WHERE key='sgap_snapshot'")" "7.33.0"
+check "bridge: sends X-Command-Center with its version" "$(cat "$TMP/state.header")" "$(grep -oP '^APP_VERSION = "\K[^"]+' app/main.py)"
+check "bridge: dashboard shows the plugin version and cron lag" "$(curl -s -b "$JAR" $U/ | grep -c 'Autopilot 7.33.0\|WP-Cron er 45 min bagud')" "2"
+echo failed2 > "$TMP/state"
+curl -s -o /dev/null -b "$JAR" -X POST $U/autopilot/sync
+check "bridge: a new self-check problem raises an alarm" "$(q "SELECT COUNT(*) FROM alarms WHERE message LIKE 'Autopilot-selvtjek: The autopilot is off.%'")" "1"
+curl -s -o /dev/null -b "$JAR" -X POST $U/autopilot/sync
+check "bridge: the same problem does not alarm twice" "$(q "SELECT COUNT(*) FROM alarms WHERE message LIKE 'Autopilot-selvtjek:%'")" "1"
+echo old > "$TMP/state"
+curl -s -o /dev/null -b "$JAR" -X POST $U/autopilot/sync
+check "bridge: older plugin without /snapshot falls back to /stats" "$(q "SELECT json_extract(value,'\$.source') || '/' || json_extract(value,'\$.ok') FROM settings WHERE key='sgap_snapshot'")" "stats/1"
+echo ok > "$TMP/state"
+curl -s -o /dev/null -b "$JAR" -X POST $U/autopilot/sync
 curl -s -o /dev/null -b "$JAR" -X POST $U/social/add -d platform=X -d message=Hello
 curl -s -o /dev/null -b "$JAR" -X POST $U/social/to-autopilot -d id=1
 check "bridge: social post sent as draft" "$(q "SELECT status FROM socialqueue WHERE id=1")" "sendt til autopilot (kladde #1)"

@@ -78,7 +78,8 @@ Alle queries er parameteriserede. `settings` bruges til små tilstande (JSON), s
 | Oprydning | 04:30 | — (lokale ISO-cutoffs) |
 | DB-backup | 04:40 | 14 kopier pr. tag |
 | GitHub-opdaterings-tjek | 05:00 | `GITHUB_TOKEN` |
-| Autopilot-bro (WordPress) | hvert 30. min | modul `autopilot` + WP-creds |
+| Autopilot-bro (WordPress) | hvert 30. min | modul `autopilot` + WP-creds · `sgap_sync()` henter `GET /snapshot` (reserve: `/stats` + `/drafts` ved 404), `sgap_from_snapshot()` oversætter, `sgap_store()` gemmer i `settings.sgap_snapshot` og alarmerer kun ved ændringer |
+| WP-Cron-ping | hvert 5. min | samme som Autopilot-bro · `job_wp_cron()` → `wp_cron_ping()` kalder `wp-cron.php?doing_wp_cron`; fejl er tavse (sitet nede fanges af broen og monitorerne) |
 | Alarmkø (`alert_outbox`) | hvert minut | — (leverer med dedupe, backoff og stille timer) |
 
 Modulerne (`MODULES` i `app/main.py`, 11 stk.): `domains`, `keywords`, `ai`, `monitors`, `social`,

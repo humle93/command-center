@@ -141,6 +141,8 @@ Artikel-forhåndsvisningen i dashboardet vises med saniteret HTML: kun formateri
 ### 7. Social
 
 - **Steamgears Autopilot**: kø, kladder der venter på godkendelse, og udgivet/klik/ordrer/omsætning pr. kanal (30 dage). "→ Autopilot" sender et opslag som kladde til WordPress-pluginnet
+- **Pluginnets tilstand**: under tabellen vises pluginversionen, en gul linje hvis afsendelsen er sat på pause (med pluginnets årsag) eller WP-Cron er mindst 30 min bagud, og listen fra pluginnets eget selvtjek ("✓ ingen problemer" når den er tom). Et nyt problem giver én alarm; samme problem alarmerer ikke igen hver halve time
+- **WP-Cron**: CC kalder `wp-cron.php` hvert 5. min, så sitet ikke behøver en rigtig cron-job for at pluginnet udgiver til tiden. I WordPress viser Steamgears-selvtjekket "Command Center connected", og hvis CC tier i over 2 timer, står det som et problem dér
 - **Kun én kladde pr. opslag**: rækken låses før kaldet til WordPress. Et dobbeltklik eller et genforsøg sender derfor intet ekstra, og status skifter til "sender til autopilot" mens kaldet kører. Afviser WordPress kaldet, får opslaget sin gamle status tilbage og kan sendes igen. Svarer WordPress slet ikke (timeout), bliver status "sendt? (svar udeblev)" med en alarm — tjek AI Drafts i WordPress, før du sender igen
 - **Planlagt tid**: vælg et tidspunkt i feltet under opslaget. Det viser zonen (`CC_TZ`, standard Europe/Copenhagen), og tiden gemmes både som lokal tid og UTC. "→ Autopilot" sender begge med, så tjenesten og Android-klienten ikke skal gætte. En tid der ikke findes (fx 02:30 den nat sommertiden starter) **afvises** med en alarm i stedet for at blive gættet
 - Opslagskø med CSV-export (kolonner for både lokal tid og UTC + zone)
@@ -325,7 +327,7 @@ Rigtige miljøvariabler vinder over `.env`. `.env` læses før appens konfigurat
 
 ## Drift
 
-- **Cron**: domæne-tjek hver 6. time · keywords 06:00 · autopilot 05:15 · oprydning 04:30 · DB-backup 04:40 · GitHub-tjek 05:00 · Autopilot-bro hver 30. min · alarmkøen (`alert_outbox`) leveres hvert minut
+- **Cron**: domæne-tjek hver 6. time · keywords 06:00 · autopilot 05:15 · oprydning 04:30 · DB-backup 04:40 · GitHub-tjek 05:00 · Autopilot-bro hver 30. min · WP-Cron-ping hvert 5. min · alarmkøen (`alert_outbox`) leveres hvert minut
 - **Backup**: `app/backups/cc-daglig-*.db` (14 gemmes) og `cc-pre-update-*.db` før hver opdatering
 - **Health**: `/health` returnerer 503 ved kritisk DB/disk-tilstand og viser månedens API-forbrug
 - **Tests**: `python3 tests/test_v8_features.py` og `bash tests/ci_check.sh` (boot, alle sider, auth, WordPress-bro og link-audit)

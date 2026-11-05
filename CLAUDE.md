@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 5. november 2026 · **Version:** 7.18.1 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 5. november 2026 · **Version:** 7.19.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,24 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Autopilot-broen: hele `/snapshot`, WP-Cron-ping og `X-Command-Center` (5. november, v7.19.0)
+- **Beslutning:** koblingen til Steamgears Autopilot forbliver **envejs** (CC → site, roadmappens punkt
+  #5 i steamgears-site): CC læser `GET /snapshot` og sender kladder med `POST /drafts`. Ingen pairing-kode
+  og intet kald fra sitet til CC, som stadig kun lytter på 127.0.0.1.
+- **Nyt i `sgap_sync()`:** prøver `/snapshot` først (`sgap_from_snapshot()` oversætter til det gamle
+  format + `version`, `paused_because`, `cron_lag_minutes`, `problems`, `self_check_at`,
+  `missing_tables`, `source`). Ved 404 bruges `sgap_from_stats()` (det gamle `/stats` + `/drafts`).
+  Lagring og alarmer ligger i `sgap_store()`; nye selvtjek-problemer og manglende tabeller alarmerer kun
+  ved ændring i forhold til forrige snapshot.
+- **`sgap_api()`** sender altid `X-Command-Center: APP_VERSION`. Pluginnet 7.33+ noterer det
+  (`sgap_cc_seen`) og melder i sit selvtjek, når CC har været tavs i over 2 timer.
+- **`job_wp_cron()`** kalder `wp-cron.php?doing_wp_cron` hvert 5. min (samme betingelse som broen),
+  så pluginnets job ikke venter på besøgende. Fejl er tavse med vilje.
+- **Dashboardet** viser pluginversion, pause-årsag, cron-forsinkelse (≥ 30 min) og selvtjek-listen.
+- **Tests:** `tests/test_v8_features.py` (oversættelse, sortering, tomt svar, ping-sti og header) og
+  `tests/ci_check.sh` (snapshot-kilde, version, header, dashboard, alarm én gang, reserve til `/stats`).
+  `tests/fake_wp.py` har fået `/snapshot`, `wp-cron.php`, tilstanden `old` og logger headeren.
 
 ### Advarsel når `.env`-koden er forældet (5. november, v7.18.1)
 - **Baggrund:** `CC_ADMIN_PASSWORD` bruges kun ved seed. Skiftes koden under **Brugere**, lover `.env`

@@ -698,6 +698,45 @@ with main.get_db() as db:
     dbl = db.execute("SELECT status FROM socialqueue WHERE id=?", (double_id,)).fetchone()
 check("autopilot: status peger paa den ene kladde",
       bool(dbl) and dbl["status"] == "sendt til autopilot (kladde #1)", dbl["status"] if dbl else None)
+
+# --- /snapshot-oversaettelse og WP-Cron-ping (v7.19) ---
+_m = main.sgap_from_snapshot({
+    "version": "7.33.0", "missing_tables": ["events"],
+    "status": {"autopilot": True, "full_auto": True, "sending_paused_because": "Quiet hours", "cron_lag_minutes": "40",
+               "last_self_check": {"at": "2026-11-05 06:00", "problems": ["The autopilot is off.", 7]}},
+    "counts": {"queue": {"queued": "2", "failed": 1}, "drafts": {"pending": "4", "used": 9}},
+    "results": {"by_channel": [{"channel": "facebook", "published": "1", "clicks": "5", "orders": "0", "revenue": "0"},
+                               {"channel": "pinterest", "published": "0", "clicks": "1", "orders": "1", "revenue": "19.5"}]}})
+check("snapshot: koe og kladder som tal", _m["queue"] == {"queued": 2, "failed": 1} and _m["pending_drafts"] == 4, _m)
+check("snapshot: kanaler sorteret efter omsaetning", [c["channel"] for c in _m["channels"]] == ["pinterest", "facebook"]
+      and _m["channels"][0] == {"channel": "pinterest", "publish": 0, "click": 1, "order": 1, "revenue": 19.5}, _m["channels"])
+check("snapshot: selvtjek, pause, cron og manglende tabeller",
+      _m["problems"] == ["The autopilot is off.", "7"] and _m["paused_because"] == "Quiet hours"
+      and _m["cron_lag_minutes"] == 40 and _m["missing_tables"] == ["events"] and _m["version"] == "7.33.0", _m)
+check("snapshot: tomt svar giver ingen fejl", main.sgap_from_snapshot({})["queue"] == {} and main.sgap_from_snapshot({})["problems"] == [])
+
+
+class _CronSite(BaseHTTPRequestHandler):
+    hits = []
+    def log_message(self, *a):
+        pass
+    def do_GET(self):
+        _CronSite.hits.append((self.path, self.headers.get("X-Command-Center")))
+        self.send_response(200)
+        self.send_header("content-length", "0")
+        self.end_headers()
+
+
+_cron_srv = HTTPServer(("127.0.0.1", 0), _CronSite)
+threading.Thread(target=_cron_srv.serve_forever, daemon=True).start()
+_keep_url = main.WP_URL
+main.WP_URL = f"http://127.0.0.1:{_cron_srv.server_address[1]}/"
+_code = main.wp_cron_ping()
+main.WP_URL = _keep_url
+check("wp-cron: ping rammer wp-cron.php med doing_wp_cron", _code == 200 and len(_CronSite.hits) == 1
+      and _CronSite.hits[0][0].startswith("/wp-cron.php?doing_wp_cron="), _CronSite.hits)
+check("wp-cron: ping sender X-Command-Center", _CronSite.hits[0][1] == main.APP_VERSION if _CronSite.hits else False)
+check("wp-cron: job koerer hvert 5. min", 'id="wp_cron"' in open(os.path.join(os.path.dirname(main.__file__), "main.py")).read())
 with main.get_db() as db:
     db.execute("INSERT INTO socialqueue (platform, message, status, created_at) VALUES (?,?,?,?)",
                ("Mastodon", "laas", "Klar i ko", "2026-01-01T12:00:00"))

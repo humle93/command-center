@@ -70,6 +70,20 @@ j = h.json()
 check("health: 200 with db_write, disk and budget", h.status_code == 200 and j["db_write"] is True and j["disk_used_pct"] is not None
       and j["budget"]["serpapi"] == {"used": 3, "limit": 3} and j["version"] == main.APP_VERSION, j)
 
+# --- schema-version: stempel i DB, synligt i /health, fejlet migrering giver alarm ---
+check("schema: versionen er stemplet i DB og matcher koden", main.schema_version() == main.SCHEMA_VERSION, main.schema_version())
+check("schema: versionen er synlig i /health", j["schema_version"] == main.SCHEMA_VERSION and j["schema_ok"] is True, j)
+with main.get_db() as db:
+    db.execute("DELETE FROM schema_meta")
+main.report_schema_version()
+h2 = TestClient(main.app).get("/health")
+with main.get_db() as db:
+    a = [r["message"] for r in db.execute("SELECT message FROM alarms WHERE type='schema'")]
+check("schema: manglende stempel giver advarsel i /health (ikke 503)",
+      h2.status_code == 200 and h2.json()["status"] == "advarsel" and h2.json()["schema_ok"] is False, h2.json())
+check("schema: manglende stempel giver en alarm", len(a) == 1 and f"forventer {main.SCHEMA_VERSION}" in a[0], a)
+main.stamp_schema_version()
+check("schema: stemplet kan genskabes uden migrering", main.schema_version() == main.SCHEMA_VERSION, main.schema_version())
 # --- login-haerdning: session-id i cookien, Secure ved HTTPS, POST /logout ---
 main.APP_TOKEN = "test-token-123"
 c2 = TestClient(main.app)

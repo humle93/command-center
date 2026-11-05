@@ -55,6 +55,7 @@ LINKCHECK_LIMIT = int(os.environ.get("LINKCHECK_LIMIT", "25"))
 PSI_API_KEY = os.environ.get("PSI_API_KEY", "").strip()   # Google PageSpeed API (gratis noegle)
 
 APP_VERSION = "7.10.0"
+SCHEMA_VERSION = 1  # v8.0: bumpes naar init_db/migrate_db aendrer tabeller eller kolonner
 app = FastAPI(title="Command Center Engine", version=APP_VERSION)
 # Git does not keep empty folders, so a fresh clone has no app/static: create it or startup fails.
 os.makedirs(STATIC_DIR, exist_ok=True)
@@ -115,6 +116,10 @@ def get_db():
 def init_db():
     with get_db() as db:
         db.executescript("""
+        CREATE TABLE IF NOT EXISTS schema_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
         CREATE TABLE IF NOT EXISTS domains (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             url TEXT UNIQUE NOT NULL,
@@ -337,9 +342,6 @@ def _safe(fn):
             print("[cc] init-fejl fortsaetter (app starter alligevel):", repr(e2), flush=True)
 
 
-_safe(init_db)
-
-
 def migrate_db():
     with get_db() as db:
         cols = {}
@@ -353,8 +355,6 @@ def migrate_db():
                 if c not in existing:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {c} TEXT")
 
-
-_safe(migrate_db)
 
 
 def create_indexes():
@@ -373,7 +373,58 @@ def create_indexes():
         db.execute("ANALYZE")
 
 
-_safe(create_indexes)
+def schema_version() -> int:
+    """Schema-versionen der er stemplet i databasen (0 = ikke stemplet / ukendt)."""
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
+        return int(row["value"]) if row else 0
+    except Exception:
+        return 0
+
+
+def stamp_schema_version():
+    with get_db() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+
+
+def init_schema():
+    """Byg og migrer schemaet i raekkefoelge — stemplet saettes kun naar alle trin gik igennem.
+
+    Fejler et trin, bliver versionen i DB ikke opdateret, og naeste opstart (og /health)
+    kan se forskellen. Foer stod hvert trin med sit eget _safe()-kald, saa en fejlet
+    migrering kunne fortsaette i aevig tid uden at nogen opdagede det.
+    """
+    init_db()
+    migrate_db()
+    create_indexes()
+    stamp_schema_version()
+
+
+def report_schema_version():
+    """Goer version-mismatch synligt: skarp loglinje + alarm i UI'et."""
+    have = schema_version()
+    if have == SCHEMA_VERSION:
+        return
+    msg = (f"Database-schema er version {have or 'ukendt'}, koden forventer {SCHEMA_VERSION} — "
+           "en migrering er ikke gennemfoert (se serverloggen)")
+    print("[cc] SCHEMA-ADVARSEL:", msg, flush=True)
+    try:
+        # now_iso() er defineret laengere nede i filen, og denne koeres ved import.
+        with get_db() as db:
+            db.execute(
+                "INSERT INTO alarms (type, message, severity, created_at) VALUES (?, ?, ?, ?)",
+                ("schema", msg[:300], "kritisk", datetime.now().isoformat(timespec="seconds")),
+            )
+    except Exception:
+        pass
+
+
+_safe(init_schema)
+_safe(report_schema_version)
 
 
 MODULES = ["domains", "keywords", "ai", "monitors", "social", "links", "bridge", "spy", "wp_push", "telegram", "growth", "autopilot"]
@@ -2870,15 +2921,22 @@ async def health():
         disk_used_pct = round(du.used / du.total * 100, 1)
     except Exception:
         disk_used_pct = None
+    have_schema = schema_version()
+    schema_ok = have_schema == SCHEMA_VERSION
     status = "ok"
     if disk_used_pct is not None and disk_used_pct >= 80:
         status = "advarsel"
+    if not schema_ok:
+        status = "advarsel"  # appen koerer, men schemaet er ikke det koden forventer
     if not db_write or (disk_used_pct is not None and disk_used_pct >= 90):
         status = "kritisk"
     body = {
         "status": status,
         "db_write": db_write,
         "disk_used_pct": disk_used_pct,
+        "schema_version": have_schema,
+        "schema_version_expected": SCHEMA_VERSION,
+        "schema_ok": schema_ok,
         "budget": {s: {"used": u, "limit": l} for s, (u, l) in budget_usage().items()},
         "version": APP_VERSION,
         "ai": bool(AIMLAPI_KEY),

@@ -1,8 +1,10 @@
 # Fake WordPress with the Steamgears Autopilot REST API (sgap/v1), for tests/ci_check.sh.
-# Usage: python3 tests/fake_wp.py <state-file>   (state file holds: ok | failed2 | 404)
+# Usage: python3 tests/fake_wp.py <state-file>   (state file holds: ok | failed2 | 404 | old)
+# old = a plugin without /snapshot (CC falls back to /stats + /drafts).
+# Every request records its X-Command-Center header in <state-file>.header.
 import json, base64, os, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
-STATE = sys.argv[1]  # file: "ok" | "404" | "failed2"
+STATE = sys.argv[1]  # file: "ok" | "404" | "failed2" | "old"
 drafts = []
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -12,9 +14,26 @@ class H(BaseHTTPRequestHandler):
         return self.headers.get("Authorization") == "Basic " + base64.b64encode(b"admin:app pass").decode()
     def mode(self):
         return open(STATE).read().strip()
+    def note(self):
+        open(STATE + ".header", "w").write(self.headers.get("X-Command-Center", ""))
     def do_GET(self):
+        self.note()
+        if self.path.startswith("/wp-cron.php"):
+            open(STATE + ".cron", "a").write("ping\n")
+            return self.send(200, {})
         if not self.auth_ok(): return self.send(401, {"code": "rest_not_logged_in"})
         if self.mode() == "404": return self.send(404, {"code": "rest_no_route"})
+        if self.path.startswith("/wp-json/sgap/v1/snapshot"):
+            if self.mode() == "old": return self.send(404, {"code": "rest_no_route"})
+            failed = 2 if self.mode() == "failed2" else 0
+            queue = {"published": 3, "queued": 1, **({"failed": failed} if failed else {})}
+            return self.send(200, {"version": "7.33.0", "missing_tables": [],
+                "status": {"autopilot": True, "full_auto": False, "sending_paused_because": None, "cron_lag_minutes": 45,
+                           "last_self_check": {"at": "2026-11-05 06:00:00", "problems": ["The autopilot is off."] if failed else []}},
+                "counts": {"queue": queue, "drafts": {"pending": len([d for d in drafts if d["status"] == "pending"])}},
+                "results": {"by_channel": [
+                    {"channel": "facebook", "published": "3", "clicks": "12", "orders": "0", "revenue": "0"},
+                    {"channel": "pinterest", "published": "0", "clicks": "0", "orders": "1", "revenue": "49.90"}]}})
         if self.path.startswith("/wp-json/sgap/v1/stats"):
             failed = 2 if self.mode() == "failed2" else 0
             return self.send(200, {"days": 30, "events": [

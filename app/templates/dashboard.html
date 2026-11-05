@@ -598,7 +598,23 @@
                 {% endfor %}
                 </tbody>
             </table>
-            <p class="text-[10px] text-zinc-500 mt-2">Tjekket {{ sgap.checked_at }} · Godkend kladder i WordPress: Steamgears → AI Drafts</p>
+            {% if sgap.paused_because %}
+            <p class="text-xs text-amber-400 mt-2">⏸ Afsendelse sat paa pause: {{ sgap.paused_because }}</p>
+            {% endif %}
+            {% if sgap.cron_lag_minutes and sgap.cron_lag_minutes >= 30 %}
+            <p class="text-xs text-amber-400 mt-2">⏱ WP-Cron er {{ sgap.cron_lag_minutes }} min bagud - Command Center kalder wp-cron.php hvert 5. min for at hjaelpe</p>
+            {% endif %}
+            {% if sgap.problems %}
+            <div class="mt-2">
+                <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">Pluginnets selvtjek{% if sgap.self_check_at %} ({{ sgap.self_check_at }}){% endif %}</div>
+                <ul class="text-xs text-amber-300 list-disc pl-4 space-y-0.5">
+                    {% for p in sgap.problems %}<li>{{ p }}</li>{% endfor %}
+                </ul>
+            </div>
+            {% elif sgap.source == 'snapshot' %}
+            <p class="text-xs text-emerald-400 mt-2">✓ Pluginnets selvtjek: ingen problemer</p>
+            {% endif %}
+            <p class="text-[10px] text-zinc-500 mt-2">Tjekket {{ sgap.checked_at }}{% if sgap.version %} · Autopilot {{ sgap.version }}{% endif %}{% if sgap.source == 'stats' %} · aeldre plugin uden /snapshot{% endif %} · Godkend kladder i WordPress: Steamgears → AI Drafts</p>
             {% endif %}
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">

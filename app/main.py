@@ -109,10 +109,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.18.1"
+APP_VERSION = "7.19.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.19.0", "Autopilot-broen henter hele /snapshot (selvtjek, cron-forsinkelse, pause-aarsag) og holder WP-Cron i gang hvert 5. min"),
     ("7.18.1", "Advarsel paa skaermen og i dashboardet, naar CC_ADMIN_PASSWORD i .env ikke laengere passer til kontoen"),
     ("7.18.0", "Standardbrugeren oprettes ved opstart fra CC_ADMIN_EMAIL + CC_ADMIN_PASSWORD - /setup er kun reserve"),
     ("7.17.2", "Invitationen viser selv om mailen blev sendt - foer laa fejlen kun under Alarmer"),
@@ -129,7 +130,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Standardbrugeren kommer fra .env ved opstart - /setup bruges kun, naar .env ikke har de to linjer"
+NEWEST_LINE = "Pluginnet kan nu se at Command Center er forbundet, og CC viser pluginnets selvtjek og holder WP-Cron i gang"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -2871,6 +2872,8 @@ def sgap_api(method: str, path: str, **kwargs):
         f"{WP_URL.rstrip('/')}/wp-json/sgap/v1{path}",
         auth=(WP_USER, WP_APP_PASSWORD),
         timeout=20,
+        # Pluginnet (>= 7.33) noterer headeren og viser "Command Center forbundet" + alarmerer hvis vi tier.
+        headers={"X-Command-Center": APP_VERSION},
         **kwargs,
     )
     resp.raise_for_status()
@@ -2927,21 +2930,70 @@ def sgap_sync() -> dict:
     previous = sgap_snapshot()
     snap = {"checked_at": now_iso(), "ok": False, "error": "", "queue": {}, "channels": [], "pending_drafts": 0}
     try:
-        stats = sgap_api("GET", "/stats", params={"days": 30})
-        drafts = sgap_api("GET", "/drafts", params={"status": "pending", "limit": 100})
-        snap["ok"] = True
-        snap["queue"] = {r["status"]: int(r["count"]) for r in stats.get("queue", [])}
-        channels = {}
-        for r in stats.get("events", []):
-            c = channels.setdefault(r["channel"], {"channel": r["channel"], "publish": 0, "click": 0, "order": 0, "revenue": 0.0})
-            if r["event_type"] in ("publish", "click", "order"):
-                c[r["event_type"]] = int(r["count"])
-            if r["event_type"] == "order":
-                c["revenue"] = round(float(r["value"] or 0), 2)
-        snap["channels"] = sorted(channels.values(), key=lambda c: (-c["revenue"], -c["click"]))
-        snap["pending_drafts"] = len(drafts) if isinstance(drafts, list) else 0
+        try:
+            # Nyere plugins har /snapshot: alt i ét kald, inkl. selvtjek, cron-forsinkelse og pause-aarsag.
+            snap.update(sgap_from_snapshot(sgap_api("GET", "/snapshot", params={"days": 30, "limit": 20})))
+            snap["ok"] = True
+        except requests.HTTPError as e:
+            if getattr(e.response, "status_code", None) != 404:
+                raise
+            snap.update(sgap_from_stats())
+            snap["ok"] = True
     except Exception as e:
         snap["error"] = sgap_error_text(e)
+    sgap_store(snap, previous)
+    return snap
+
+
+def sgap_from_snapshot(data: dict) -> dict:
+    """Oversaet pluginnets /snapshot til det format dashboardet og alarmerne bruger."""
+    status = data.get("status") or {}
+    counts = data.get("counts") or {}
+    channels = []
+    for r in (data.get("results") or {}).get("by_channel") or []:
+        channels.append({
+            "channel": r.get("channel"),
+            "publish": int(r.get("published") or 0),
+            "click": int(r.get("clicks") or 0),
+            "order": int(r.get("orders") or 0),
+            "revenue": round(float(r.get("revenue") or 0), 2),
+        })
+    check = status.get("last_self_check") or {}
+    return {
+        "source": "snapshot",
+        "version": data.get("version") or "",
+        "queue": {k: int(v) for k, v in (counts.get("queue") or {}).items()},
+        "pending_drafts": int((counts.get("drafts") or {}).get("pending", 0)),
+        "channels": sorted(channels, key=lambda c: (-c["revenue"], -c["click"])),
+        "autopilot": bool(status.get("autopilot")),
+        "full_auto": bool(status.get("full_auto")),
+        "paused_because": status.get("sending_paused_because") or "",
+        "cron_lag_minutes": int(status.get("cron_lag_minutes") or 0),
+        "problems": [str(p) for p in (check.get("problems") or [])][:10],
+        "self_check_at": check.get("at") or "",
+        "missing_tables": list(data.get("missing_tables") or []),
+    }
+
+
+def sgap_from_stats() -> dict:
+    """Reserve for plugins uden /snapshot (aeldre end 7.5)."""
+    stats = sgap_api("GET", "/stats", params={"days": 30})
+    drafts = sgap_api("GET", "/drafts", params={"status": "pending", "limit": 100})
+    snap = {"source": "stats"}
+    snap["queue"] = {r["status"]: int(r["count"]) for r in stats.get("queue", [])}
+    channels = {}
+    for r in stats.get("events", []):
+        c = channels.setdefault(r["channel"], {"channel": r["channel"], "publish": 0, "click": 0, "order": 0, "revenue": 0.0})
+        if r["event_type"] in ("publish", "click", "order"):
+            c[r["event_type"]] = int(r["count"])
+        if r["event_type"] == "order":
+            c["revenue"] = round(float(r["value"] or 0), 2)
+    snap["channels"] = sorted(channels.values(), key=lambda c: (-c["revenue"], -c["click"]))
+    snap["pending_drafts"] = len(drafts) if isinstance(drafts, list) else 0
+    return snap
+
+
+def sgap_store(snap: dict, previous: dict) -> None:
     with get_db() as db:
         db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('sgap_snapshot', ?)", (jsonlib.dumps(snap),))
         # Kun alarm naar noget AENDRER sig, saa Telegram ikke spammes hver halve time.
@@ -2954,7 +3006,28 @@ def sgap_sync() -> dict:
             drafts_now, drafts_before = snap["pending_drafts"], previous.get("pending_drafts", 0)
             if drafts_now > drafts_before:
                 add_alarm(db, "autopilot", f"{drafts_now} AI-kladde(r) venter paa godkendelse i WordPress", "info")
-    return snap
+            # Pluginnets eget selvtjek: alarm kun for NYE problemer, saa samme tekst ikke sendes hver halve time.
+            for problem in snap.get("problems", []):
+                if problem not in previous.get("problems", []):
+                    add_alarm(db, "autopilot", f"Autopilot-selvtjek: {problem}", "advarsel")
+            if snap.get("missing_tables") and snap["missing_tables"] != previous.get("missing_tables"):
+                add_alarm(db, "autopilot", "Autopilot mangler tabeller: " + ", ".join(snap["missing_tables"]) + " - genaktiver pluginnet", "kritisk")
+
+
+def wp_cron_ping() -> int:
+    """Kald wp-cron.php, saa pluginnets job koerer til tiden selvom sitet har faa besoeg. Returnerer HTTP-status."""
+    resp = HTTP.get(f"{WP_URL.rstrip('/')}/wp-cron.php", params={"doing_wp_cron": f"{time.time():.4f}"},
+                    headers={"X-Command-Center": APP_VERSION}, timeout=15)
+    return resp.status_code
+
+
+async def job_wp_cron():
+    if not sgap_ready():
+        return
+    try:
+        await asyncio.get_running_loop().run_in_executor(executor, wp_cron_ping)
+    except Exception:
+        pass  # sitet nede fanges af sgap_sync og monitorerne; et tabt ping skal ikke give alarm
 
 
 async def job_sgap_sync():
@@ -4663,6 +4736,7 @@ async def lifespan(app_: FastAPI):
         scheduler.add_job(job_backup_db, CronTrigger(hour=4, minute=40), id="db_backup", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_update_check, CronTrigger(hour=5, minute=0), id="update_check", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_sgap_sync, IntervalTrigger(minutes=30), id="sgap_sync", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_wp_cron, IntervalTrigger(minutes=5), id="wp_cron", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_drain_alerts, IntervalTrigger(minutes=1), id="alert_outbox", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.start()
         try:

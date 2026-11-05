@@ -43,6 +43,9 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - **`/setup` er reserve:** uden de to linjer opretter første besøg brugeren som før, og siden lukker
   sig selv, så snart der findes en bruger. `login.html` er skrevet om til ét login-formular med en
   kort note om `.env`-linjerne i stedet for en separat opsætningsmode.
+- **Baren i dashboardet:** den gule bjælke ved `must_change_password` siger nu både "fra
+  invitationsmailen" og "eller CC_ADMIN_PASSWORD i .env", så en seedet konto ikke får at vide, at
+  koden kom med posten.
 - **Tests:** `tests/test_v8_features.py` dækker seed, login uden `/setup`, hash (ingen klartekst),
   `must_change_password`, at en rettet `.env` ikke overskriver, og at en ugyldig linje giver alarm;
   `tests/ci_check.sh` tjekker at `/setup` svarer 303, når brugeren findes.

@@ -23,3 +23,5 @@ jobs:
         run: bash tests/ci_check.sh
       - name: Quality gate, API budget, health
         run: python3 tests/test_v8_features.py
+      - name: Every env var read by the code is documented in .env.example
+        run: python3 tests/test_config_drift.py

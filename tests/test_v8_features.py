@@ -846,6 +846,40 @@ check("ryd .env: hverken den gamle eller den nye kode staar i filen",
 check("ryd .env: advarslen forsvinder med linjen", main.env_password_mismatch() == "",
       main.env_password_mismatch())
 check("ryd .env: baren er væk efter kodeskiftet", "border-red-500/40" not in sd.get("/").text)
+# --- v7.19.2: dashboardet viser, hvornaar og af hvem linjen blev ryddet ---
+_notice = main.env_password_notice()
+_when = main.danish_time(main.env_password_cleared().get("at", ""))
+check("visning: dashboardet ved hvem der ryddede og hvornaar",
+      _notice.get("state") == "tom" and "blev fjernet fra .env" in _notice.get("text", "")
+      and "standard@example.dk" in _notice["text"] and bool(_when) and _when in _notice["text"],
+      _notice)
+check("visning: teksten naevner ingen koder",
+      "standard-pass" not in _notice["text"] and "nyt-pass-2" not in _notice["text"], _notice["text"])
+check("visning: baren staar i dashboardet", "border-sky-500/40" in sd.get("/").text)
+check("visning: dansk tidsformat",
+      main.danish_time("2026-11-05T16:12:33") == "5. november 2026 kl. 16:12",
+      main.danish_time("2026-11-05T16:12:33"))
+check("visning: skaev tidsvaerdi giver ingen tekst",
+      main.danish_time("i gaar") == "" and main.danish_time("") == "")
+# Linjen sat tilbage: baren maa ikke paastaa, at den stadig er væk.
+os.environ["CC_ADMIN_PASSWORD"] = "nyt-pass-2"
+with io.open(_envfile, "w", encoding="utf-8") as f:
+    f.write("# test\nCC_HOST=127.0.0.1\nCC_ADMIN_EMAIL=standard@example.dk\n"
+            "CC_ADMIN_PASSWORD=nyt-pass-2\nCC_PORT=8000\n")
+_back = main.env_password_notice()
+check("visning: en linje der er sat tilbage bliver sagt hoejt",
+      _back.get("state") == "sat" and "står i .env igen" in _back.get("text", "")
+      and "standard@example.dk" in _back["text"], _back)
+check("visning: baren bliver ved med at vaere synlig", "border-sky-500/40" in sd.get("/").text)
+# Ingen rydning gemt (fx en ny installation) = ingen bar.
+with main.get_db() as db:
+    db.execute("DELETE FROM settings WHERE key=?", (main.ENV_CLEARED_KEY,))
+check("visning: uden en gemt rydning er der ingen bar",
+      main.env_password_notice() == {} and "border-sky-500/40" not in sd.get("/").text)
+with main.get_db() as db:      # en i stykker skrevet raekke maa ikke vaelte dashboardet
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)",
+               (main.ENV_CLEARED_KEY, "{ikke-json"))
+check("visning: en i stykker skrevet raekke giver ingen bar", main.env_password_notice() == {})
 # En fejl under skrivningen maa ikke vaelte skiftet: en mappe paa .env-stien giver en alarm i stedet.
 os.environ["CC_ADMIN_PASSWORD"] = "gammel-kode-2"
 main.ENV_PATH = _envdir

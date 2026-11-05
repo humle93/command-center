@@ -1,6 +1,6 @@
 # Command Center — Roadmap
 
-Status pr. **5. november 2026 (v7.19.1)**. Koden er 4.828 linjer i `app/main.py`, 69 ruter, 25 tabeller,
+Status pr. **5. november 2026 (v7.19.2)**. Koden er 4.919 linjer i `app/main.py`, 69 ruter, 25 tabeller,
 8 jobs, 11 moduler og 14 faner. Rækkefølgen i "Næste" er den anbefalede prioritering: sikkerhed og
 driftsstabilitet før nye features.
 
@@ -30,6 +30,7 @@ findes.
 
 | Version | Indhold |
 | --- | --- |
+| **v7.19.2** | **Rydningen ses i dashboardet**: en blå bjælke øverst viser hvornår og af hvem `CC_ADMIN_PASSWORD` blev fjernet fra `.env` (fx “fjernet 5. november 2026 kl. 23:19 af henning”), så filens tilstand er synlig uden at åbne den · rækken `settings.env_password_cleared` gemmer kun navn og tidspunkt, aldrig koden · om linjen står der, læses fra filen selv, så en tilbageført linje bliver sagt højt i stedet for at baren gentager en forældet påstand · forældet kode overlader baren til den røde advarsel · `tests/test_v8_features.py` dækker fjernet linje, tilbageført linje, ingen rydning og en i stykker skrevet række |
 | **v7.19.1** | **`.env` rydder sig selv**: skifter standardbrugeren koden under Brugere, tømmes `CC_ADMIN_PASSWORD` i `.env` med det samme (kun den linje, atomisk skrivning, filmode bevaret), miljøvariablen nulstilles, og advarslen forsvinder. Andre brugeres kodeskift rører ikke filen, og en fejlende skrivning bliver en advarsel i Alarmer uden at vaelte skiftet · `tests/test_v8_features.py` dækker tomning, urørte nøgler, ingen kode i filen, andre brugere, uændret kode og skrivefejl |
 | **v7.19.0** | **Autopilot-broen læser hele `/snapshot`**: ét kald giver kø, kladder, kanaler, pluginversion, pause-årsag, WP-Cron-forsinkelse, pluginnets selvtjek og manglende tabeller; ældre plugins falder tilbage til `/stats` + `/drafts` · nye selvtjek-problemer og manglende tabeller giver alarm (kun ved ændring) · **WP-Cron-ping** hvert 5. min (`job_wp_cron`) · alle kald sender `X-Command-Center: <version>`, så Steamgears Autopilot 7.33+ kan vise forbindelsen og alarmere når CC tier · retningen er stadig kun CC → site (beslutning: envejs) · begge suiter dækker snapshot, reserve, header, alarm-dedupe og ping |
 | **v7.18.1** | **Advarsel når `.env`-koden er forældet**: skiftes adgangskoden i UI'et, passer `CC_ADMIN_PASSWORD` ikke længere — opstartsloggen skriver `[cc] advarsel: …`, den ligger under Alarmer, og dashboardet viser en rød bjælke, indtil linjen rettes eller fjernes. Kontoen røres ikke, klartekst indgår ikke i advarslen, og svaret caches pr. `(email, sha256(kode), hash)`, så PBKDF2 ikke kører ved hvert sidevisning · begge suiter dækker advarsel/ingen advarsel, baren, alarmen og at der ikke kommer en falsk advarsel uden `CC_ADMIN_PASSWORD` |

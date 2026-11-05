@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 5. november 2026 · **Version:** 7.19.1 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 5. november 2026 · **Version:** 7.19.2 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,13 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Rydningen vises i dashboardet (5. november, v7.19.2)
+- **Baggrund:** efter v7.19.1 var linjen væk — men der var ingen steder at se, at det var sket med vilje, eller hvem der skiftede koden.
+- **Nyt:** `clear_env_admin_password()` gemmer `{at, by, account}` i `settings` under `env_password_cleared` (kun navn og tidspunkt, aldrig koden), og `env_password_notice()` læser den tilbage til en blå bjælke øverst i dashboardet: “CC_ADMIN_PASSWORD blev fjernet fra .env 5. november 2026 kl. 23:19 af henning — filen kan ikke blive forældet”.
+- **Ærlig tilstand:** `env_admin_password_in_file()` læser `.env` selv (ikke miljøvariablen, der blev læst ved opstart), så en linje, der er sat tilbage, bliver sagt højt: baren skifter til “står i .env igen”. Forældet kode overlader baren til den røde advarsel, og uden en gemt rydning (fx ny installation) vises den ikke.
+- **Verifikation:** `tests/test_v8_features.py` har ni “visning:”-tjek (navn/tidspunkt, ingen koder i teksten, blå bjælke i HTML, dansk tidsformat, tilbageført linje, ingen rydning, i stykker skrevet række).
+- **Bemaerk:** tidsformatet er `danish_time()` (“5. november 2026 kl. 23:19”), som kan bruges andre steder i UI'et.
 
 ### `.env` rydder sig selv ved kodeskift (5. november, v7.19.1)
 - **Baggrund:** advarslen i v7.18.1 fortalte, at linjen var forældet — men den blev stående, til nogen

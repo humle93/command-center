@@ -109,10 +109,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.19.1"
+APP_VERSION = "7.19.2"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.19.2", "Dashboardet viser, hvornaar og af hvem CC_ADMIN_PASSWORD blev fjernet fra .env"),
     ("7.19.1", "CC_ADMIN_PASSWORD fjernes fra .env, naar standardbrugeren skifter kode - saa kan linjen ikke blive foraeldet"),
     ("7.19.0", "Autopilot-broen henter hele /snapshot (selvtjek, cron-forsinkelse, pause-aarsag) og holder WP-Cron i gang hvert 5. min"),
     ("7.18.1", "Advarsel paa skaermen og i dashboardet, naar CC_ADMIN_PASSWORD i .env ikke laengere passer til kontoen"),
@@ -778,6 +779,7 @@ def clear_env_admin_password(email: str = "") -> str:
         return "ikke-standardbruger"
     if not env_password:
         return "ingen-linje"
+    row = None
     try:
         row = find_user(env_email)
         still_valid = bool(row) and verify_password(env_password, row["password_hash"])
@@ -821,6 +823,7 @@ def clear_env_admin_password(email: str = "") -> str:
     _ENV_PASSWORD_STATE.update(sig=None, msg="")
     try:
         with get_db() as db:
+            record_env_password_cleared(db, env_email)
             add_alarm(db, "brugere", "CC_ADMIN_PASSWORD er fjernet fra .env, fordi '%s' skiftede "
                       "adgangskode" % env_email, "info")
     except Exception:
@@ -829,6 +832,93 @@ def clear_env_admin_password(email: str = "") -> str:
     return "fjernet"
 
 
+# Dashboardet maa ikke kraeve, at man aabner .env: rydningen gemmes derfor i settings sammen med
+# hvem og hvornaar, og "staar linjen der?" laeses fra filen selv. Miljoevariablen blev laest ved
+# opstart og ser derfor ikke en rettelse undervejs.
+ENV_CLEARED_KEY = "env_password_cleared"
+_DA_MONTHS = ("januar", "februar", "marts", "april", "maj", "juni", "juli", "august",
+              "september", "oktober", "november", "desember")
+
+
+def danish_time(iso: str) -> str:
+    """'2026-11-05T16:12:33' -> '5. november 2026 kl. 16:12' ('' naar vaerdien er skaev)."""
+    try:
+        dt = datetime.fromisoformat(str(iso))
+    except Exception:
+        return ""
+    if dt.tzinfo is not None:
+        try:
+            dt = dt.astimezone(ZoneInfo(CC_TZ_NAME))
+        except Exception:
+            pass
+    return "%d. %s %d kl. %02d:%02d" % (dt.day, _DA_MONTHS[dt.month - 1], dt.year, dt.hour, dt.minute)
+
+
+def record_env_password_cleared(db, account: str) -> None:
+    """Gemmer hvem/hvornaar .env-linjen blev ryddet. Fejler den, er rydningen stadig sket.
+
+    Kun navnet paa den, der skiftede koden, gemmes - aldrig koden selv.
+    """
+    name = ""
+    try:
+        row = db.execute("SELECT username FROM users WHERE email=?", (account,)).fetchone()
+        name = (row["username"] or "") if row else ""
+    except Exception:
+        name = ""
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)",
+               (ENV_CLEARED_KEY, jsonlib.dumps({"at": now_iso(), "by": (name or account),
+                                                "account": account}, ensure_ascii=False)))
+
+
+def env_password_cleared() -> dict:
+    """Den seneste rydning som {'at', 'by', 'account'} - {} naar der ikke er nogen."""
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT value FROM settings WHERE key=?", (ENV_CLEARED_KEY,)).fetchone()
+        data = jsonlib.loads(row["value"]) if row and row["value"] else {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def env_admin_password_in_file() -> str:
+    """'sat', 'tom', 'ingen-fil' eller 'fejl' - laeser .env, saa manuelle rettelser ogsaa ses."""
+    try:
+        with open(ENV_PATH, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return "ingen-fil"
+    except Exception:
+        return "fejl"
+    pattern = re.compile(r"^\s*(?:export\s+)?%s\s*=(.*)$" % re.escape(ADMIN_PASSWORD_ENV), re.M)
+    found = pattern.search(text)
+    return "sat" if found and found.group(1).strip() else "tom"
+
+
+def env_password_notice() -> dict:
+    """Tekst til dashboardet om .env-linjen: ryddet af hvem/hvornaar - eller sat tilbage.
+
+    Baren vises kun for rydninger, vi selv har lavet; en tom linje paa en ny installation skal ikke
+    give stoej. Er koden blevet foraeldet, vinder den roede advarsel i stedet. Koderne selv er
+    hverken i teksten eller i settings.
+    """
+    rec = env_password_cleared()
+    if not rec or env_password_mismatch():
+        return {}
+    who = rec.get("by") or rec.get("account") or "ukendt"
+    when = danish_time(rec.get("at", ""))
+    stamp = (" " + when) if when else ""
+    state = env_admin_password_in_file()
+    if state == "sat":
+        text = (f"CC_ADMIN_PASSWORD står i .env igen (fjernet{stamp} af {who}) - skiftes koden i "
+                f"UI'et, bliver linjen forældet igen.")
+    elif state in ("ingen-fil", "fejl"):
+        text = (f"CC_ADMIN_PASSWORD blev fjernet fra .env{stamp} af {who}, men filen kunne ikke "
+                f"læses ved denne kontrol.")
+    else:
+        text = (f"CC_ADMIN_PASSWORD blev fjernet fra .env{stamp} af {who} - filen kan ikke blive "
+                f"forældet. Linjen skal kun tilbage, hvis et nyt deployment skal seedes.")
+    return {"state": state, "text": text}
 
 
 def find_user(identifier: str):
@@ -4245,6 +4335,7 @@ async def dashboard(request: Request):
         "alert_problems": alert_problems,
         "current_user": getattr(request.state, "user", None),
         "env_password_warning": env_password_mismatch(),
+        "env_password_notice": env_password_notice(),
         "update_state": update_state,
         "update_token": bool(GITHUB_TOKEN),
         "update_repo": GITHUB_REPO,

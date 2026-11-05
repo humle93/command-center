@@ -31,6 +31,8 @@ Advarslen ændrer **intet** ved kontoen: login bruger hele tiden den nye kode. R
 
 **Siden v7.19.1 rydder linjen sig selv:** skifter du koden under **Brugere** som den konto, `CC_ADMIN_EMAIL` peger på, tømmes `CC_ADMIN_PASSWORD` i `.env` med det samme. Kun den linje ændres — kommentarer og de andre nøgler står urørt, og filen skrives atomisk, så en afbrudt skrivning ikke kan ødelægge den. Herefter findes advarslen og den røde bjælke ikke længere, fordi der ikke er noget at være uenig om.
 
+**Siden v7.19.2 står rydningen i dashboardet:** øverst vises en **blå bjælke** med tidspunkt og navn — fx “CC_ADMIN_PASSWORD blev fjernet fra .env 5. november 2026 kl. 23:19 af henning — filen kan ikke blive forældet”. Du behøver altså ikke åbne `.env` for at se, hvad der står i den. Sætter du linjen tilbage i filen, skifter bjælken tekst og siger det, så den ikke påstår, at filen stadig er ryddet; bliver koden samtidig forældet, viser den røde advarsel i stedet for den blå. Der gemmes kun navn og tidspunkt (i `settings`), aldrig koden — heller ikke i bjælkens tekst.
+
 - Skifter en anden bruger sin kode, eller ændrer du koden med `scripts/user_create.py` eller direkte i databasen, rører appen ikke `.env` — så er advarslen stadig din sikkerhedslineal.
 - Er `.env` skrivebeskyttet (fx i en container med filen monteret), ændres kontoen alligevel: skrivningen fejler, fejlen bliver en advarsel under **Alarmer**, og den røde bjælke bliver stående, indtil du fjerner linjen selv. Kontrollen kører kun, når både `CC_ADMIN_EMAIL` og `CC_ADMIN_PASSWORD` er udfyldt, og den sammenligner koden mod den gemte PBKDF2-hash; koden skrives aldrig i loggen eller i advarslen.
 

@@ -35,6 +35,8 @@ TELEGRAM_CHAT_ID=
 # Keyword-positioner via SerpAPI
 SERPAPI_KEY=
 TRACK_DOMAIN=steamgears.eu
+# Google PageSpeed Insights (gratis noegle): Core Web Vitals i SEO-audit
+PSI_API_KEY=
 # API-budget pr. kalendermaaned (antal kald, 0 = intet loft). Stopper kald ved loftet + alarm ved 80 %/100 %
 SERPAPI_MONTHLY_LIMIT=1000
 AI_MONTHLY_LIMIT=3000
@@ -108,6 +110,7 @@ LINKCHECK_LIMIT = int(os.environ.get("LINKCHECK_LIMIT", "25"))
 PSI_API_KEY = os.environ.get("PSI_API_KEY", "").strip()   # Google PageSpeed API (gratis noegle)
 
 APP_VERSION = "7.10.0"
+SCHEMA_VERSION = 1  # v8.0: bumpes naar init_db/migrate_db aendrer tabeller eller kolonner
 app = FastAPI(title="Command Center Engine", version=APP_VERSION)
 # Git does not keep empty folders, so a fresh clone has no app/static: create it or startup fails.
 os.makedirs(STATIC_DIR, exist_ok=True)
@@ -168,6 +171,10 @@ def get_db():
 def init_db():
     with get_db() as db:
         db.executescript("""
+        CREATE TABLE IF NOT EXISTS schema_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
         CREATE TABLE IF NOT EXISTS domains (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             url TEXT UNIQUE NOT NULL,
@@ -367,6 +374,12 @@ def init_db():
             top_domains TEXT,
             created_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+            sid_hash TEXT PRIMARY KEY,
+            created_at TEXT,
+            expires_at TEXT,
+            ip TEXT
+        );
         """)
 
 
@@ -384,9 +397,6 @@ def _safe(fn):
             print("[cc] init-fejl fortsaetter (app starter alligevel):", repr(e2), flush=True)
 
 
-_safe(init_db)
-
-
 def migrate_db():
     with get_db() as db:
         cols = {}
@@ -400,8 +410,6 @@ def migrate_db():
                 if c not in existing:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {c} TEXT")
 
-
-_safe(migrate_db)
 
 
 def create_indexes():
@@ -420,7 +428,58 @@ def create_indexes():
         db.execute("ANALYZE")
 
 
-_safe(create_indexes)
+def schema_version() -> int:
+    """Schema-versionen der er stemplet i databasen (0 = ikke stemplet / ukendt)."""
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
+        return int(row["value"]) if row else 0
+    except Exception:
+        return 0
+
+
+def stamp_schema_version():
+    with get_db() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+
+
+def init_schema():
+    """Byg og migrer schemaet i raekkefoelge — stemplet saettes kun naar alle trin gik igennem.
+
+    Fejler et trin, bliver versionen i DB ikke opdateret, og naeste opstart (og /health)
+    kan se forskellen. Foer stod hvert trin med sit eget _safe()-kald, saa en fejlet
+    migrering kunne fortsaette i aevig tid uden at nogen opdagede det.
+    """
+    init_db()
+    migrate_db()
+    create_indexes()
+    stamp_schema_version()
+
+
+def report_schema_version():
+    """Goer version-mismatch synligt: skarp loglinje + alarm i UI'et."""
+    have = schema_version()
+    if have == SCHEMA_VERSION:
+        return
+    msg = (f"Database-schema er version {have or 'ukendt'}, koden forventer {SCHEMA_VERSION} — "
+           "en migrering er ikke gennemfoert (se serverloggen)")
+    print("[cc] SCHEMA-ADVARSEL:", msg, flush=True)
+    try:
+        # now_iso() er defineret laengere nede i filen, og denne koeres ved import.
+        with get_db() as db:
+            db.execute(
+                "INSERT INTO alarms (type, message, severity, created_at) VALUES (?, ?, ?, ?)",
+                ("schema", msg[:300], "kritisk", datetime.now().isoformat(timespec="seconds")),
+            )
+    except Exception:
+        pass
+
+
+_safe(init_schema)
+_safe(report_schema_version)
 
 
 MODULES = ["domains", "keywords", "ai", "monitors", "social", "links", "bridge", "spy", "wp_push", "telegram", "growth", "autopilot"]
@@ -459,15 +518,66 @@ def cleanup_old_data():
         db.execute("DELETE FROM alarms WHERE resolved=1 AND created_at < datetime('now', '-30 days')")
         db.execute("DELETE FROM health_history WHERE checked_at < datetime('now', '-180 days')")
         db.execute("DELETE FROM keyword_ideas WHERE created_at < datetime('now', '-180 days')")
+        db.execute("DELETE FROM auth_sessions WHERE expires_at < ?", (now_iso(),))
 
 
 # ---------- Auth ----------
+SESSION_COOKIE = "cc_sid"   # v8.0: cookien indeholder et session-id, ikke selve APP_TOKEN
+SESSION_DAYS = 30
+
+
+def _hash_session(sid: str) -> str:
+    """Session-id gemmes kun som SHA-256 — en laekket database giver ikke gyldige cookies."""
+    return hashlib.sha256(sid.encode("utf-8")).hexdigest()
+
+
+def create_session(ip: str = "") -> str:
+    """Opret en session og returnér det id, der skal i cookien."""
+    sid = secrets.token_urlsafe(32)
+    expires = (datetime.now() + timedelta(days=SESSION_DAYS)).isoformat(timespec="seconds")
+    with get_db() as db:
+        db.execute("DELETE FROM auth_sessions WHERE expires_at < ?", (now_iso(),))
+        db.execute(
+            "INSERT INTO auth_sessions (sid_hash, created_at, expires_at, ip) VALUES (?, ?, ?, ?)",
+            (_hash_session(sid), now_iso(), expires, ip[:64]),
+        )
+    return sid
+
+
+def session_valid(sid: str) -> bool:
+    if not sid:
+        return False
+    try:
+        with get_db() as db:
+            row = db.execute(
+                "SELECT 1 FROM auth_sessions WHERE sid_hash = ? AND expires_at > ?",
+                (_hash_session(sid), now_iso()),
+            ).fetchone()
+        return row is not None
+    except Exception:
+        return False  # auth fejler lukket, ikke aabent
+
+
 def is_authed(request: Request) -> bool:
     if not APP_TOKEN:
         return True
+    # Scripts/curl bruger den raa token i headeren; browseren bruger et session-id i cookien.
     # Constant-time comparison so the token cannot be guessed from response timing.
-    supplied = request.cookies.get("cc_token") or request.headers.get("x-cc-token") or ""
-    return secrets.compare_digest(supplied, APP_TOKEN)
+    supplied = request.headers.get("x-cc-token") or ""
+    if supplied and secrets.compare_digest(supplied, APP_TOKEN):
+        return True
+    return session_valid(request.cookies.get(SESSION_COOKIE) or "")
+
+
+def _cookie_secure(request: Request) -> bool:
+    """Secure-flag paa cookien naar forbindelsen er HTTPS.
+
+    Bevidst ikke ubetinget: run.sh koerer http://127.0.0.1, og en Secure-cookie bliver
+    ikke sendt tilbage over ren HTTP — login ville loope. Terminerer en reverse proxy
+    TLS, staar det i X-Forwarded-Proto.
+    """
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "")
+    return proto.split(",")[0].strip().lower() == "https"
 
 
 def is_juno(request: Request) -> bool:
@@ -507,8 +617,21 @@ async def login(request: Request):
     form = await request.form()
     token = (form.get("token") or "").strip()
     if APP_TOKEN and secrets.compare_digest(token, APP_TOKEN):
+        try:
+            sid = create_session(ip)
+        except Exception as exc:
+            print("[cc] kunne ikke oprette session:", repr(exc), flush=True)
+            return templates.TemplateResponse(
+                "login.html",
+                {"request": request, "error": "Kunne ikke oprette session - se serverlog"},
+                status_code=500,
+            )
         resp = RedirectResponse("/", status_code=303)
-        resp.set_cookie("cc_token", token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30)
+        resp.set_cookie(
+            SESSION_COOKIE, sid, httponly=True, samesite="lax",
+            secure=_cookie_secure(request), max_age=60 * 60 * 24 * SESSION_DAYS,
+        )
+        resp.delete_cookie("cc_token")  # v8.0: den raa token skal ikke ligge i browseren
         _LOGIN_FAILS.pop(ip, None)
         return resp
     fails += 1
@@ -519,9 +642,18 @@ async def login(request: Request):
     return templates.TemplateResponse("login.html", {"request": request, "error": "Forkert token"}, status_code=401)
 
 
-@app.get("/logout")
-async def logout():
+@app.post("/logout")
+async def logout(request: Request):
+    """Log ud: sletter sessionen i DB og cookien. POST, saa et link ikke kan logge dig ud."""
+    sid = request.cookies.get(SESSION_COOKIE) or ""
+    if sid:
+        try:
+            with get_db() as db:
+                db.execute("DELETE FROM auth_sessions WHERE sid_hash = ?", (_hash_session(sid),))
+        except Exception:
+            pass
     resp = RedirectResponse("/login", status_code=303)
+    resp.delete_cookie(SESSION_COOKIE)
     resp.delete_cookie("cc_token")
     return resp
 
@@ -2844,15 +2976,22 @@ async def health():
         disk_used_pct = round(du.used / du.total * 100, 1)
     except Exception:
         disk_used_pct = None
+    have_schema = schema_version()
+    schema_ok = have_schema == SCHEMA_VERSION
     status = "ok"
     if disk_used_pct is not None and disk_used_pct >= 80:
         status = "advarsel"
+    if not schema_ok:
+        status = "advarsel"  # appen koerer, men schemaet er ikke det koden forventer
     if not db_write or (disk_used_pct is not None and disk_used_pct >= 90):
         status = "kritisk"
     body = {
         "status": status,
         "db_write": db_write,
         "disk_used_pct": disk_used_pct,
+        "schema_version": have_schema,
+        "schema_version_expected": SCHEMA_VERSION,
+        "schema_ok": schema_ok,
         "budget": {s: {"used": u, "limit": l} for s, (u, l) in budget_usage().items()},
         "version": APP_VERSION,
         "ai": bool(AIMLAPI_KEY),
@@ -2953,7 +3092,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
         <div class="flex items-center gap-3">
             <form action="/self-update" method="POST" onsubmit="return confirm('Hent og installér nyeste version? Genstart run.sh bagefter.')"><button class="text-xs text-zinc-400 hover:text-emerald-400">⬆️ Opdatér</button></form>
             <a href="/health" class="text-xs text-emerald-400">Systemstatus</a>
-            {% if auth_required %}<a href="/logout" class="text-xs text-zinc-500 hover:text-rose-400">Log ud</a>{% endif %}
+            {% if auth_required %}<form action="/logout" method="POST"><button class="text-xs text-zinc-500 hover:text-rose-400">Log ud</button></form>{% endif %}
         </div>
     </div>
 </header>
@@ -3924,7 +4063,7 @@ Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Y
 ## v7.10 – fra v8-planen (Drive)
 - **Kvalitetsgate**: autopilot-artikler sendes kun til WordPress, hvis de har nok ord (min. `QUALITY_MIN_WORDS`, eller 80 % af SERP-gennemsnittet fra Content Gap), indeholder fokus-keywordet og har mindst 2 H2. Ellers status "Stoppet af kvalitetsgate" + alarm. Manuel push er tilladt, men giver en info-alarm. Faerre end 2 interne links giver kun en advarsel.
 - **API-budget**: hvert kald til SerpAPI og aimlapi taelles pr. maaned; ved `SERPAPI_MONTHLY_LIMIT` / `AI_MONTHLY_LIMIT` stoppes kaldene til den 1. Alarm (og Telegram) ved 80 % og 100 %.
-- **/health**: tester at databasen kan skrive og hvor fuld disken er (advarsel ≥ 80 %, kritisk ≥ 90 % → HTTP 503) og viser maanedens API-forbrug.
+- **/health**: tester at databasen kan skrive og hvor fuld disken er (advarsel ≥ 80 %, kritisk ≥ 90 % → HTTP 503), viser maanedens API-forbrug og schema-versionen (`schema_version`, `schema_version_expected`, `schema_ok` — manglende overensstemmelse giver `advarsel` og en alarm).
 
 ## Steamgears Autopilot-bro (WordPress-plugin 7.5+)
 Command Center og WordPress-pluginnet **Steamgears Autopilot** snakker sammen via pluginnets REST-API
@@ -3944,6 +4083,19 @@ curl -H "Authorization: Bearer <TOKEN>" -H "Accept: application/vnd.github.raw" 
 ```
 
 Eller med Docker: `cp .env.example .env && docker compose up -d --build`
+
+### Udvikling
+`install.sh` er genereret — rediger aldrig fil-kopierne inde i den. Ret i stedet
+`scripts/installer.template.sh` (shell-flowet) eller selve filen i repoet (fx `app/main.py`), og kør:
+
+```bash
+python3 scripts/build_installer.py          # skriv install.sh
+python3 scripts/build_installer.py --check  # fejl hvis den er foraeldet (koeres i CI)
+```
+
+Tests som CI koerer: `bash tests/ci_check.sh`, `python3 tests/test_v8_features.py` og
+`python3 tests/test_config_drift.py`. Den sidste kraever kun Python og fejler, hvis koden
+laeser en miljoevariabel som `.env.example` ikke dokumenterer.
 
 ## Opsaetning
 1. `cp .env.example .env` og udfyld noegler
@@ -3974,7 +4126,10 @@ Eller med Docker: `cp .env.example .env && docker compose up -d --build`
 - **Flesch-lesbarhed** (Hemingway-kopi) i hver side-audit
 
 ## Sikkerhed
-- `APP_TOKEN` = login til hele UI'et og noeglen til Juno-broerne (header `X-CC-Token`)
+- `APP_TOKEN` = login til hele UI'et og noeglen scripts bruger i headeren `X-CC-Token`
+- Login saetter en session-cookie `cc_sid` (HttpOnly, SameSite=lax, Secure bag HTTPS) — den raa token ligger ikke i browseren. Sessioner gemmes som sha256 i tabellen `auth_sessions` og udloeber efter 30 dage
+- `POST /logout` sletter sessionen i DB og cookien (GET afvises med 405)
+- `JUNO_TOKEN` = separat noegle til Juno: kun `/api/*`, kun laese-kald + bridge-push
 - Default binding er 127.0.0.1 — saet aldrig `0.0.0.0` uden reverse proxy + auth
 EOF_README
 

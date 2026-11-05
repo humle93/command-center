@@ -70,6 +70,35 @@ j = h.json()
 check("health: 200 with db_write, disk and budget", h.status_code == 200 and j["db_write"] is True and j["disk_used_pct"] is not None
       and j["budget"]["serpapi"] == {"used": 3, "limit": 3} and j["version"] == main.APP_VERSION, j)
 
+# --- login-haerdning: session-id i cookien, Secure ved HTTPS, POST /logout ---
+main.APP_TOKEN = "test-token-123"
+c2 = TestClient(main.app)
+check("login: uautentificeret UI -> 303 til /login", c2.get("/", follow_redirects=False).status_code == 303)
+check("login: uautentificeret API -> 401", c2.get("/api/redirects", follow_redirects=False).status_code == 401)
+r = c2.post("/login", data={"token": "test-token-123"}, follow_redirects=False)
+sc = r.headers.get("set-cookie", "")
+sid = c2.cookies.get("cc_sid") or ""
+check("login: korrekt token giver 303 + session-cookie uden den raa token",
+      r.status_code == 303 and "cc_sid=" in sc and sid and sid != "test-token-123" and "httponly" in sc.lower(), sc)
+check("login: session-cookien giver adgang", c2.get("/api/redirects").status_code == 200)
+with main.get_db() as db:
+    row = db.execute("SELECT sid_hash FROM auth_sessions").fetchone()
+check("login: DB gemmer kun sha256 af session-id",
+      bool(row) and row["sid_hash"] == main._hash_session(sid) and row["sid_hash"] != sid, row)
+check("logout: GET -> 405 (et link kan ikke logge ud)", c2.get("/logout", follow_redirects=False).status_code == 405)
+check("logout: POST -> 303 og cookien holder op med at virke",
+      c2.post("/logout", follow_redirects=False).status_code == 303
+      and c2.get("/", follow_redirects=False).status_code == 303)
+with main.get_db() as db:
+    left = db.execute("SELECT COUNT(*) FROM auth_sessions").fetchone()[0]
+check("logout: sessionen er slettet i DB", left == 0, left)
+r = c2.post("/login", data={"token": "test-token-123"}, headers={"X-Forwarded-Proto": "https"}, follow_redirects=False)
+check("login: Secure-flag naar X-Forwarded-Proto er https",
+      "secure" in r.headers.get("set-cookie", "").lower(), r.headers.get("set-cookie"))
+check("login: X-CC-Token header virker fortsat for scripts",
+      TestClient(main.app).get("/api/redirects", headers={"X-CC-Token": "test-token-123"}).status_code == 200)
+main.APP_TOKEN = ""
+
 srv.shutdown()
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)
 print("ALL PASS" if not FAILED else f"{len(FAILED)} FAILED")

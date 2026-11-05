@@ -314,6 +314,12 @@ def init_db():
             top_domains TEXT,
             created_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+            sid_hash TEXT PRIMARY KEY,
+            created_at TEXT,
+            expires_at TEXT,
+            ip TEXT
+        );
         """)
 
 
@@ -406,15 +412,66 @@ def cleanup_old_data():
         db.execute("DELETE FROM alarms WHERE resolved=1 AND created_at < datetime('now', '-30 days')")
         db.execute("DELETE FROM health_history WHERE checked_at < datetime('now', '-180 days')")
         db.execute("DELETE FROM keyword_ideas WHERE created_at < datetime('now', '-180 days')")
+        db.execute("DELETE FROM auth_sessions WHERE expires_at < ?", (now_iso(),))
 
 
 # ---------- Auth ----------
+SESSION_COOKIE = "cc_sid"   # v8.0: cookien indeholder et session-id, ikke selve APP_TOKEN
+SESSION_DAYS = 30
+
+
+def _hash_session(sid: str) -> str:
+    """Session-id gemmes kun som SHA-256 — en laekket database giver ikke gyldige cookies."""
+    return hashlib.sha256(sid.encode("utf-8")).hexdigest()
+
+
+def create_session(ip: str = "") -> str:
+    """Opret en session og returnér det id, der skal i cookien."""
+    sid = secrets.token_urlsafe(32)
+    expires = (datetime.now() + timedelta(days=SESSION_DAYS)).isoformat(timespec="seconds")
+    with get_db() as db:
+        db.execute("DELETE FROM auth_sessions WHERE expires_at < ?", (now_iso(),))
+        db.execute(
+            "INSERT INTO auth_sessions (sid_hash, created_at, expires_at, ip) VALUES (?, ?, ?, ?)",
+            (_hash_session(sid), now_iso(), expires, ip[:64]),
+        )
+    return sid
+
+
+def session_valid(sid: str) -> bool:
+    if not sid:
+        return False
+    try:
+        with get_db() as db:
+            row = db.execute(
+                "SELECT 1 FROM auth_sessions WHERE sid_hash = ? AND expires_at > ?",
+                (_hash_session(sid), now_iso()),
+            ).fetchone()
+        return row is not None
+    except Exception:
+        return False  # auth fejler lukket, ikke aabent
+
+
 def is_authed(request: Request) -> bool:
     if not APP_TOKEN:
         return True
+    # Scripts/curl bruger den raa token i headeren; browseren bruger et session-id i cookien.
     # Constant-time comparison so the token cannot be guessed from response timing.
-    supplied = request.cookies.get("cc_token") or request.headers.get("x-cc-token") or ""
-    return secrets.compare_digest(supplied, APP_TOKEN)
+    supplied = request.headers.get("x-cc-token") or ""
+    if supplied and secrets.compare_digest(supplied, APP_TOKEN):
+        return True
+    return session_valid(request.cookies.get(SESSION_COOKIE) or "")
+
+
+def _cookie_secure(request: Request) -> bool:
+    """Secure-flag paa cookien naar forbindelsen er HTTPS.
+
+    Bevidst ikke ubetinget: run.sh koerer http://127.0.0.1, og en Secure-cookie bliver
+    ikke sendt tilbage over ren HTTP — login ville loope. Terminerer en reverse proxy
+    TLS, staar det i X-Forwarded-Proto.
+    """
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "")
+    return proto.split(",")[0].strip().lower() == "https"
 
 
 def is_juno(request: Request) -> bool:
@@ -454,8 +511,21 @@ async def login(request: Request):
     form = await request.form()
     token = (form.get("token") or "").strip()
     if APP_TOKEN and secrets.compare_digest(token, APP_TOKEN):
+        try:
+            sid = create_session(ip)
+        except Exception as exc:
+            print("[cc] kunne ikke oprette session:", repr(exc), flush=True)
+            return templates.TemplateResponse(
+                "login.html",
+                {"request": request, "error": "Kunne ikke oprette session - se serverlog"},
+                status_code=500,
+            )
         resp = RedirectResponse("/", status_code=303)
-        resp.set_cookie("cc_token", token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30)
+        resp.set_cookie(
+            SESSION_COOKIE, sid, httponly=True, samesite="lax",
+            secure=_cookie_secure(request), max_age=60 * 60 * 24 * SESSION_DAYS,
+        )
+        resp.delete_cookie("cc_token")  # v8.0: den raa token skal ikke ligge i browseren
         _LOGIN_FAILS.pop(ip, None)
         return resp
     fails += 1
@@ -466,9 +536,18 @@ async def login(request: Request):
     return templates.TemplateResponse("login.html", {"request": request, "error": "Forkert token"}, status_code=401)
 
 
-@app.get("/logout")
-async def logout():
+@app.post("/logout")
+async def logout(request: Request):
+    """Log ud: sletter sessionen i DB og cookien. POST, saa et link ikke kan logge dig ud."""
+    sid = request.cookies.get(SESSION_COOKIE) or ""
+    if sid:
+        try:
+            with get_db() as db:
+                db.execute("DELETE FROM auth_sessions WHERE sid_hash = ?", (_hash_session(sid),))
+        except Exception:
+            pass
     resp = RedirectResponse("/login", status_code=303)
+    resp.delete_cookie(SESSION_COOKIE)
     resp.delete_cookie("cc_token")
     return resp
 

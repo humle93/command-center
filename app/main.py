@@ -54,7 +54,7 @@ SSL_WARN_DAYS = int(os.environ.get("SSL_WARN_DAYS", "30"))
 LINKCHECK_LIMIT = int(os.environ.get("LINKCHECK_LIMIT", "25"))
 PSI_API_KEY = os.environ.get("PSI_API_KEY", "").strip()   # Google PageSpeed API (gratis noegle)
 
-APP_VERSION = "7.10.0"
+APP_VERSION = "7.11.0"
 app = FastAPI(title="Command Center Engine", version=APP_VERSION)
 # Git does not keep empty folders, so a fresh clone has no app/static: create it or startup fails.
 os.makedirs(STATIC_DIR, exist_ok=True)
@@ -78,6 +78,8 @@ def load_dotenv(path=None):
 
 load_dotenv()
 APP_TOKEN = os.environ.get("APP_TOKEN", "").strip()
+# v7.11: uden APP_TOKEN er hele dashboardet aabent. Det kraever nu eksplicit opt-in (se enforce_auth_config).
+CC_ALLOW_NO_AUTH = os.environ.get("CC_ALLOW_NO_AUTH", "").strip() == "1"
 AIMLAPI_KEY = os.environ.get("AIMLAPI_KEY", "").strip()
 WP_URL = os.environ.get("WP_URL", "").strip()
 WP_USER = os.environ.get("WP_USER", "").strip()
@@ -422,21 +424,168 @@ def is_juno(request: Request) -> bool:
     return bool(JUNO_TOKEN) and request.headers.get("x-cc-token") == JUNO_TOKEN
 
 
+# ---------- v7.11: CSRF + sikkerhedsheaders ----------
+CSRF_COOKIE = "cc_csrf"
+CSRF_HEADER = "x-csrf-token"
+CSRF_FIELD = "csrf_token"
+CSRF_MAX_AGE = 60 * 60 * 24 * 30
+SAFE_METHODS = ("GET", "HEAD", "OPTIONS", "TRACE")
+CSRF_EXEMPT = ("/login",)  # ingen session at kapre endnu, og routen er rate-limitet
+# CSP'en tillader de CDN'er dashboardet bruger (Tailwind, Alpine, Chart.js). Alpine kraever 'unsafe-eval',
+# og Tailwind-CDN'en injicerer styles - derfor 'unsafe-inline' paa script/style.
+CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: https:; "
+    "font-src 'self' data:; "
+    "connect-src 'self'; "
+    "frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+)
+
+
+def new_csrf_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def add_security_headers(request: Request, resp) -> None:
+    """Sikkerhedsheaders paa alle svar (v7.11)."""
+    headers = resp.headers
+    headers.setdefault("Content-Security-Policy", CSP)
+    headers.setdefault("X-Content-Type-Options", "nosniff")
+    headers.setdefault("X-Frame-Options", "DENY")
+    headers.setdefault("Referrer-Policy", "same-origin")
+    headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+    headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    if request.headers.get("x-forwarded-proto", request.url.scheme) == "https":
+        headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+
+
+def cookie_value(cookie_header: str, name: str) -> str:
+    for part in (cookie_header or "").split(";"):
+        key, _, val = part.strip().partition("=")
+        if key == name:
+            return val
+    return ""
+
+
+def form_value(content_type: str, body: bytes, name: str) -> str:
+    """CSRF-token fra et almindeligt HTML-formular-post (kun urlencoded; UI'et har ingen fil-uploads)."""
+    if not (content_type or "").lower().startswith("application/x-www-form-urlencoded"):
+        return ""
+    try:
+        return (urllib.parse.parse_qs(body.decode("utf-8", "replace")).get(name) or [""])[0]
+    except Exception:
+        return ""
+
+
+async def read_body(receive):
+    """Laes hele request-body og returner (body, receive der kan afspilles igen).
+
+    Body skal buffers i middlewaren, ellers er den brugt op naar ruten selv laeser form/json.
+    """
+    chunks = []
+    while True:
+        msg = await receive()
+        if msg["type"] == "http.disconnect":
+            break
+        chunks.append(msg.get("body", b""))
+        if not msg.get("more_body", False):
+            break
+    body = b"".join(chunks)
+    state = {"replayed": False}
+
+    async def replay():
+        if not state["replayed"]:
+            state["replayed"] = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return await receive()
+
+    return body, replay
+
+
+async def reject_csrf(send, wants_json: bool) -> None:
+    if wants_json:
+        payload = jsonlib.dumps({"error": "csrf", "message": "Manglende eller ugyldig CSRF-token - genindlaes siden"}).encode()
+        ctype = "application/json"
+    else:
+        payload = (
+            "<!DOCTYPE html><html lang=\"da\"><head><meta charset=\"utf-8\"><title>403</title></head>"
+            "<body style=\"font-family:system-ui;background:#09090b;color:#e4e4e7;padding:3rem\">"
+            "<h1 style=\"font-size:1.1rem\">403 - CSRF-token afvist</h1>"
+            "<p style=\"color:#a1a1aa;font-size:.9rem\">Genindlaes dashboardet og proev igen.</p>"
+            "<p><a href=\"/\" style=\"color:#34d399\">Tilbage</a></p></body></html>"
+        ).encode()
+        ctype = "text/html; charset=utf-8"
+    await send({
+        "type": "http.response.start",
+        "status": 403,
+        "headers": [
+            (b"content-type", ctype.encode()),
+            (b"content-length", str(len(payload)).encode()),
+            (b"content-security-policy", CSP.encode()),
+            (b"x-content-type-options", b"nosniff"),
+            (b"x-frame-options", b"DENY"),
+            (b"referrer-policy", b"same-origin"),
+        ],
+    })
+    await send({"type": "http.response.body", "body": payload})
+
+
+class CSRFMiddleware:
+    """Double-submit-CSRF (v7.11): cc_csrf-cookien skal matche X-CSRF-Token eller csrf_token-feltet.
+
+    Gaelder kun cookie-baserede kald. Klienter der autentificerer med x-cc-token/Authorization
+    (Juno, CI, scripts) kan ikke rammes af CSRF og slippes uaendret igennem.
+    """
+
+    def __init__(self, app_):
+        self.app = app_
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] in SAFE_METHODS or not APP_TOKEN:
+            return await self.app(scope, receive, send)
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        path = scope.get("path", "")
+        if (path.startswith(CSRF_EXEMPT) or headers.get("x-cc-token")
+                or headers.get("authorization", "").lower().startswith("bearer ")):
+            return await self.app(scope, receive, send)
+        body, replay = await read_body(receive)
+        cookie = cookie_value(headers.get("cookie", ""), CSRF_COOKIE)
+        submitted = headers.get(CSRF_HEADER) or form_value(headers.get("content-type", ""), body, CSRF_FIELD)
+        if cookie and submitted and secrets.compare_digest(cookie, submitted):
+            return await self.app(scope, replay, send)
+        wants_json = path.startswith("/api/") or "application/json" in headers.get("accept", "")
+        return await reject_csrf(send, wants_json)
+
+
+app.add_middleware(CSRFMiddleware)
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
     request.state.insecure = (request.headers.get("x-forwarded-proto", "https") == "http" and (request.client.host if request.client else "") not in ("127.0.0.1", "::1"))
     public = ("/login", "/health", "/static")
+    denied = None
     if APP_TOKEN and not any(path.startswith(p) for p in public) and not is_authed(request):
         if path.startswith("/api/") and is_juno(request):
             juno_forbidden = ("/api/bridge", "/api/duplicates", "/api/visibility", "/api/health-history")
             if request.method != "GET" and any(path.startswith(fp) for fp in juno_forbidden) and not (path == "/api/bridge/gsc" or path == "/api/bridge/drift"):
-                return JSONResponse({"error": "juno-token: kun GET eller bridge-push"}, status_code=403)  # Juno-token har adgang til API-endpoints (inkl. bridge-push)
+                denied = JSONResponse({"error": "juno-token: kun GET eller bridge-push"}, status_code=403)  # Juno-token har adgang til API-endpoints (inkl. bridge-push)
         elif path.startswith("/api/"):
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
+            denied = JSONResponse({"error": "unauthorized"}, status_code=401)
         else:
-            return RedirectResponse("/login", status_code=303)
-    return await call_next(request)
+            denied = RedirectResponse("/login", status_code=303)
+    if denied is not None:
+        add_security_headers(request, denied)
+        return denied
+    resp = await call_next(request)
+    add_security_headers(request, resp)
+    # v7.11: cookie-flowet skal altid have en CSRF-token - ogsaa for sessioner oprettet foer opgraderingen.
+    if APP_TOKEN and is_authed(request) and not request.cookies.get(CSRF_COOKIE):
+        resp.set_cookie(CSRF_COOKIE, new_csrf_token(), httponly=False, samesite="lax", max_age=CSRF_MAX_AGE)
+    return resp
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -456,6 +605,8 @@ async def login(request: Request):
     if APP_TOKEN and secrets.compare_digest(token, APP_TOKEN):
         resp = RedirectResponse("/", status_code=303)
         resp.set_cookie("cc_token", token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30)
+        # v7.11: CSRF-token laesbar for dashboardets JS (double-submit) - ikke hemmelig, kun bundet til cookien.
+        resp.set_cookie(CSRF_COOKIE, new_csrf_token(), httponly=False, samesite="lax", max_age=CSRF_MAX_AGE)
         _LOGIN_FAILS.pop(ip, None)
         return resp
     fails += 1
@@ -470,6 +621,7 @@ async def login(request: Request):
 async def logout():
     resp = RedirectResponse("/login", status_code=303)
     resp.delete_cookie("cc_token")
+    resp.delete_cookie(CSRF_COOKIE)
     return resp
 
 
@@ -2828,8 +2980,19 @@ async def job_check_keywords():
     await loop.run_in_executor(executor, check_all_keywords_sync)
 
 
+def enforce_auth_config() -> None:
+    """v7.11: uden APP_TOKEN er dashboardet helt aabent - det kraever nu eksplicit opt-in."""
+    if APP_TOKEN or CC_ALLOW_NO_AUTH:
+        return
+    print("\n[cc] APP_TOKEN mangler: dashboardet ville koere uden login.\n"
+          "     Saet APP_TOKEN i .env (anbefalet), eller CC_ALLOW_NO_AUTH=1 for bevidst lokal koersel uden auth.\n",
+          flush=True)
+    raise RuntimeError("APP_TOKEN mangler (saet CC_ALLOW_NO_AUTH=1 for at koere uden login)")
+
+
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
+    enforce_auth_config()
     try:
         scheduler.add_job(job_check_domains, IntervalTrigger(hours=6), id="domain_checks", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_check_keywords, CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True, max_instances=1, coalesce=True)

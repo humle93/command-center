@@ -1,4 +1,4 @@
-# Command Center v7.10 PRO
+# Command Center v7.11 PRO
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 
@@ -22,6 +22,11 @@ Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Y
 - **Kvalitetsgate**: autopilot-artikler sendes kun til WordPress, hvis de har nok ord (min. `QUALITY_MIN_WORDS`, eller 80 % af SERP-gennemsnittet fra Content Gap), indeholder fokus-keywordet og har mindst 2 H2. Ellers status "Stoppet af kvalitetsgate" + alarm. Manuel push er tilladt, men giver en info-alarm. Faerre end 2 interne links giver kun en advarsel.
 - **API-budget**: hvert kald til SerpAPI og aimlapi taelles pr. maaned; ved `SERPAPI_MONTHLY_LIMIT` / `AI_MONTHLY_LIMIT` stoppes kaldene til den 1. Alarm (og Telegram) ved 80 % og 100 %.
 - **/health**: tester at databasen kan skrive og hvor fuld disken er (advarsel ≥ 80 %, kritisk ≥ 90 % → HTTP 503) og viser maanedens API-forbrug.
+
+## v7.11 – Sikkerhed
+- **CSRF-beskyttelse**: alle POST-ruter kraever en `cc_csrf`-cookie der matcher `X-CSRF-Token`-headeren eller `csrf_token`-feltet (double-submit). Dashboardets formularer og `fetch`-kald saetter den selv. Kald med `X-CC-Token` (Juno, CI, scripts) er upaavirkede, fordi de ikke er cookie-baserede.
+- **Eksplicit opt-in uden login**: mangler `APP_TOKEN`, naegter appen at starte — saet `CC_ALLOW_NO_AUTH=1` for bevidst lokal koersel uden auth.
+- **Sikkerhedsheaders**: CSP (kun selv + Tailwind/Alpine/Chart.js-CDN), `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy`, `Permissions-Policy`, `Cross-Origin-Opener-Policy` og HSTS bag HTTPS-proxy.
 
 ## Steamgears Autopilot-bro (WordPress-plugin 7.5+)
 Command Center og WordPress-pluginnet **Steamgears Autopilot** snakker sammen via pluginnets REST-API

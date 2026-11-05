@@ -21,7 +21,7 @@ Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Y
 ## v7.10 – fra v8-planen (Drive)
 - **Kvalitetsgate**: autopilot-artikler sendes kun til WordPress, hvis de har nok ord (min. `QUALITY_MIN_WORDS`, eller 80 % af SERP-gennemsnittet fra Content Gap), indeholder fokus-keywordet og har mindst 2 H2. Ellers status "Stoppet af kvalitetsgate" + alarm. Manuel push er tilladt, men giver en info-alarm. Faerre end 2 interne links giver kun en advarsel.
 - **API-budget**: hvert kald til SerpAPI og aimlapi taelles pr. maaned; ved `SERPAPI_MONTHLY_LIMIT` / `AI_MONTHLY_LIMIT` stoppes kaldene til den 1. Alarm (og Telegram) ved 80 % og 100 %.
-- **/health**: tester at databasen kan skrive og hvor fuld disken er (advarsel ≥ 80 %, kritisk ≥ 90 % → HTTP 503) og viser maanedens API-forbrug.
+- **/health**: tester at databasen kan skrive og hvor fuld disken er (advarsel ≥ 80 %, kritisk ≥ 90 % → HTTP 503), viser maanedens API-forbrug og schema-versionen (`schema_version`, `schema_version_expected`, `schema_ok` — manglende overensstemmelse giver `advarsel` og en alarm).
 
 ## Steamgears Autopilot-bro (WordPress-plugin 7.5+)
 Command Center og WordPress-pluginnet **Steamgears Autopilot** snakker sammen via pluginnets REST-API
@@ -41,6 +41,19 @@ curl -H "Authorization: Bearer <TOKEN>" -H "Accept: application/vnd.github.raw" 
 ```
 
 Eller med Docker: `cp .env.example .env && docker compose up -d --build`
+
+### Udvikling
+`install.sh` er genereret — rediger aldrig fil-kopierne inde i den. Ret i stedet
+`scripts/installer.template.sh` (shell-flowet) eller selve filen i repoet (fx `app/main.py`), og kør:
+
+```bash
+python3 scripts/build_installer.py          # skriv install.sh
+python3 scripts/build_installer.py --check  # fejl hvis den er foraeldet (koeres i CI)
+```
+
+Tests som CI koerer: `bash tests/ci_check.sh`, `python3 tests/test_v8_features.py` og
+`python3 tests/test_config_drift.py`. Den sidste kraever kun Python og fejler, hvis koden
+laeser en miljoevariabel som `.env.example` ikke dokumenterer.
 
 ## Opsaetning
 1. `cp .env.example .env` og udfyld noegler
@@ -71,5 +84,8 @@ Eller med Docker: `cp .env.example .env && docker compose up -d --build`
 - **Flesch-lesbarhed** (Hemingway-kopi) i hver side-audit
 
 ## Sikkerhed
-- `APP_TOKEN` = login til hele UI'et og noeglen til Juno-broerne (header `X-CC-Token`)
+- `APP_TOKEN` = login til hele UI'et og noeglen scripts bruger i headeren `X-CC-Token`
+- Login saetter en session-cookie `cc_sid` (HttpOnly, SameSite=lax, Secure bag HTTPS) — den raa token ligger ikke i browseren. Sessioner gemmes som sha256 i tabellen `auth_sessions` og udloeber efter 30 dage
+- `POST /logout` sletter sessionen i DB og cookien (GET afvises med 405)
+- `JUNO_TOKEN` = separat noegle til Juno: kun `/api/*`, kun laese-kald + bridge-push
 - Default binding er 127.0.0.1 — saet aldrig `0.0.0.0` uden reverse proxy + auth

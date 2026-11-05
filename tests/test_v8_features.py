@@ -741,6 +741,43 @@ check("agent+skill: ingen hemmeligheder i filerne",
 check("agents: alle filer er danske/ascii (ingen utilsigtet fremmed tekst)",
       not any(_re.search(r"[\u4e00-\u9fff]", t) for t in (manifest, skill, *texts.values())))
 
+# --- v7.18: standardbrugeren oprettes ved opstart fra .env ---
+with main.get_db() as db:
+    db.execute("DELETE FROM sessions"); db.execute("DELETE FROM login_attempts"); db.execute("DELETE FROM users")
+os.environ.update(CC_ADMIN_EMAIL="standard@example.dk", CC_ADMIN_PASSWORD="standard-pass")
+check("standardbruger: oprettes fra .env naar der ingen brugere er",
+      main.seed_standard_user() == "oprettet" and main.user_count() == 1, main.user_count())
+std = main.find_user("standard@example.dk")
+check("standardbruger: koden fra .env virker",
+      bool(std) and main.verify_password("standard-pass", std["password_hash"]), std and dict(std))
+check("standardbruger: koden er hashet, ikke gemt i klartekst",
+      bool(std) and std["password_hash"].startswith("pbkdf2_sha256$") and "standard-pass" not in std["password_hash"])
+check("standardbruger: skal skiftes ved foerste login",
+      bool(std) and std["must_change_password"] == 1, std and dict(std))
+sd = TestClient(main.app)
+check("standardbruger: login virker med det samme (uden /setup)",
+      sd.post("/login", data={"email": "standard@example.dk", "password": "standard-pass"},
+              follow_redirects=False).status_code == 303)
+check("standardbruger: /setup er lukket for anonyme, naar brugeren findes",
+      TestClient(main.app).get("/setup", follow_redirects=False).status_code == 303)
+os.environ["CC_ADMIN_PASSWORD"] = "andet-pass-1"
+check("standardbruger: en rettet .env-kode roerer ikke en konto i brug",
+      main.seed_standard_user() == "findes"
+      and main.verify_password("standard-pass", main.find_user("standard@example.dk")["password_hash"])
+      and main.user_count() == 1)
+os.environ.update(CC_ADMIN_EMAIL="", CC_ADMIN_PASSWORD="")
+check("standardbruger: uden linjer i .env sker der intet (setup bruges)",
+      main.seed_standard_user() == "mangler" and main.user_count() == 1)
+with main.get_db() as db:
+    db.execute("DELETE FROM users")
+os.environ.update(CC_ADMIN_EMAIL="ikke-en-mail", CC_ADMIN_PASSWORD="kort-kode")
+broken = main.seed_standard_user()
+with main.get_db() as db:
+    warned = db.execute("SELECT COUNT(*) FROM alarms WHERE message LIKE '%Standardbrugeren i .env blev afvist%'").fetchone()[0]
+check("standardbruger: ugyldig .env-linje giver ingen konto, men en alarm",
+      broken.startswith("fejl:") and main.user_count() == 0 and warned >= 1, (broken, warned))
+os.environ.update(CC_ADMIN_EMAIL="", CC_ADMIN_PASSWORD="")
+
 srv.shutdown()
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)
 print("ALL PASS" if not FAILED else f"{len(FAILED)} FAILED")

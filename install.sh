@@ -24,9 +24,10 @@ EOF_REQ
 echo "📄 .env.example..."
 cat << 'EOF_ENVDOT' > "$PROJECT_DIR/.env.example"
 # Command Center - kopier til .env og udfyld (hele listen staar i README og i manualen)
-# Login: der er ingen token. Foerste besoeg i browseren opretter din bruger (/setup) med e-mail,
-# derefter logger du ind med e-mail + adgangskode. Nye brugere inviteres paa mail under fanen
-# "Brugere" og kraever SMTP_HOST + SMTP_FROM nedenfor.
+# Login: der er ingen token. Udfyld CC_ADMIN_EMAIL + CC_ADMIN_PASSWORD nedenfor, saa oprettes
+# standardbrugeren ved opstart (efter deployment), og du logger ind med den med det samme.
+# Er de to linjer tomme, opretter foerste besoeg brugeren via /setup som reserve. Nye brugere
+# inviteres paa mail under fanen "Brugere" og kraever SMTP_HOST + SMTP_FROM nedenfor.
 # Hvor run.sh lytter. 127.0.0.1 = kun denne maskine; 0.0.0.0 = ogsaa fra netvaerket (kraever TLS/proxy).
 CC_HOST=127.0.0.1
 CC_PORT=8000
@@ -41,6 +42,13 @@ CC_PORT=8000
 # Tom betyder "kun lokal": login-linket bliver http://127.0.0.1:8000/login, og Host-tjekket paa
 # /mcp slaaes HELT fra - det er kun OK paa en maskine, ingen andre kan naa.
 CC_PUBLIC_URL=
+# Standardbruger oprettet ved opstart (kun naar der ikke findes brugere i databasen).
+# Kontoen faar must_change_password, saa koden her kun bruges til det foerste login - derefter
+# skifter du den under fanen Brugere. Klartekst staar kun i .env (.env committes aldrig).
+# Tomme linjer = ingen standardbruger; foerste besoeg opretter brugeren via /setup i stedet.
+# Bemaerk: en senere aendring af linjerne rorer ikke en konto, der allerede findes.
+CC_ADMIN_EMAIL=
+CC_ADMIN_PASSWORD=
 # Stoler paa X-Forwarded-* fra disse IP'er (nginx paa samme maskine = 127.0.0.1).
 CC_FORWARDED_ALLOW_IPS=127.0.0.1
 # Tidszone for planlagte opslag. Tiden gemmes som lokal tid OG UTC; ukendt zone -> Europe/Copenhagen.
@@ -209,10 +217,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.17.2"
+APP_VERSION = "7.18.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.18.0", "Standardbrugeren oprettes ved opstart fra CC_ADMIN_EMAIL + CC_ADMIN_PASSWORD - /setup er kun reserve"),
     ("7.17.2", "Invitationen viser selv om mailen blev sendt - foer laa fejlen kun under Alarmer"),
     ("7.17.1", "MCP-noeglen ligger ikke laengere i klartekst i DB'en, og ukendte vaerktoejer havner i auditten"),
     ("7.17.0", "MCP fase 2: skrivende vaerktoejer med write-scope og audit pr. noegle"),
@@ -227,7 +236,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Invitationen viser resultatet med det samme - og MCP-noeglen ligger ikke laengere i klartekst"
+NEWEST_LINE = "Standardbrugeren kommer fra .env ved opstart - /setup bruges kun, naar .env ikke har de to linjer"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -770,6 +779,45 @@ def create_user(email: str, password: str, must_change: bool = False, username: 
             "VALUES (?,?,?,?,?)",
             (email, (username or None), hash_password(password), 1 if must_change else 0, now_iso()))
         return cur.lastrowid
+
+
+# --- Standardbruger fra .env (v7.18) ---
+# Et nyt deployment skal kunne logge ind med det samme: staar CC_ADMIN_EMAIL + CC_ADMIN_PASSWORD i
+# .env, oprettes kontoen ved opstart. Klartekst findes kun i .env - her gemmes PBKDF2-hashen.
+# Der seedes kun, naar der ingen brugere er, saa en rettet .env-kode ikke rorer en konto i brug.
+ADMIN_EMAIL_ENV = "CC_ADMIN_EMAIL"
+ADMIN_PASSWORD_ENV = "CC_ADMIN_PASSWORD"
+
+
+def standard_user_settings() -> tuple:
+    """(e-mail, adgangskode) fra .env - tomme strenge naar linjerne ikke er udfyldt."""
+    return (os.environ.get(ADMIN_EMAIL_ENV, "").strip(),
+            os.environ.get(ADMIN_PASSWORD_ENV, ""))
+
+
+def seed_standard_user() -> str:
+    """Opretter standardbrugeren fra .env. Returnerer en kort status til opstartsloggen.
+
+    "oprettet" = kontoen blev lavet nu, "findes" = der var allerede brugere (roeres ikke),
+    "mangler" = .env har ikke begge linjer (saa bruges /setup som foer), "fejl: ..." = afvist.
+    Kontoen oprettes med must_change_password, saa koden fra .env skal skiftes ved foerste login.
+    """
+    email, password = standard_user_settings()
+    if not email or not password:
+        return "mangler"
+    if user_count() > 0:
+        return "findes"
+    try:
+        create_user(email, password, must_change=True)
+    except ValueError as e:
+        with get_db() as db:
+            add_alarm(db, "brugere", f"Standardbrugeren i .env blev afvist: {str(e)[:160]}", "advarsel")
+        return f"fejl: {e}"
+    except sqlite3.IntegrityError:
+        return "findes"
+    with get_db() as db:
+        add_alarm(db, "brugere", f"Standardbrugeren '{email}' oprettet ved opstart fra .env", "info")
+    return "oprettet"
 
 
 def find_user(identifier: str):
@@ -4656,6 +4704,12 @@ async def lifespan(app_: FastAPI):
     except Exception:
         pass
     try:
+        seed_status = seed_standard_user()
+        if seed_status not in ("findes", "mangler"):
+            print(f"[cc] standardbruger ({ADMIN_EMAIL_ENV}): {seed_status}", flush=True)
+    except Exception as e:
+        print("[cc] standardbruger kunne ikke oprettes:", repr(e), flush=True)
+    try:
         scheduler.add_job(job_check_domains, IntervalTrigger(hours=6), id="domain_checks", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_check_keywords, CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_growth_autopilot, CronTrigger(hour=5, minute=15), id="growth_autopilot", replace_existing=True, max_instances=1, coalesce=True)
@@ -5901,7 +5955,7 @@ cat << 'EOF_LOGIN' > "$PROJECT_DIR/app/templates/login.html"
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Command Center — {{ 'Opret bruger' if mode == 'setup' else 'Log ind' }}</title>
+    <title>Command Center — {{ 'Opret foerste bruger' if mode == 'setup' else 'Log ind' }}</title>
     <style>
       /* Ingen CDN'er: login-siden skal virke og se ens ud uden internetadgang. */
       :root { color-scheme: dark; }
@@ -5925,6 +5979,8 @@ cat << 'EOF_LOGIN' > "$PROJECT_DIR/app/templates/login.html"
       button:focus-visible { outline: 2px solid #34d399; outline-offset: 2px; }
       .error { margin: 0 0 6px; padding: 9px 11px; font-size: 12px; color: #fda4af;
                background: rgba(244,63,94,.09); border: 1px solid rgba(244,63,94,.35); border-radius: 10px; }
+      .setup { margin: 0 0 14px; padding: 9px 11px; font-size: 12px; color: #fbbf24;
+               background: rgba(251,191,36,.08); border: 1px solid rgba(251,191,36,.3); border-radius: 10px; }
       .foot { margin: 16px 0 0; font-size: 11px; color: #71717a; text-align: center; }
       .report { margin: 20px 0 0; padding: 12px 14px; background: #09090b; border: 1px solid #27272a; border-radius: 12px; }
       .report .row { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; padding: 3px 0; color: #a1a1aa; }
@@ -5936,7 +5992,10 @@ cat << 'EOF_LOGIN' > "$PROJECT_DIR/app/templates/login.html"
 <div class="card">
     <h1>⚡ COMMAND CENTER</h1>
     {% if mode == 'setup' %}
-    <p class="sub">Foerste start: opret din bruger med din e-mail og en adgangskode.</p>
+    <p class="sub">Der findes ingen brugere endnu - opret den foerste nedenfor.</p>
+    <p class="setup">Vil du hellere have standardbrugeren automatisk? Skriv CC_ADMIN_EMAIL og
+      CC_ADMIN_PASSWORD i <code>.env</code> og genstart appen - saa oprettes kontoen ved opstart,
+      og denne side bruges ikke.</p>
     {% else %}
     <p class="sub">Log ind med din e-mail og adgangskode.</p>
     {% endif %}
@@ -5958,7 +6017,7 @@ cat << 'EOF_LOGIN' > "$PROJECT_DIR/app/templates/login.html"
     <div class="report">
       <div class="row"><span>Version</span><b>v{{ report.version }}{% if report.commit %} · {{ report.commit[:7] }}{% endif %}</b></div>
       <div class="row"><span>Seneste opstart</span><b>{{ (report.last_start or '—')[0:16] }}</b></div>
-      <div class="row"><span>Åbne alarmer</span><b{% if report.alarms_open %} class="warn"{% endif %}>{{ report.alarms_open }}{% if report.alarms_critical %} ({{ report.alarms_critical }} kritiske){% endif %}</b></div>
+      <div class="row"><span>Aabne alarmer</span><b{% if report.alarms_open %} class="warn"{% endif %}>{{ report.alarms_open }}{% if report.alarms_critical %} ({{ report.alarms_critical }} kritiske){% endif %}</b></div>
       <div class="row"><span>Domæner / keywords / monitors</span><b>{{ report.domains }} / {{ report.keywords }} / {{ report.monitors }}</b></div>
       <div class="row"><span>Seneste domænetjek</span><b>{{ (report.last_domain_check or '—')[0:16] }}</b></div>
       <div class="row"><span>Seneste crawl</span><b>{{ (report.last_crawl or '—')[0:16] }}</b></div>
@@ -5968,7 +6027,7 @@ cat << 'EOF_LOGIN' > "$PROJECT_DIR/app/templates/login.html"
     </div>
     {% endif %}
     <p class="foot">Adgangskoder gemmes som PBKDF2-SHA256-hash. Sessionen varer 30 dage.<br>
-      Nye brugere inviteres af en administrator — invitationen kommer paa mail.</p>
+      Standardbrugeren oprettes ved opstart fra CC_ADMIN_EMAIL + CC_ADMIN_PASSWORD i <code>.env</code>.</p>
 </div>
 </body>
 </html>
@@ -6148,15 +6207,16 @@ EOF_USERSVC
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.17 PRO
+# Command Center v7.18 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
 
-## Nyheder i v7.17
+## Nyheder i v7.18
 
+- **Standardbruger ved deployment (v7.18)** — skriv `CC_ADMIN_EMAIL` + `CC_ADMIN_PASSWORD` i `.env`, så oprettes kontoen ved opstart, og du kan logge ind med det samme; opsætningssiden er ikke længere en del af et normalt deployment. Koden gemmes kun som PBKDF2-hash, kontoen oprettes med `must_change_password` (gul bjælke indtil du skifter den under fanen **Brugere**), og der seedes kun, når `users` er tom — en senere ændring af `.env` rører ikke en konto i brug. Er linjerne tomme, er `/setup` stadig reserven. Adgangskoden står kun i `.env` (gitignored), aldrig i repoet eller i loggen
 - **MCP-hærdning (v7.17.1)** — nøglen ligger ikke længere i klartekst i databasen: rækken i `settings` slettes i samme kald som dashboardet viser den (højst 15 min. hvis siden aldrig åbnes, og oprydningen fjerner resten). "Jeg har gemt nøglen"-knappen er derfor væk. Ukendte værktøjsnavne på `/mcp` havner nu også i auditten, så en nøgle der famler kan ses.
 - **MCP skriver nu også (fase 2)** — med `read,write` på nøglen kan en agent starte et site-crawl, oprette en monitor, løse en alarm og skrive en note (`start_crawl`, `add_monitor`, `resolve_alarm`, `add_note`). Hvert kald — også afviste — havner i en **audit pr. nøgle** (`api_audit`) med værktøj, varighed og fejl, som du ser i fanen **Brugere** og med `python3 scripts/api_key.py audit`. Værktøjerne har `readOnlyHint`/`destructiveHint`, så klienten kan advare før et kald.
 - **MCP-adgang (fase 1)** — agenter og editorer kan læse Command Center direkte. Under fanen **Brugere** opretter du en nøgle pr. klient (ingen fælles token); den vises én gang, gemmes kun som sha256 og kan tilbagekaldes enkeltvis. `POST /mcp` tilbyder syv læse-værktøjer: `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes` og `history`. Endpointet validerer `Origin`/`Host` (DNS-rebinding) og svarer `401` med `WWW-Authenticate` uden nøgle — se [docs/Command_Center_MCP.md](docs/Command_Center_MCP.md).
@@ -6196,9 +6256,9 @@ Cockpit med opdaterings-panel og alarmer. Login-siden og alle 14 faner ligger i 
 
 ## Login & opsætning
 
-1. `cp .env.example .env` og udfyld nøgler
+1. `cp .env.example .env` og udfyld nøgler — bl.a. `CC_ADMIN_EMAIL` + `CC_ADMIN_PASSWORD` til standardbrugeren, så den findes efter deployment
 2. `./run.sh` — scriptet udskriver den adresse appen lytter på (samt LAN-IP når `CC_HOST=0.0.0.0`)
-3. Åbn adressen: **første besøg opretter din bruger** (`/setup`) — derefter log ind med e-mail + adgangskode. Der er ingen token i `.env`.
+3. Åbn adressen: **standardbrugeren oprettes ved opstart**, så du logger ind med e-mail + adgangskode med det samme (koden fra `.env` skal skiftes under fanen **Brugere** ved første login). Er de to linjer tomme, opretter første besøg brugeren via `/setup` i stedet — det er reserven. Der er ingen token i `.env`.
 4. Nye brugere inviteres på mail, og sletning/adgangskode-skift klares under fanen **Brugere** (kræver `SMTP_HOST` + `SMTP_FROM`); fra serveren kan samme invitation sendes med `python3 scripts/invite.py navn@domaene.dk` — og med `--print` udskrives mailen i stedet, så den kan sendes fra en anden mailkonto når SMTP ikke er sat op. Helt uden mail kan brugeren oprettes direkte med `python3 scripts/user_create.py navn@domaene.dk --username humle91` (koden skrives skjult og skal være min. 8 tegn)
 5. (VPS) kør bag reverse proxy med TLS, eller brug `deploy/command-center.service` + SSH-tunnel
 6. Vil du have en agent på? Opret en nøgle under **Brugere → MCP-adgang** og peg klienten på `https://<din-adresse>/mcp` (se nedenfor)
@@ -6231,7 +6291,7 @@ curl -s https://<din-adresse>/mcp -H "Authorization: Bearer cc_..." \
 1. `.env`: `cp .env.example .env` og udfyld nøglerne. Sæt `CC_PUBLIC_URL` til **præcis** den adresse du åbner i browseren — med `https://`, uden anførselstegn og uden sti (`CC_PUBLIC_URL=https://humle91.ultra.cc`). Lad `CC_HOST=127.0.0.1` og `CC_FORWARDED_ALLOW_IPS=127.0.0.1` stå. `install.sh` skriver kun `.env.example`, og opdateringer rører aldrig `.env` — så linjen forbliver tom, indtil du selv udfylder den
 2. Start appen: `./run.sh`, eller `deploy/command-center.user.service` med `systemctl --user enable --now command-center`
 3. Læg `deploy/nginx-command-center.conf` ind i den `server { }` du bruger (Ultra.cc: `~/.apps/nginx/proxy.d/`), og genindlæs nginx
-4. Åbn `CC_PUBLIC_URL` — første besøg opretter din bruger
+4. Åbn `CC_PUBLIC_URL` — standardbrugeren fra `.env` kan logge ind med det samme (er linjerne tomme, opretter første besøg din bruger via `/setup`)
 
 `CC_PUBLIC_URL` styrer login-linket i `scripts/update.sh` og `scripts/user_create.py`, adressen i invitationsmailen og Host-tjekket på `/mcp`. Tjek med `bash scripts/update.sh --check`: står der `127.0.0.1` som login-adresse, er linjen tom eller skrevet forkert. Er `/mcp` utilgængelig med `421`, er det samme linje — værten skal matche ord for ord, og et sæt anførselstegn omkring værdien er nok til at ødelægge den.
 

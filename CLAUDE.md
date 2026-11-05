@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 4. november 2026 · **Version:** 7.17.2 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 5. november 2026 · **Version:** 7.18.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,27 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Standardbruger ved deployment (5. november, v7.18)
+- **Baggrund:** et nyt deployment startede på `/setup` og krævede, at nogen oprettede den første
+  bruger i browseren. Ønsket var en standardkonto, der findes efter deployment, så login er det
+  eneste, man møder.
+- **Nyt:** `seed_standard_user()` kaldes i `lifespan` (før scheduler og selvtest). Er `users` tom, og
+  har `.env` både `CC_ADMIN_EMAIL` og `CC_ADMIN_PASSWORD`, oprettes kontoen med
+  `must_change_password=1`, så koden fra `.env` skal skiftes ved første login. Status skrives til
+  opstartsloggen (`oprettet` / `findes` / `mangler` / `fejl: …`); en afvist linje giver en advarsel i
+  `alarms` i stedet for en tavs opstart.
+- **Ingen secrets i repoet:** koden læses kun fra miljøet/`.env`, gemmes som PBKDF2-hash og skrives
+  aldrig til log. `install.sh` skriver fortsat kun `.env.example`.
+- **Seed kun ved tom tabel:** en rettet `.env`-linje rører ikke en konto i brug (den skal skiftes i
+  UI'et eller med `scripts/user_create.py`), så en gammel kode i `.env` ikke kan låse nogen ude.
+- **`/setup` er reserve:** uden de to linjer opretter første besøg brugeren som før, og siden lukker
+  sig selv, så snart der findes en bruger. `login.html` er skrevet om til ét login-formular med en
+  kort note om `.env`-linjerne i stedet for en separat opsætningsmode.
+- **Tests:** `tests/test_v8_features.py` dækker seed, login uden `/setup`, hash (ingen klartekst),
+  `must_change_password`, at en rettet `.env` ikke overskriver, og at en ugyldig linje giver alarm;
+  `tests/ci_check.sh` tjekker at `/setup` svarer 303, når brugeren findes.
+
 
 ### Versionskontrol: filer, proces og installatør (4. november)
 - **Baggrund:** på en server lå en gammel `install.sh` (v7.9) i projektmappen, mens processen kørte

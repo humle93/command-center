@@ -109,10 +109,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.17.2"
+APP_VERSION = "7.18.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.18.0", "Standardbrugeren oprettes ved opstart fra CC_ADMIN_EMAIL + CC_ADMIN_PASSWORD - /setup er kun reserve"),
     ("7.17.2", "Invitationen viser selv om mailen blev sendt - foer laa fejlen kun under Alarmer"),
     ("7.17.1", "MCP-noeglen ligger ikke laengere i klartekst i DB'en, og ukendte vaerktoejer havner i auditten"),
     ("7.17.0", "MCP fase 2: skrivende vaerktoejer med write-scope og audit pr. noegle"),
@@ -127,7 +128,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Invitationen viser resultatet med det samme - og MCP-noeglen ligger ikke laengere i klartekst"
+NEWEST_LINE = "Standardbrugeren kommer fra .env ved opstart - /setup bruges kun, naar .env ikke har de to linjer"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -670,6 +671,45 @@ def create_user(email: str, password: str, must_change: bool = False, username: 
             "VALUES (?,?,?,?,?)",
             (email, (username or None), hash_password(password), 1 if must_change else 0, now_iso()))
         return cur.lastrowid
+
+
+# --- Standardbruger fra .env (v7.18) ---
+# Et nyt deployment skal kunne logge ind med det samme: staar CC_ADMIN_EMAIL + CC_ADMIN_PASSWORD i
+# .env, oprettes kontoen ved opstart. Klartekst findes kun i .env - her gemmes PBKDF2-hashen.
+# Der seedes kun, naar der ingen brugere er, saa en rettet .env-kode ikke rorer en konto i brug.
+ADMIN_EMAIL_ENV = "CC_ADMIN_EMAIL"
+ADMIN_PASSWORD_ENV = "CC_ADMIN_PASSWORD"
+
+
+def standard_user_settings() -> tuple:
+    """(e-mail, adgangskode) fra .env - tomme strenge naar linjerne ikke er udfyldt."""
+    return (os.environ.get(ADMIN_EMAIL_ENV, "").strip(),
+            os.environ.get(ADMIN_PASSWORD_ENV, ""))
+
+
+def seed_standard_user() -> str:
+    """Opretter standardbrugeren fra .env. Returnerer en kort status til opstartsloggen.
+
+    "oprettet" = kontoen blev lavet nu, "findes" = der var allerede brugere (roeres ikke),
+    "mangler" = .env har ikke begge linjer (saa bruges /setup som foer), "fejl: ..." = afvist.
+    Kontoen oprettes med must_change_password, saa koden fra .env skal skiftes ved foerste login.
+    """
+    email, password = standard_user_settings()
+    if not email or not password:
+        return "mangler"
+    if user_count() > 0:
+        return "findes"
+    try:
+        create_user(email, password, must_change=True)
+    except ValueError as e:
+        with get_db() as db:
+            add_alarm(db, "brugere", f"Standardbrugeren i .env blev afvist: {str(e)[:160]}", "advarsel")
+        return f"fejl: {e}"
+    except sqlite3.IntegrityError:
+        return "findes"
+    with get_db() as db:
+        add_alarm(db, "brugere", f"Standardbrugeren '{email}' oprettet ved opstart fra .env", "info")
+    return "oprettet"
 
 
 def find_user(identifier: str):
@@ -4555,6 +4595,12 @@ async def lifespan(app_: FastAPI):
         log_startup(os.environ.get("CC_HOST", ""), os.environ.get("CC_PORT") and int(os.environ.get("CC_PORT")))
     except Exception:
         pass
+    try:
+        seed_status = seed_standard_user()
+        if seed_status not in ("findes", "mangler"):
+            print(f"[cc] standardbruger ({ADMIN_EMAIL_ENV}): {seed_status}", flush=True)
+    except Exception as e:
+        print("[cc] standardbruger kunne ikke oprettes:", repr(e), flush=True)
     try:
         scheduler.add_job(job_check_domains, IntervalTrigger(hours=6), id="domain_checks", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_check_keywords, CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True, max_instances=1, coalesce=True)

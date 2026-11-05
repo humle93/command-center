@@ -1,4 +1,4 @@
-# Command Center v7.11 PRO — Bruger- og systemmanual
+# Command Center v7.18 PRO — Bruger- og systemmanual
 
 Selv-hostet SEO- og drifts-center til steamgears.eu (FastAPI + SQLite). Alt kører på din egen server — dine data, ingen abonnement.
 
@@ -10,7 +10,18 @@ Selv-hostet SEO- og drifts-center til steamgears.eu (FastAPI + SQLite). Alt kør
 
 ## Login og brugere
 
-Første besøg opretter din bruger (`/setup`): **e-mail** (den er dit login-id og gemmes med små bogstaver) og adgangskode (min. 8 tegn). Adgangskoder gemmes som PBKDF2-SHA256-hash med salt pr. bruger — der er ingen token i `.env`.
+### Standardbruger ved deployment (v7.18)
+
+Skriv `CC_ADMIN_EMAIL` og `CC_ADMIN_PASSWORD` i `.env`, før du starter appen. Ved opstart oprettes kontoen, hvis databasen endnu ikke har brugere, så du kan logge ind med det samme — der er ingen opsætningsside i et normalt deployment. Adgangskoden står **kun** i `.env` (som er gitignored); appen gemmer den som PBKDF2-SHA256-hash med salt pr. bruger og skriver den aldrig i loggen.
+
+- Kontoen oprettes med `must_change_password`, så dashboardet viser en gul bjælke, indtil du skifter koden under fanen **Brugere**. Derefter er `.env`-linjen kun historik — den bruges ikke igen.
+- Der seedes **kun**, når `users` er tom. Retter du linjerne senere, ændres en eksisterende konto ikke; brug fanen **Brugere** eller `scripts/user_create.py`.
+- Er linjerne tomme, er `/setup` reserven: første besøg opretter brugeren med e-mail og adgangskode. Siden lukker sig selv, så snart der findes en bruger.
+- En ugyldig e-mail eller en kode under 8 tegn opretter **ingen** konto; opstartsloggen skriver `fejl: …`, og der kommer en advarsel under fanen **Alarmer**.
+
+### E-mail er login-id
+
+**E-mailen** er dit login-id (gemmes med små bogstaver) og adgangskoden skal være min. 8 tegn. Adgangskoder gemmes som PBKDF2-SHA256-hash med salt pr. bruger — der er ingen token i `.env`.
 
 Derefter logger du ind med e-mail og adgangskode. Konti fra før v7.15 (oprettet med brugernavn) kan stadig logge ind med deres brugernavn; de får adressen `<brugernavn>@local`, indtil de bliver inviteret igen med en rigtig e-mail. Sessionen er en HttpOnly-cookie, der varer 30 dage, og kan tilbagekaldes ved at logge ud, slette brugeren eller skifte adgangskode.
 

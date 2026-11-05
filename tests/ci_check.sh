@@ -26,6 +26,9 @@ check "auth: /setup created the first user" "$(q "SELECT email FROM users")" "ci
 check "auth: anonymous dashboard redirects to login" "$(curl -s -o /dev/null -w '%{http_code}' $U/)" "303"
 check "auth: anonymous API is rejected" "$(curl -s -o /dev/null -w '%{http_code}' $U/api/visibility)" "401"
 check "auth: wrong password is rejected" "$(curl -s -o /dev/null -w '%{http_code}' -X POST $U/login -d email=ciadmin@example.dk -d password=wrong)" "401"
+# Standardbrugeren seedes fra .env ved opstart; her er linjerne tomme, saa /setup er reserven -
+# og den lukker sig selv, saa snart der findes en bruger.
+check "auth: /setup lukker sig selv naar brugeren findes" "$(curl -s -o /dev/null -w '%{http_code}' $U/setup)" "303"
 check "auth: session cookie opens the dashboard" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" $U/)" "200"
 # Uden SMTP kan invitationen ikke sendes - saa oprettes brugeren ikke, og fejlen bliver en alarm.
 curl -s -o /dev/null -b "$JAR" -X POST $U/users/invite -d email=ci2@example.dk

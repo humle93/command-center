@@ -1,6 +1,6 @@
 # Command Center — Roadmap
 
-Status pr. **3. november 2026 (v7.17.2)**. Koden er 4.579 linjer i `app/main.py`, 69 ruter, 25 tabeller,
+Status pr. **5. november 2026 (v7.18.0)**. Koden er 4.625 linjer i `app/main.py`, 69 ruter, 25 tabeller,
 8 jobs, 11 moduler og 14 faner. Rækkefølgen i "Næste" er den anbefalede prioritering: sikkerhed og
 driftsstabilitet før nye features.
 
@@ -29,6 +29,7 @@ findes.
 
 | Version | Indhold |
 | --- | --- |
+| **v7.18.0** | **Standardbruger ved deployment**: `seed_standard_user()` kaldes i lifespan og opretter kontoen fra `CC_ADMIN_EMAIL` + `CC_ADMIN_PASSWORD` i `.env`, naar `users` er tom — med `must_change_password`, alarm ved oprettelse/afvisning og status i opstartsloggen. Der seedes aldrig oven på en konto i brug, klartekst findes kun i `.env`, og `/setup` er degraderet til reserve (lukker sig selv naar brugeren findes). `login.html` er ét login-formular med en note om `.env`-linjerne · begge suiter daekker seed, login uden `/setup`, hash, `must_change_password`, rettet `.env` og ugyldig linje |
 | **v7.17.2** | **Invitationen svarer selv**: `POST /users/invite` sender resultatet med tilbage (`/?tab=brugere&invite=ok|fejl&invite_msg=…`), dashboardet åbner Brugere-fanen og viser enten "sendt til X" eller mailserverens fejl. Før forsvandt svaret på Cockpit, og en invitation uden SMTP lignede en mail der var blevet væk · begge suiter dækker ok- og fejl-stien |
 | **v7.17.1** | **MCP-hærdning** efter adgangsrevision: klartekst-nøglen ligger ikke længere i databasen — rækken i `settings.api_key_once` slettes i samme kald som dashboardet viser den (TTL 15 min. som sikkerhedsnet, oprydningen fjerner resten), og `POST /api-keys/dismiss` er fjernet · ukendte værktøjsnavne på `/mcp` giver `-32602` **og** en række i `api_audit`, så et nøgle der prøver navne af ikke er usynligt · begge suiter dækker begge dele |
 | **v7.17** | **MCP fase 2 (skriv)**: `start_crawl`, `add_monitor`, `resolve_alarm` og `add_note` bag `write`-scope · `start_crawl` afvises når et crawl kører og svarer med overslag + status-sti · `add_monitor` genbruger samme url+type · `readOnlyHint`/`destructiveHint` i `tools/list` · **audit pr. nøgle** i `api_audit` (værktøj, ok/fejl, årsag, varighed) vist i fanen Brugere og via `scripts/api_key.py audit`, ryddet efter 90 dage · begge testsuiter dækker scope-afvisning, skrivning, dublet, audit og at nøglen ikke ligger i auditten |

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Command Center — {{ 'Opret bruger' if mode == 'setup' else 'Log ind' }}</title>
+    <title>Command Center — {{ 'Opret foerste bruger' if mode == 'setup' else 'Log ind' }}</title>
     <style>
       /* Ingen CDN'er: login-siden skal virke og se ens ud uden internetadgang. */
       :root { color-scheme: dark; }
@@ -27,6 +27,8 @@
       button:focus-visible { outline: 2px solid #34d399; outline-offset: 2px; }
       .error { margin: 0 0 6px; padding: 9px 11px; font-size: 12px; color: #fda4af;
                background: rgba(244,63,94,.09); border: 1px solid rgba(244,63,94,.35); border-radius: 10px; }
+      .setup { margin: 0 0 14px; padding: 9px 11px; font-size: 12px; color: #fbbf24;
+               background: rgba(251,191,36,.08); border: 1px solid rgba(251,191,36,.3); border-radius: 10px; }
       .foot { margin: 16px 0 0; font-size: 11px; color: #71717a; text-align: center; }
       .report { margin: 20px 0 0; padding: 12px 14px; background: #09090b; border: 1px solid #27272a; border-radius: 12px; }
       .report .row { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; padding: 3px 0; color: #a1a1aa; }
@@ -38,7 +40,10 @@
 <div class="card">
     <h1>⚡ COMMAND CENTER</h1>
     {% if mode == 'setup' %}
-    <p class="sub">Foerste start: opret din bruger med din e-mail og en adgangskode.</p>
+    <p class="sub">Der findes ingen brugere endnu - opret den foerste nedenfor.</p>
+    <p class="setup">Vil du hellere have standardbrugeren automatisk? Skriv CC_ADMIN_EMAIL og
+      CC_ADMIN_PASSWORD i <code>.env</code> og genstart appen - saa oprettes kontoen ved opstart,
+      og denne side bruges ikke.</p>
     {% else %}
     <p class="sub">Log ind med din e-mail og adgangskode.</p>
     {% endif %}
@@ -60,7 +65,7 @@
     <div class="report">
       <div class="row"><span>Version</span><b>v{{ report.version }}{% if report.commit %} · {{ report.commit[:7] }}{% endif %}</b></div>
       <div class="row"><span>Seneste opstart</span><b>{{ (report.last_start or '—')[0:16] }}</b></div>
-      <div class="row"><span>Åbne alarmer</span><b{% if report.alarms_open %} class="warn"{% endif %}>{{ report.alarms_open }}{% if report.alarms_critical %} ({{ report.alarms_critical }} kritiske){% endif %}</b></div>
+      <div class="row"><span>Aabne alarmer</span><b{% if report.alarms_open %} class="warn"{% endif %}>{{ report.alarms_open }}{% if report.alarms_critical %} ({{ report.alarms_critical }} kritiske){% endif %}</b></div>
       <div class="row"><span>Domæner / keywords / monitors</span><b>{{ report.domains }} / {{ report.keywords }} / {{ report.monitors }}</b></div>
       <div class="row"><span>Seneste domænetjek</span><b>{{ (report.last_domain_check or '—')[0:16] }}</b></div>
       <div class="row"><span>Seneste crawl</span><b>{{ (report.last_crawl or '—')[0:16] }}</b></div>
@@ -70,7 +75,7 @@
     </div>
     {% endif %}
     <p class="foot">Adgangskoder gemmes som PBKDF2-SHA256-hash. Sessionen varer 30 dage.<br>
-      Nye brugere inviteres af en administrator — invitationen kommer paa mail.</p>
+      Standardbrugeren oprettes ved opstart fra CC_ADMIN_EMAIL + CC_ADMIN_PASSWORD i <code>.env</code>.</p>
 </div>
 </body>
 </html>

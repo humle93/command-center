@@ -816,10 +816,52 @@ os.environ["CC_ADMIN_PASSWORD"] = "standard-pass"
 check("advarsel: ingen advarsel naar .env-koden passer", main.env_password_mismatch() == "",
       main.env_password_mismatch())
 check("advarsel: baren forsvinder naar koden passer", "border-red-500/40" not in sd.get("/").text)
+# --- v7.18.2: .env-linjen ryddes, naar standardbrugeren selv skifter kode ---
+_envdir = tempfile.mkdtemp()
+_envfile = os.path.join(_envdir, ".env")
+with io.open(_envfile, "w", encoding="utf-8") as f:
+    f.write("# test\nCC_HOST=127.0.0.1\nCC_ADMIN_EMAIL=standard@example.dk\n"
+            "CC_ADMIN_PASSWORD=standard-pass\nCC_PORT=8000\n")
+_real_env_path = main.ENV_PATH
+main.ENV_PATH = _envfile
+
+
+def _env_text():
+    return io.open(_envfile, encoding="utf-8").read()
+
+
+check("ryd .env: en anden brugers kodeskift roerer ikke filen",
+      main.clear_env_admin_password("fremmed@example.dk") == "ikke-standardbruger"
+      and "CC_ADMIN_PASSWORD=standard-pass" in _env_text())
+check("ryd .env: en kode der stadig passer lades i fred",
+      main.clear_env_admin_password("standard@example.dk") == "passer-endnu"
+      and "CC_ADMIN_PASSWORD=standard-pass" in _env_text())
+sd.post("/users/password", data={"current": "standard-pass", "new": "nyt-pass-2", "confirm": "nyt-pass-2"})
+_after = _env_text()
+check("ryd .env: kodeskiftet toemmer linjen", "CC_ADMIN_PASSWORD=\n" in _after, _after)
+check("ryd .env: kommentarer og andre noegler staar urort",
+      "# test" in _after and "CC_HOST=127.0.0.1" in _after and "CC_PORT=8000" in _after)
+check("ryd .env: hverken den gamle eller den nye kode staar i filen",
+      "standard-pass" not in _after and "nyt-pass-2" not in _after)
+check("ryd .env: advarslen forsvinder med linjen", main.env_password_mismatch() == "",
+      main.env_password_mismatch())
+check("ryd .env: baren er væk efter kodeskiftet", "border-red-500/40" not in sd.get("/").text)
+# En fejl under skrivningen maa ikke vaelte skiftet: en mappe paa .env-stien giver en alarm i stedet.
+os.environ["CC_ADMIN_PASSWORD"] = "gammel-kode-2"
+main.ENV_PATH = _envdir
+check("ryd .env: fejl giver status i stedet for en exception",
+      main.clear_env_admin_password("standard@example.dk").startswith("fejl:"))
+with main.get_db() as db:
+    _env_failed = db.execute("SELECT COUNT(*) FROM alarms WHERE message LIKE "
+                             "'%kunne ikke fjernes fra .env%'").fetchone()[0]
+check("ryd .env: fejlen bliver en advarsel i Alarmer", _env_failed >= 1, _env_failed)
+main.ENV_PATH = _real_env_path
+shutil.rmtree(_envdir, ignore_errors=True)
 os.environ["CC_ADMIN_PASSWORD"] = "andet-pass-1"
 check("standardbruger: en rettet .env-kode roerer ikke en konto i brug",
       main.seed_standard_user() == "findes"
-      and main.verify_password("standard-pass", main.find_user("standard@example.dk")["password_hash"])
+      and main.verify_password("nyt-pass-2", main.find_user("standard@example.dk")["password_hash"])
+      and not main.verify_password("andet-pass-1", main.find_user("standard@example.dk")["password_hash"])
       and main.user_count() == 1)
 os.environ.update(CC_ADMIN_EMAIL="", CC_ADMIN_PASSWORD="")
 check("standardbruger: uden linjer i .env sker der intet (setup bruges)",

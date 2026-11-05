@@ -49,7 +49,8 @@ CC_PUBLIC_URL=
 # Bemaerk: en senere aendring af linjerne rorer ikke en konto, der allerede findes - og naar du
 # skifter koden under Brugere, passer CC_ADMIN_PASSWORD ikke laengere: opstartsloggen skriver en
 # advarsel, den ligger under Alarmer, og dashboardet viser en roed bjaelke, indtil linjen rettes
-# eller fjernes. Login bruger hele tiden den nye kode.
+# eller fjernes. Login bruger hele tiden den nye kode. Skifter standardbrugeren selv koden i UI'et,
+# toemmes CC_ADMIN_PASSWORD her automatisk (kun den linje) - saa bliver filen aldrig foraeldet.
 CC_ADMIN_EMAIL=
 CC_ADMIN_PASSWORD=
 # Stoler paa X-Forwarded-* fra disse IP'er (nginx paa samme maskine = 127.0.0.1).
@@ -220,10 +221,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.19.0"
+APP_VERSION = "7.19.1"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.19.1", "CC_ADMIN_PASSWORD fjernes fra .env, naar standardbrugeren skifter kode - saa kan linjen ikke blive foraeldet"),
     ("7.19.0", "Autopilot-broen henter hele /snapshot (selvtjek, cron-forsinkelse, pause-aarsag) og holder WP-Cron i gang hvert 5. min"),
     ("7.18.1", "Advarsel paa skaermen og i dashboardet, naar CC_ADMIN_PASSWORD i .env ikke laengere passer til kontoen"),
     ("7.18.0", "Standardbrugeren oprettes ved opstart fra CC_ADMIN_EMAIL + CC_ADMIN_PASSWORD - /setup er kun reserve"),
@@ -870,6 +872,76 @@ def warn_stale_env_password() -> str:
     return msg
 
 
+# .env ligger i projektroden ved siden af app/ - samme sti som load_dotenv() bruger.
+ENV_PATH = os.path.join(os.path.dirname(BASE_DIR), ".env")
+
+
+def clear_env_admin_password(email: str = "") -> str:
+    """Fjerner CC_ADMIN_PASSWORD fra .env, naar standardbrugeren selv har skiftet kode.
+
+    Koden i .env bruges kun ved seed; derefter er linjen kun et fristed for forvirring (og for
+    advarslen om en foraeldet kode). Kun den ene linje roeres - kommentarer og de andre noegler
+    staar urort. Returnerer "fjernet", "passer-endnu" (koden er den samme som foer),
+    "ikke-standardbruger", "ingen-linje", "ingen-fil" eller "fejl: ...". En fejl vaelter aldrig
+    selve adgangskode-skiftet - saa bliver advarslen i dashboardet staaende i stedet.
+    """
+    env_email, env_password = standard_user_settings()
+    if not env_email or not email or normalize_email(email) != normalize_email(env_email):
+        return "ikke-standardbruger"
+    if not env_password:
+        return "ingen-linje"
+    try:
+        row = find_user(env_email)
+        still_valid = bool(row) and verify_password(env_password, row["password_hash"])
+    except Exception:
+        still_valid = False
+    if still_valid:                      # koden er ikke skiftet vaek fra .env-linjen
+        return "passer-endnu"
+    path = ENV_PATH
+    if not os.path.exists(path):
+        return "ingen-fil"
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.readlines()
+        pattern = re.compile(r"^\s*(?:export\s+)?%s\s*=" % re.escape(ADMIN_PASSWORD_ENV))
+        out, changed = [], False
+        for line in lines:
+            if pattern.match(line):
+                out.append(ADMIN_PASSWORD_ENV + "=" + ("\r\n" if line.endswith("\r\n") else "\n"))
+                changed = True
+            else:
+                out.append(line)
+        if not changed:
+            return "ingen-linje"
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.writelines(out)
+        try:
+            os.chmod(tmp, os.stat(path).st_mode)
+        except Exception:
+            pass
+        os.replace(tmp, path)
+    except Exception as e:
+        try:
+            with get_db() as db:
+                add_alarm(db, "brugere", "CC_ADMIN_PASSWORD kunne ikke fjernes fra .env efter "
+                          "adgangskode-skift: %s - fjern linjen manuelt" % str(e)[:120], "advarsel")
+        except Exception:
+            pass
+        return "fejl: %s" % e
+    os.environ[ADMIN_PASSWORD_ENV] = ""
+    _ENV_PASSWORD_STATE.update(sig=None, msg="")
+    try:
+        with get_db() as db:
+            add_alarm(db, "brugere", "CC_ADMIN_PASSWORD er fjernet fra .env, fordi '%s' skiftede "
+                      "adgangskode" % env_email, "info")
+    except Exception:
+        pass
+    print("[cc] .env: CC_ADMIN_PASSWORD fjernet (standardbrugeren skiftede kode)", flush=True)
+    return "fjernet"
+
+
+
 
 def find_user(identifier: str):
     """Brugeren bag en e-mail - eller et brugernavn fra foer v7.15, saa gamle konti ikke laases ude."""
@@ -1322,6 +1394,10 @@ async def users_password(request: Request, current: str = Form(...), new: str = 
         # Log de andre sessioner ud, behold denne.
         db.execute("DELETE FROM sessions WHERE user_id=? AND id<>?",
                    (me["id"], _session_key(request.cookies.get(SESSION_COOKIE) or "")))
+    try:  # standardbrugeren skiftede kode: saa skal .env-linjen ikke love den gamle
+        clear_env_admin_password(me["email"])
+    except Exception as e:
+        print("[cc] .env: kunne ikke rydde CC_ADMIN_PASSWORD:", repr(e), flush=True)
     return RedirectResponse("/", status_code=303)
 
 
@@ -6367,6 +6443,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 ## Nyheder i v7.18
 
 - **Standardbruger ved deployment (v7.18)** — skriv `CC_ADMIN_EMAIL` + `CC_ADMIN_PASSWORD` i `.env`, så oprettes kontoen ved opstart, og du kan logge ind med det samme; opsætningssiden er ikke længere en del af et normalt deployment. Koden gemmes kun som PBKDF2-hash, kontoen oprettes med `must_change_password` (gul bjælke indtil du skifter den under fanen **Brugere**), og der seedes kun, når `users` er tom — en senere ændring af `.env` rører ikke en konto i brug. Er linjerne tomme, er `/setup` stadig reserven. Adgangskoden står kun i `.env` (gitignored), aldrig i repoet eller i loggen
+- **Linjen rydder sig selv (v7.19.1)** — skifter **du** koden under **Brugere**, tømmes `CC_ADMIN_PASSWORD` i `.env` automatisk (kun den linje; kommentarer og de andre nøgler står urørt). Så kan filen ikke komme til at love en kode, login afviser. Kan filen ikke skrives, ændres intet ved kontoen — så bliver advarslen fra v7.18.1 stående i stedet
 - **Advarsel når `.env`-koden er forældet (v7.18.1)** — skifter du koden under **Brugere**, passer `CC_ADMIN_PASSWORD` ikke længere. Så skriver opstartsloggen `[cc] advarsel: …`, advarslen ligger under **Alarmer**, og dashboardet viser en rød bjælke, indtil du retter eller fjerner linjen i `.env`. Kontoen røres ikke — login bruger den nye kode
 - **MCP-hærdning (v7.17.1)** — nøglen ligger ikke længere i klartekst i databasen: rækken i `settings` slettes i samme kald som dashboardet viser den (højst 15 min. hvis siden aldrig åbnes, og oprydningen fjerner resten). "Jeg har gemt nøglen"-knappen er derfor væk. Ukendte værktøjsnavne på `/mcp` havner nu også i auditten, så en nøgle der famler kan ses.
 - **MCP skriver nu også (fase 2)** — med `read,write` på nøglen kan en agent starte et site-crawl, oprette en monitor, løse en alarm og skrive en note (`start_crawl`, `add_monitor`, `resolve_alarm`, `add_note`). Hvert kald — også afviste — havner i en **audit pr. nøgle** (`api_audit`) med værktøj, varighed og fejl, som du ser i fanen **Brugere** og med `python3 scripts/api_key.py audit`. Værktøjerne har `readOnlyHint`/`destructiveHint`, så klienten kan advare før et kald.

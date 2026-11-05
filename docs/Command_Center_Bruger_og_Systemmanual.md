@@ -27,7 +27,12 @@ Skriv `CC_ADMIN_EMAIL` og `CC_ADMIN_PASSWORD` i `.env`, før du starter appen. V
 - den samme tekst ligger under fanen **Alarmer** (som `advarsel`, med samme dedupe som de andre alarmer)
 - dashboardet viser en **rød bjælke** øverst, indtil linjen er rettet eller fjernet
 
-Advarslen ændrer **intet** ved kontoen: login bruger hele tiden den nye kode. Ret `.env` til den kode, du faktisk bruger, eller slet linjen — den skal alligevel ikke bruges igen. Kontrollen kører kun, når både `CC_ADMIN_EMAIL` og `CC_ADMIN_PASSWORD` er udfyldt, og den sammenligner koden mod den gemte PBKDF2-hash; koden skrives aldrig i loggen eller i advarslen.
+Advarslen ændrer **intet** ved kontoen: login bruger hele tiden den nye kode. Ret `.env` til den kode, du faktisk bruger, eller slet linjen — den skal alligevel ikke bruges igen.
+
+**Siden v7.19.1 rydder linjen sig selv:** skifter du koden under **Brugere** som den konto, `CC_ADMIN_EMAIL` peger på, tømmes `CC_ADMIN_PASSWORD` i `.env` med det samme. Kun den linje ændres — kommentarer og de andre nøgler står urørt, og filen skrives atomisk, så en afbrudt skrivning ikke kan ødelægge den. Herefter findes advarslen og den røde bjælke ikke længere, fordi der ikke er noget at være uenig om.
+
+- Skifter en anden bruger sin kode, eller ændrer du koden med `scripts/user_create.py` eller direkte i databasen, rører appen ikke `.env` — så er advarslen stadig din sikkerhedslineal.
+- Er `.env` skrivebeskyttet (fx i en container med filen monteret), ændres kontoen alligevel: skrivningen fejler, fejlen bliver en advarsel under **Alarmer**, og den røde bjælke bliver stående, indtil du fjerner linjen selv. Kontrollen kører kun, når både `CC_ADMIN_EMAIL` og `CC_ADMIN_PASSWORD` er udfyldt, og den sammenligner koden mod den gemte PBKDF2-hash; koden skrives aldrig i loggen eller i advarslen.
 
 ### E-mail er login-id
 

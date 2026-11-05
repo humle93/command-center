@@ -44,6 +44,7 @@ install.sh                 # selvstændig installer (indeholder kopier af filern
 | Sessioner | `sessions(id=sha256(cookie), user_id, created_at, last_seen, expires_at)`, 30 dage |
 | Cookie | `cc_session`, HttpOnly, SameSite=Lax, `Secure` når scheme er https |
 | Standardbruger (v7.18) | `seed_standard_user()` i lifespan: `CC_ADMIN_EMAIL` + `CC_ADMIN_PASSWORD` fra `.env` opretter kontoen, når `users` er tom (`must_change_password=1`, alarm ved oprettelse og ved afvist linje). Der seedes aldrig oven på en eksisterende konto, og klartekst findes kun i `.env` |
+| `.env` ryddes ved kodeskift (v7.19.1) | `POST /users/password` kalder `clear_env_admin_password(email)`, men kun når den konto, der skiftede, er `CC_ADMIN_EMAIL`: den tømmer `CC_ADMIN_PASSWORD=` i `.env` (regex på nøglen, atomisk `os.replace`, oprindelig filmode bevaret), sætter miljøvariablen til tom og nulstiller cachet, så advarslen forsvinder. Fejler skrivningen, kommer der en advarsel i `alarms`, og kodeskiftet gennemføres alligevel |
 | Forældet `.env`-kode (v7.18.1) | `env_password_mismatch()` verificerer `CC_ADMIN_PASSWORD` mod den gemte hash og cacher svaret på `(email, sha256(kode), hash)`, så dashboardet ikke kører PBKDF2 ved hvert sidevisning. Advarslen ændrer intet ved kontoen; den forsvinder, når linjen rettes eller fjernes |
 | Første bruger (reserve) | `/setup` — kun åben når `users` er tom, altså når `.env` ikke har de to linjer |
 | Rate limit | 5 fejl pr. IP = 10 min lås (bounded dict) |
@@ -143,6 +144,7 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 
 ## 12. Versionshistorik (kort)
 
+- **v7.19.1** — `.env` rydder sig selv: når standardbrugeren skifter kode under Brugere, tømmer `clear_env_admin_password()` `CC_ADMIN_PASSWORD`-linjen (kun den linje, atomisk skrivning, filmode bevaret), sætter miljøvariablen til tom og nulstiller advarsels-cachet. Andre brugeres kodeskift rører ikke filen, og en fejlende skrivning giver en advarsel i `alarms` uden at vaelte skiftet
 - **v7.18.1** — advarsel når `.env`-koden er forældet: `env_password_mismatch()` sammenligner `CC_ADMIN_PASSWORD` med den gemte hash, `warn_stale_env_password()` skriver den til opstartsloggen og `alarms`, og dashboardet viser en rød bjælke (`env_password_warning`). Kontoen røres ikke — login bruger den nye kode
 - **v7.18** — standardbruger ved deployment: `seed_standard_user()` i lifespan opretter kontoen fra `CC_ADMIN_EMAIL` + `CC_ADMIN_PASSWORD`, når `users` er tom, med `must_change_password` og en alarm ved oprettelse/afvisning. `/setup` er degraderet til reserve og login-siden fortæller om `.env`-linjerne. Begge suiter dækker seed, login uden `/setup`, at en rettet `.env` ikke rører en konto i brug, og at en ugyldig linje hverken giver konto eller tavshed
 - **v7.17.2** — invitationen svarer i sin egen formular: `POST /users/invite` redirecter til `/?tab=brugere&invite=ok|fejl&invite_msg=…`, dashboardet åbner den fane (`initial_tab`, kun kendte faner) og viser enten "sendt til X" eller mailserverens fejl. Før landede svaret på Cockpit, og en mislykket invitation var kun synlig som alarm

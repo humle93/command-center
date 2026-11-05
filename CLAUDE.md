@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 5. november 2026 · **Version:** 7.19.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 5. november 2026 · **Version:** 7.19.1 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,22 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### `.env` rydder sig selv ved kodeskift (5. november, v7.19.1)
+- **Baggrund:** advarslen i v7.18.1 fortalte, at linjen var forældet — men den blev stående, til nogen
+  rettede den. Nu fjerner appen årsagen selv.
+- **Nyt:** `POST /users/password` kalder `clear_env_admin_password(me["email"])`. Den gør kun noget, når
+  kontoen er `CC_ADMIN_EMAIL`, og når den gemte hash **ikke** længere matcher `.env`-koden (så et skift
+  til samme kode lader filen være). Den tømmer `CC_ADMIN_PASSWORD=` med regex på nøglen, skriver via
+  `ENV_PATH + ".tmp"` og `os.replace` (filmode bevaret, `\r\n` bevaret), sætter miljøvariablen til tom og
+  nulstiller `_ENV_PASSWORD_STATE`. Status: `fjernet`, `passer-endnu`, `ikke-standardbruger`,
+  `ingen-linje`, `ingen-fil`, `fejl: …`.
+- **Sikkerhed:** kun den ene linje ændres — kommentarer og de andre nøgler er urørte, og hverken den
+  gamle eller den nye kode ender i filen, loggen eller alarmen. Fejler skrivningen (fx skrivebeskyttet
+  `.env` i en container), kommer der en advarsel i `alarms`, og kodeskiftet gennemføres alligevel — så
+  bliver v7.18.1-bjælken stående som fallback.
+- **Test:** ni checks i `tests/test_v8_features.py` (tomning, urørte nøgler/kommentarer, ingen kode i
+  filen, advarsel + bjælke væk, andre brugere, uændret kode, skrivefejl → alarm).
 
 ### Autopilot-broen: hele `/snapshot`, WP-Cron-ping og `X-Command-Center` (5. november, v7.19.0)
 - **Beslutning:** koblingen til Steamgears Autopilot forbliver **envejs** (CC → site, roadmappens punkt

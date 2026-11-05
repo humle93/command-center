@@ -97,6 +97,18 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
   `must_change_password`, at en rettet `.env` ikke overskriver, og at en ugyldig linje giver alarm;
   `tests/ci_check.sh` tjekker at `/setup` svarer 303, når brugeren findes.
 
+### Migreringsplan for serveren `laser` (4. november)
+- **Nyt dokument:** [`docs/Command_Center_Migrering.md`](docs/Command_Center_Migrering.md) er arbejdsinstruksen
+  for at flytte `laser`s `~/command-center` fra `Steamgears-site` (v8.3) over på dette repo: fase 0-6,
+  stop-punkter, rollback, tjekliste og tidsestimat. Kun dokumentation — ingen kodeændring.
+- **Fastsat i planen:** frisk database (v8.3-skemaet er ikke garanteret kompatibelt), fast domæne i
+  stedet for `trycloudflare` (URL'en skifter ved hver genstart og `CC_PUBLIC_URL` styrer `/mcp`s
+  Host-tjek), og at `install.sh` altid skriver til `$HOME/command-center` — derfor skal den gamle mappe
+  flyttes asides før den nye flyttes ind.
+- **Efterprøvet:** guard-testen i dokumentets fase 4 er kørt i en isoleret kopi — `--version` gav kode 1,
+  `--no-restart` kode 7, og `app/main.py` havde samme `cksum` før og efter.
+- **Versioner:** planen er skrevet mod v7.17.2, men er efter rebase på main rettet til v7.19.1, og
+  første-login-trinnet nævner nu standardbrugeren fra `CC_ADMIN_EMAIL` + `CC_ADMIN_PASSWORD` (v7.18+).
 
 ### Versionskontrol: filer, proces og installatør (4. november)
 - **Baggrund:** på en server lå en gammel `install.sh` (v7.9) i projektmappen, mens processen kørte

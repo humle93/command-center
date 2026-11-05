@@ -20,6 +20,7 @@ findes.
 | [`Command_Center_Dokumentation.md`](Command_Center_Dokumentation.md) | Arkitektur: ruter, tabeller, jobs og sikkerhedsmodel |
 | [`Command_Center_Install_Script.md`](Command_Center_Install_Script.md) | Installation og `install.sh` |
 | [`Command_Center_MCP.md`](Command_Center_MCP.md) | Research og plan for MCP-adgang: protokol, nøgler, OAuth, værktøjer |
+| [`Command_Center_Migrering.md`](Command_Center_Migrering.md) | Trin for trin: flyt en server fra den gamle linje over på dette repo, så versionsguarden beskytter den |
 | [`agents-md/steamgears-site.md`](agents-md/steamgears-site.md) | Sammenlagt `AGENTS.md` til `steamgears-site` (lokal §1-§6 + fælles §7-§10) |
 | `docs/ROADMAP.md` | Dette dokument: dokumentation, færdigt, næste, senere og endgoal |
 | [`CLAUDE.md`](../CLAUDE.md) | Status/handoff, kendte begrænsninger og næste skridt |

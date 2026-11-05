@@ -46,7 +46,10 @@ CC_PUBLIC_URL=
 # Kontoen faar must_change_password, saa koden her kun bruges til det foerste login - derefter
 # skifter du den under fanen Brugere. Klartekst staar kun i .env (.env committes aldrig).
 # Tomme linjer = ingen standardbruger; foerste besoeg opretter brugeren via /setup i stedet.
-# Bemaerk: en senere aendring af linjerne rorer ikke en konto, der allerede findes.
+# Bemaerk: en senere aendring af linjerne rorer ikke en konto, der allerede findes - og naar du
+# skifter koden under Brugere, passer CC_ADMIN_PASSWORD ikke laengere: opstartsloggen skriver en
+# advarsel, den ligger under Alarmer, og dashboardet viser en roed bjaelke, indtil linjen rettes
+# eller fjernes. Login bruger hele tiden den nye kode.
 CC_ADMIN_EMAIL=
 CC_ADMIN_PASSWORD=
 # Stoler paa X-Forwarded-* fra disse IP'er (nginx paa samme maskine = 127.0.0.1).
@@ -217,10 +220,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.18.0"
+APP_VERSION = "7.18.1"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.18.1", "Advarsel paa skaermen og i dashboardet, naar CC_ADMIN_PASSWORD i .env ikke laengere passer til kontoen"),
     ("7.18.0", "Standardbrugeren oprettes ved opstart fra CC_ADMIN_EMAIL + CC_ADMIN_PASSWORD - /setup er kun reserve"),
     ("7.17.2", "Invitationen viser selv om mailen blev sendt - foer laa fejlen kun under Alarmer"),
     ("7.17.1", "MCP-noeglen ligger ikke laengere i klartekst i DB'en, og ukendte vaerktoejer havner i auditten"),
@@ -818,6 +822,52 @@ def seed_standard_user() -> str:
     with get_db() as db:
         add_alarm(db, "brugere", f"Standardbrugeren '{email}' oprettet ved opstart fra .env", "info")
     return "oprettet"
+
+
+# Sidste verificerede svar paa "passer .env-koden?" - PBKDF2 er 240k iterationer, saa dashboardet
+# maa ikke betale den pris ved hver sidevisning. Noeglen er (e-mail, sha256(kode), gemt hash).
+_ENV_PASSWORD_STATE = {"sig": None, "msg": ""}
+
+
+def env_password_mismatch() -> str:
+    """Advarsel naar CC_ADMIN_PASSWORD ikke laengere passer til standardbrugeren - ellers "".
+
+    Koden i .env bruges kun, naar kontoen seedes. Skiftes den i UI'et (eller med
+    scripts/user_create.py), bliver linjen i .env foraeldet: login bruger den nye kode, mens filen
+    lover den gamle. Advarslen findes, saa man retter .env i stedet for at saette koden tilbage.
+    """
+    email, password = standard_user_settings()
+    if not email or not password:
+        return ""
+    try:
+        row = find_user(email)
+    except Exception:
+        return ""
+    if not row:
+        return ""
+    sig = (row["email"], hashlib.sha256(password.encode()).hexdigest(), row["password_hash"])
+    if _ENV_PASSWORD_STATE["sig"] == sig:
+        return _ENV_PASSWORD_STATE["msg"]
+    msg = ""
+    if not verify_password(password, row["password_hash"]):
+        msg = (f"{ADMIN_PASSWORD_ENV} i .env passer ikke længere til '{row['email']}' - koden er "
+               f"skiftet i UI'et, så login bruger den nye kode. Ret eller fjern linjen i .env.")
+    _ENV_PASSWORD_STATE.update(sig=sig, msg=msg)
+    return msg
+
+
+def warn_stale_env_password() -> str:
+    """Lægger advarslen i Alarmer ved opstart (dedupe som de andre) og returnerer teksten."""
+    msg = env_password_mismatch()
+    if not msg:
+        return ""
+    try:
+        with get_db() as db:
+            add_alarm(db, "brugere", msg, "advarsel")
+    except Exception:
+        pass
+    return msg
+
 
 
 def find_user(identifier: str):
@@ -4157,6 +4207,7 @@ async def dashboard(request: Request):
         "alert_outbox": alert_outbox,
         "alert_problems": alert_problems,
         "current_user": getattr(request.state, "user", None),
+        "env_password_warning": env_password_mismatch(),
         "update_state": update_state,
         "update_token": bool(GITHUB_TOKEN),
         "update_repo": GITHUB_REPO,
@@ -4710,6 +4761,12 @@ async def lifespan(app_: FastAPI):
     except Exception as e:
         print("[cc] standardbruger kunne ikke oprettes:", repr(e), flush=True)
     try:
+        stale = warn_stale_env_password()
+        if stale:
+            print(f"[cc] advarsel: {stale}", flush=True)
+    except Exception as e:
+        print("[cc] .env-koden kunne ikke tjekkes:", repr(e), flush=True)
+    try:
         scheduler.add_job(job_check_domains, IntervalTrigger(hours=6), id="domain_checks", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_check_keywords, CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_growth_autopilot, CronTrigger(hour=5, minute=15), id="growth_autopilot", replace_existing=True, max_instances=1, coalesce=True)
@@ -4771,6 +4828,9 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 </head>
 {% if insecure %}<div class="bg-yellow-600 text-black text-xs text-center py-1.5 px-4 font-semibold">&Uacute;t&uacute;n HTTPS &mdash; login og adgangskoder sendes ukrypteret. S&aelig;t nginx + TLS op foran CC (se Install-dokumentationen).</div>{% endif %}
 <body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: '{{ initial_tab }}', seoResult: null, seoLoading: false, crawl: null, histChart: null, histOpen: false, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
+{% if env_password_warning %}
+<div class="bg-red-500/10 border-b border-red-500/40 text-red-300 text-xs text-center py-2 px-4">⚠️ {{ env_password_warning }}</div>
+{% endif %}
 {% if current_user and current_user.must_change_password %}
 <div class="bg-amber-500/10 border-b border-amber-500/40 text-amber-300 text-xs text-center py-2 px-4">Du er logget ind med en midlertidig adgangskode (fra invitationsmailen eller CC_ADMIN_PASSWORD i .env) &mdash; skift den under fanen <b>Brugere</b>.</div>
 {% endif %}
@@ -6217,6 +6277,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 ## Nyheder i v7.18
 
 - **Standardbruger ved deployment (v7.18)** — skriv `CC_ADMIN_EMAIL` + `CC_ADMIN_PASSWORD` i `.env`, så oprettes kontoen ved opstart, og du kan logge ind med det samme; opsætningssiden er ikke længere en del af et normalt deployment. Koden gemmes kun som PBKDF2-hash, kontoen oprettes med `must_change_password` (gul bjælke indtil du skifter den under fanen **Brugere**), og der seedes kun, når `users` er tom — en senere ændring af `.env` rører ikke en konto i brug. Er linjerne tomme, er `/setup` stadig reserven. Adgangskoden står kun i `.env` (gitignored), aldrig i repoet eller i loggen
+- **Advarsel når `.env`-koden er forældet (v7.18.1)** — skifter du koden under **Brugere**, passer `CC_ADMIN_PASSWORD` ikke længere. Så skriver opstartsloggen `[cc] advarsel: …`, advarslen ligger under **Alarmer**, og dashboardet viser en rød bjælke, indtil du retter eller fjerner linjen i `.env`. Kontoen røres ikke — login bruger den nye kode
 - **MCP-hærdning (v7.17.1)** — nøglen ligger ikke længere i klartekst i databasen: rækken i `settings` slettes i samme kald som dashboardet viser den (højst 15 min. hvis siden aldrig åbnes, og oprydningen fjerner resten). "Jeg har gemt nøglen"-knappen er derfor væk. Ukendte værktøjsnavne på `/mcp` havner nu også i auditten, så en nøgle der famler kan ses.
 - **MCP skriver nu også (fase 2)** — med `read,write` på nøglen kan en agent starte et site-crawl, oprette en monitor, løse en alarm og skrive en note (`start_crawl`, `add_monitor`, `resolve_alarm`, `add_note`). Hvert kald — også afviste — havner i en **audit pr. nøgle** (`api_audit`) med værktøj, varighed og fejl, som du ser i fanen **Brugere** og med `python3 scripts/api_key.py audit`. Værktøjerne har `readOnlyHint`/`destructiveHint`, så klienten kan advare før et kald.
 - **MCP-adgang (fase 1)** — agenter og editorer kan læse Command Center direkte. Under fanen **Brugere** opretter du en nøgle pr. klient (ingen fælles token); den vises én gang, gemmes kun som sha256 og kan tilbagekaldes enkeltvis. `POST /mcp` tilbyder syv læse-værktøjer: `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes` og `history`. Endpointet validerer `Origin`/`Host` (DNS-rebinding) og svarer `401` med `WWW-Authenticate` uden nøgle — se [docs/Command_Center_MCP.md](docs/Command_Center_MCP.md).

@@ -760,6 +760,23 @@ check("standardbruger: login virker med det samme (uden /setup)",
               follow_redirects=False).status_code == 303)
 check("standardbruger: /setup er lukket for anonyme, naar brugeren findes",
       TestClient(main.app).get("/setup", follow_redirects=False).status_code == 303)
+# --- v7.18.1: .env-koden og kontoen kan loebe fra hinanden ---
+os.environ["CC_ADMIN_PASSWORD"] = "gammel-kode-1"
+stale = main.env_password_mismatch()
+check("advarsel: foraeldet .env-kode giver en advarsel", stale.startswith("CC_ADMIN_PASSWORD"), stale)
+check("advarsel: teksten naevner kontoen, ikke koderne",
+      "standard@example.dk" in stale and "gammel-kode-1" not in stale and "standard-pass" not in stale)
+# Baren har sin egen klasse - alarmteksten paa samme side indeholder de samme ord.
+check("advarsel: dashboardet viser baren", "border-red-500/40" in sd.get("/").text)
+main.warn_stale_env_password()
+with main.get_db() as db:
+    env_warned = db.execute("SELECT COUNT(*) FROM alarms WHERE message LIKE '%CC_ADMIN_PASSWORD i .env%'"
+                            ).fetchone()[0]
+check("advarsel: opstarten laegger den i Alarmer", env_warned >= 1, env_warned)
+os.environ["CC_ADMIN_PASSWORD"] = "standard-pass"
+check("advarsel: ingen advarsel naar .env-koden passer", main.env_password_mismatch() == "",
+      main.env_password_mismatch())
+check("advarsel: baren forsvinder naar koden passer", "border-red-500/40" not in sd.get("/").text)
 os.environ["CC_ADMIN_PASSWORD"] = "andet-pass-1"
 check("standardbruger: en rettet .env-kode roerer ikke en konto i brug",
       main.seed_standard_user() == "findes"

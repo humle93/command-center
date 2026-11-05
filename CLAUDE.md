@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 5. november 2026 · **Version:** 7.18.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 5. november 2026 · **Version:** 7.18.1 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,19 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Advarsel når `.env`-koden er forældet (5. november, v7.18.1)
+- **Baggrund:** `CC_ADMIN_PASSWORD` bruges kun ved seed. Skiftes koden under **Brugere**, lover `.env`
+  stadig den gamle — og man kunne fristes til at "rette" kontoen tilbage til den.
+- **Nyt:** `env_password_mismatch()` verificerer koden mod den gemte PBKDF2-hash og returnerer en
+  advarselstekst med e-mailen (aldrig koden). Svaret caches på `(email, sha256(kode), hash)`, så
+  dashboardet ikke betaler 240k iterationer ved hvert sidevisning. `warn_stale_env_password()` kaldes i
+  lifespan og lægger advarslen i `alarms` (dedupe som de andre) + `[cc] advarsel: …` i opstartsloggen.
+- **Dashboardet:** `env_password_warning` i konteksten giver en **rød** bjælke over den gule
+  `must_change_password`-bjælke. Advarslen ændrer intet ved kontoen.
+- **Tests:** `tests/test_v8_features.py` (seks checks: advarsel, e-mail i teksten, ingen kode i teksten,
+  baren, alarmen, og at begge forsvinder når koden passer) + `tests/ci_check.sh` (ingen falsk advarsel
+  uden `CC_ADMIN_PASSWORD`).
 
 ### Standardbruger ved deployment (5. november, v7.18)
 - **Baggrund:** et nyt deployment startede på `/setup` og krævede, at nogen oprettede den første

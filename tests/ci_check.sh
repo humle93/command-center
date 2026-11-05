@@ -30,6 +30,9 @@ check "auth: wrong password is rejected" "$(curl -s -o /dev/null -w '%{http_code
 # og den lukker sig selv, saa snart der findes en bruger.
 check "auth: /setup lukker sig selv naar brugeren findes" "$(curl -s -o /dev/null -w '%{http_code}' $U/setup)" "303"
 check "auth: session cookie opens the dashboard" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" $U/)" "200"
+# Uden CC_ADMIN_PASSWORD i .env maa advarslen om en foraeldet kode ikke dukke op.
+check "advarsel: ingen falsk advarsel uden CC_ADMIN_PASSWORD" \
+    "$(curl -s -b "$JAR" $U/ | grep -c 'passer ikke l')" "0"
 # Uden SMTP kan invitationen ikke sendes - saa oprettes brugeren ikke, og fejlen bliver en alarm.
 curl -s -o /dev/null -b "$JAR" -X POST $U/users/invite -d email=ci2@example.dk
 check "invite: no user without SMTP" "$(q "SELECT COUNT(*) FROM users")" "1"

@@ -19,6 +19,16 @@ Skriv `CC_ADMIN_EMAIL` og `CC_ADMIN_PASSWORD` i `.env`, før du starter appen. V
 - Er linjerne tomme, er `/setup` reserven: første besøg opretter brugeren med e-mail og adgangskode. Siden lukker sig selv, så snart der findes en bruger.
 - En ugyldig e-mail eller en kode under 8 tegn opretter **ingen** konto; opstartsloggen skriver `fejl: …`, og der kommer en advarsel under fanen **Alarmer**.
 
+### Når `.env`-koden ikke længere passer (v7.18.1)
+
+`.env`-linjen bruges kun ved seed. Skifter du adgangskoden under **Brugere** (eller med `scripts/user_create.py`), bliver `CC_ADMIN_PASSWORD` i `.env` forældet — filen lover en kode, som login ikke længere accepterer. Appen opdager det ved opstart og på dashboardet:
+
+- opstartsloggen skriver `[cc] advarsel: CC_ADMIN_PASSWORD i .env passer ikke længere til 'navn@domaene.dk' …`
+- den samme tekst ligger under fanen **Alarmer** (som `advarsel`, med samme dedupe som de andre alarmer)
+- dashboardet viser en **rød bjælke** øverst, indtil linjen er rettet eller fjernet
+
+Advarslen ændrer **intet** ved kontoen: login bruger hele tiden den nye kode. Ret `.env` til den kode, du faktisk bruger, eller slet linjen — den skal alligevel ikke bruges igen. Kontrollen kører kun, når både `CC_ADMIN_EMAIL` og `CC_ADMIN_PASSWORD` er udfyldt, og den sammenligner koden mod den gemte PBKDF2-hash; koden skrives aldrig i loggen eller i advarslen.
+
 ### E-mail er login-id
 
 **E-mailen** er dit login-id (gemmes med små bogstaver) og adgangskoden skal være min. 8 tegn. Adgangskoder gemmes som PBKDF2-SHA256-hash med salt pr. bruger — der er ingen token i `.env`.

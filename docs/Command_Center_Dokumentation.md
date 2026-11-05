@@ -29,7 +29,7 @@ install.sh                 # selvstændig installer (indeholder kopier af filern
 
 1. `load_dotenv()` læses **før** konfigurationsblokken (rigtige miljøvariabler vinder; inline-kommentarer fjernes)
 2. `init_db()` → `migrate_db()` → `create_indexes()` køres i `_safe()`, så en fejl ikke kan crashe importen (ét retry, derefter videre)
-3. `seed_standard_user()` kaldes i lifespan **før** scheduler og selvtest: er `users` tom, og har `.env` både `CC_ADMIN_EMAIL` og `CC_ADMIN_PASSWORD`, oprettes standardbrugeren med `must_change_password`. Status skrives til opstartsloggen (`oprettet`, `findes`, `mangler`, `fejl: …`), og en afvist linje giver en advarsel i `alarms`
+3. `seed_standard_user()` kaldes i lifespan **før** scheduler og selvtest: er `users` tom, og har `.env` både `CC_ADMIN_EMAIL` og `CC_ADMIN_PASSWORD`, oprettes standardbrugeren med `must_change_password`. Status skrives til opstartsloggen (`oprettet`, `findes`, `mangler`, `fejl: …`), og en afvist linje giver en advarsel i `alarms`. Derefter kaldes `warn_stale_env_password()`: passer `CC_ADMIN_PASSWORD` ikke til den gemte hash (fordi koden er skiftet i UI'et), skrives `[cc] advarsel: …` og en advarsel i `alarms`, og dashboardet viser en rød bjælke via `env_password_warning`
 4. Lifespan registrerer APScheduler-jobs og starter en selvtest i en worker-tråd (DB-skrivetest, nøgler, ruteantal → kritisk alarm ved fejl)
 5. Alt netværk går gennem én `requests.Session` med **BudgetAdapter**, der tæller kald til SerpAPI/aimlapi
 
@@ -44,6 +44,7 @@ install.sh                 # selvstændig installer (indeholder kopier af filern
 | Sessioner | `sessions(id=sha256(cookie), user_id, created_at, last_seen, expires_at)`, 30 dage |
 | Cookie | `cc_session`, HttpOnly, SameSite=Lax, `Secure` når scheme er https |
 | Standardbruger (v7.18) | `seed_standard_user()` i lifespan: `CC_ADMIN_EMAIL` + `CC_ADMIN_PASSWORD` fra `.env` opretter kontoen, når `users` er tom (`must_change_password=1`, alarm ved oprettelse og ved afvist linje). Der seedes aldrig oven på en eksisterende konto, og klartekst findes kun i `.env` |
+| Forældet `.env`-kode (v7.18.1) | `env_password_mismatch()` verificerer `CC_ADMIN_PASSWORD` mod den gemte hash og cacher svaret på `(email, sha256(kode), hash)`, så dashboardet ikke kører PBKDF2 ved hvert sidevisning. Advarslen ændrer intet ved kontoen; den forsvinder, når linjen rettes eller fjernes |
 | Første bruger (reserve) | `/setup` — kun åben når `users` er tom, altså når `.env` ikke har de to linjer |
 | Rate limit | 5 fejl pr. IP = 10 min lås (bounded dict) |
 | UI-adgang | Middleware sætter `request.state.user`; ikke-loggede sendes til `/setup` eller `/login` |
@@ -141,6 +142,7 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 
 ## 12. Versionshistorik (kort)
 
+- **v7.18.1** — advarsel når `.env`-koden er forældet: `env_password_mismatch()` sammenligner `CC_ADMIN_PASSWORD` med den gemte hash, `warn_stale_env_password()` skriver den til opstartsloggen og `alarms`, og dashboardet viser en rød bjælke (`env_password_warning`). Kontoen røres ikke — login bruger den nye kode
 - **v7.18** — standardbruger ved deployment: `seed_standard_user()` i lifespan opretter kontoen fra `CC_ADMIN_EMAIL` + `CC_ADMIN_PASSWORD`, når `users` er tom, med `must_change_password` og en alarm ved oprettelse/afvisning. `/setup` er degraderet til reserve og login-siden fortæller om `.env`-linjerne. Begge suiter dækker seed, login uden `/setup`, at en rettet `.env` ikke rører en konto i brug, og at en ugyldig linje hverken giver konto eller tavshed
 - **v7.17.2** — invitationen svarer i sin egen formular: `POST /users/invite` redirecter til `/?tab=brugere&invite=ok|fejl&invite_msg=…`, dashboardet åbner den fane (`initial_tab`, kun kendte faner) og viser enten "sendt til X" eller mailserverens fejl. Før landede svaret på Cockpit, og en mislykket invitation var kun synlig som alarm
 - **v7.17.1** — MCP-hærdning: nøglen ligger ikke længere i klartekst i databasen (rækken i `settings.api_key_once` slettes ved visning, TTL 15 min., oprydningen fjerner resten; `POST /api-keys/dismiss` er fjernet), og ukendte værktøjsnavne på `/mcp` logges nu i `api_audit`

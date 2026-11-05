@@ -109,10 +109,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.18.0"
+APP_VERSION = "7.18.1"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.18.1", "Advarsel paa skaermen og i dashboardet, naar CC_ADMIN_PASSWORD i .env ikke laengere passer til kontoen"),
     ("7.18.0", "Standardbrugeren oprettes ved opstart fra CC_ADMIN_EMAIL + CC_ADMIN_PASSWORD - /setup er kun reserve"),
     ("7.17.2", "Invitationen viser selv om mailen blev sendt - foer laa fejlen kun under Alarmer"),
     ("7.17.1", "MCP-noeglen ligger ikke laengere i klartekst i DB'en, og ukendte vaerktoejer havner i auditten"),
@@ -710,6 +711,52 @@ def seed_standard_user() -> str:
     with get_db() as db:
         add_alarm(db, "brugere", f"Standardbrugeren '{email}' oprettet ved opstart fra .env", "info")
     return "oprettet"
+
+
+# Sidste verificerede svar paa "passer .env-koden?" - PBKDF2 er 240k iterationer, saa dashboardet
+# maa ikke betale den pris ved hver sidevisning. Noeglen er (e-mail, sha256(kode), gemt hash).
+_ENV_PASSWORD_STATE = {"sig": None, "msg": ""}
+
+
+def env_password_mismatch() -> str:
+    """Advarsel naar CC_ADMIN_PASSWORD ikke laengere passer til standardbrugeren - ellers "".
+
+    Koden i .env bruges kun, naar kontoen seedes. Skiftes den i UI'et (eller med
+    scripts/user_create.py), bliver linjen i .env foraeldet: login bruger den nye kode, mens filen
+    lover den gamle. Advarslen findes, saa man retter .env i stedet for at saette koden tilbage.
+    """
+    email, password = standard_user_settings()
+    if not email or not password:
+        return ""
+    try:
+        row = find_user(email)
+    except Exception:
+        return ""
+    if not row:
+        return ""
+    sig = (row["email"], hashlib.sha256(password.encode()).hexdigest(), row["password_hash"])
+    if _ENV_PASSWORD_STATE["sig"] == sig:
+        return _ENV_PASSWORD_STATE["msg"]
+    msg = ""
+    if not verify_password(password, row["password_hash"]):
+        msg = (f"{ADMIN_PASSWORD_ENV} i .env passer ikke længere til '{row['email']}' - koden er "
+               f"skiftet i UI'et, så login bruger den nye kode. Ret eller fjern linjen i .env.")
+    _ENV_PASSWORD_STATE.update(sig=sig, msg=msg)
+    return msg
+
+
+def warn_stale_env_password() -> str:
+    """Lægger advarslen i Alarmer ved opstart (dedupe som de andre) og returnerer teksten."""
+    msg = env_password_mismatch()
+    if not msg:
+        return ""
+    try:
+        with get_db() as db:
+            add_alarm(db, "brugere", msg, "advarsel")
+    except Exception:
+        pass
+    return msg
+
 
 
 def find_user(identifier: str):
@@ -4049,6 +4096,7 @@ async def dashboard(request: Request):
         "alert_outbox": alert_outbox,
         "alert_problems": alert_problems,
         "current_user": getattr(request.state, "user", None),
+        "env_password_warning": env_password_mismatch(),
         "update_state": update_state,
         "update_token": bool(GITHUB_TOKEN),
         "update_repo": GITHUB_REPO,
@@ -4601,6 +4649,12 @@ async def lifespan(app_: FastAPI):
             print(f"[cc] standardbruger ({ADMIN_EMAIL_ENV}): {seed_status}", flush=True)
     except Exception as e:
         print("[cc] standardbruger kunne ikke oprettes:", repr(e), flush=True)
+    try:
+        stale = warn_stale_env_password()
+        if stale:
+            print(f"[cc] advarsel: {stale}", flush=True)
+    except Exception as e:
+        print("[cc] .env-koden kunne ikke tjekkes:", repr(e), flush=True)
     try:
         scheduler.add_job(job_check_domains, IntervalTrigger(hours=6), id="domain_checks", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_check_keywords, CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True, max_instances=1, coalesce=True)

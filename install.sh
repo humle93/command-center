@@ -223,15 +223,14 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.19.2"
+APP_VERSION = "7.20.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
-    ("7.19.2", "Dashboardet viser, hvornaar og af hvem CC_ADMIN_PASSWORD blev fjernet fra .env"),
-    ("7.19.1", "CC_ADMIN_PASSWORD fjernes fra .env, naar standardbrugeren skifter kode - saa kan linjen ikke blive foraeldet"),
+    # v7.20.0 samler hele .env-forloebet i eet punkt, saa nyhedslisten viser det som én historie
+    # i stedet for fire loesrevne nedslag. De fire trin staar stadig i README og i version-historikken.
+    ("7.20.0", "Standardbrugeren i .env: oprettes ved deployment, advarer naar koden er foraeldet, rydder linjen selv og viser rydningen i dashboardet"),
     ("7.19.0", "Autopilot-broen henter hele /snapshot (selvtjek, cron-forsinkelse, pause-aarsag) og holder WP-Cron i gang hvert 5. min"),
-    ("7.18.1", "Advarsel paa skaermen og i dashboardet, naar CC_ADMIN_PASSWORD i .env ikke laengere passer til kontoen"),
-    ("7.18.0", "Standardbrugeren oprettes ved opstart fra CC_ADMIN_EMAIL + CC_ADMIN_PASSWORD - /setup er kun reserve"),
     ("7.17.2", "Invitationen viser selv om mailen blev sendt - foer laa fejlen kun under Alarmer"),
     ("7.17.1", "MCP-noeglen ligger ikke laengere i klartekst i DB'en, og ukendte vaerktoejer havner i auditten"),
     ("7.17.0", "MCP fase 2: skrivende vaerktoejer med write-scope og audit pr. noegle"),
@@ -6529,19 +6528,22 @@ EOF_USERSVC
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.18 PRO
+# Command Center v7.20 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
 
-## Nyheder i v7.18
+## Nyheder i v7.20
 
-- **Standardbruger ved deployment (v7.18)** — skriv `CC_ADMIN_EMAIL` + `CC_ADMIN_PASSWORD` i `.env`, så oprettes kontoen ved opstart, og du kan logge ind med det samme; opsætningssiden er ikke længere en del af et normalt deployment. Koden gemmes kun som PBKDF2-hash, kontoen oprettes med `must_change_password` (gul bjælke indtil du skifter den under fanen **Brugere**), og der seedes kun, når `users` er tom — en senere ændring af `.env` rører ikke en konto i brug. Er linjerne tomme, er `/setup` stadig reserven. Adgangskoden står kun i `.env` (gitignored), aldrig i repoet eller i loggen
-- **Dashboardet viser rydningen (v7.19.2)** — øverst står en blå bjælke med tidspunkt og navn, fx "CC_ADMIN_PASSWORD blev fjernet fra .env 5. november 2026 kl. 23:19 af henning", så du kan se filens tilstand uden at åbne den. Sætter du linjen tilbage i `.env`, skifter bjælken tekst og siger det, så den ikke påstår noget forkert; bliver koden samtidig forældet, vinder den røde advarsel. Kun navn og tidspunkt gemmes (i `settings` under `env_password_cleared`) — aldrig en kode — så rydningen også ses efter en genstart
+**Standardbrugeren i `.env` — ét samlet forløb (v7.18 → v7.20).** Hele vejen fra kontoen oprettes, til filen ikke kan komme til at lyve om koden. De fire trin bygger på hinanden og vises i appen som én nyhed (v7.20.0):
+
+- **Kontoen oprettes ved deployment (v7.18.0)** — skriv `CC_ADMIN_EMAIL` + `CC_ADMIN_PASSWORD` i `.env`, så oprettes kontoen ved opstart, og du kan logge ind med det samme; opsætningssiden er ikke længere en del af et normalt deployment. Koden gemmes kun som PBKDF2-hash, kontoen oprettes med `must_change_password` (gul bjælke indtil du skifter den under fanen **Brugere**), og der seedes kun, når `users` er tom — en senere ændring af `.env` rører ikke en konto i brug. Er linjerne tomme, er `/setup` stadig reserven. Adgangskoden står kun i `.env` (gitignored), aldrig i repoet eller i loggen
+- **Advarsel når koden er forældet (v7.18.1)** — skifter du koden under **Brugere**, passer `CC_ADMIN_PASSWORD` ikke længere. Så skriver opstartsloggen `[cc] advarsel: …`, advarslen ligger under **Alarmer**, og dashboardet viser en rød bjælke, indtil du retter eller fjerner linjen i `.env`. Kontoen røres ikke — login bruger den nye kode
 - **Linjen rydder sig selv (v7.19.1)** — skifter **du** koden under **Brugere**, tømmes `CC_ADMIN_PASSWORD` i `.env` automatisk (kun den linje; kommentarer og de andre nøgler står urørt). Så kan filen ikke komme til at love en kode, login afviser. Kan filen ikke skrives, ændres intet ved kontoen — så bliver advarslen fra v7.18.1 stående i stedet
-- **Advarsel når `.env`-koden er forældet (v7.18.1)** — skifter du koden under **Brugere**, passer `CC_ADMIN_PASSWORD` ikke længere. Så skriver opstartsloggen `[cc] advarsel: …`, advarslen ligger under **Alarmer**, og dashboardet viser en rød bjælke, indtil du retter eller fjerner linjen i `.env`. Kontoen røres ikke — login bruger den nye kode
+- **Dashboardet viser rydningen (v7.19.2)** — øverst står en blå bjælke med tidspunkt og navn, fx "CC_ADMIN_PASSWORD blev fjernet fra .env 5. november 2026 kl. 23:19 af henning", så du kan se filens tilstand uden at åbne den. Sætter du linjen tilbage i `.env`, skifter bjælken tekst og siger det, så den ikke påstår noget forkert; bliver koden samtidig forældet, vinder den røde advarsel. Kun navn og tidspunkt gemmes (i `settings` under `env_password_cleared`) — aldrig en kode — så rydningen også ses efter en genstart
+
 - **MCP-hærdning (v7.17.1)** — nøglen ligger ikke længere i klartekst i databasen: rækken i `settings` slettes i samme kald som dashboardet viser den (højst 15 min. hvis siden aldrig åbnes, og oprydningen fjerner resten). "Jeg har gemt nøglen"-knappen er derfor væk. Ukendte værktøjsnavne på `/mcp` havner nu også i auditten, så en nøgle der famler kan ses.
 - **MCP skriver nu også (fase 2)** — med `read,write` på nøglen kan en agent starte et site-crawl, oprette en monitor, løse en alarm og skrive en note (`start_crawl`, `add_monitor`, `resolve_alarm`, `add_note`). Hvert kald — også afviste — havner i en **audit pr. nøgle** (`api_audit`) med værktøj, varighed og fejl, som du ser i fanen **Brugere** og med `python3 scripts/api_key.py audit`. Værktøjerne har `readOnlyHint`/`destructiveHint`, så klienten kan advare før et kald.
 - **MCP-adgang (fase 1)** — agenter og editorer kan læse Command Center direkte. Under fanen **Brugere** opretter du en nøgle pr. klient (ingen fælles token); den vises én gang, gemmes kun som sha256 og kan tilbagekaldes enkeltvis. `POST /mcp` tilbyder syv læse-værktøjer: `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes` og `history`. Endpointet validerer `Origin`/`Host` (DNS-rebinding) og svarer `401` med `WWW-Authenticate` uden nøgle — se [docs/Command_Center_MCP.md](docs/Command_Center_MCP.md).

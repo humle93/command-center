@@ -109,15 +109,14 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.19.2"
+APP_VERSION = "7.20.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
-    ("7.19.2", "Dashboardet viser, hvornaar og af hvem CC_ADMIN_PASSWORD blev fjernet fra .env"),
-    ("7.19.1", "CC_ADMIN_PASSWORD fjernes fra .env, naar standardbrugeren skifter kode - saa kan linjen ikke blive foraeldet"),
+    # v7.20.0 samler hele .env-forloebet i eet punkt, saa nyhedslisten viser det som én historie
+    # i stedet for fire loesrevne nedslag. De fire trin staar stadig i README og i version-historikken.
+    ("7.20.0", "Standardbrugeren i .env: oprettes ved deployment, advarer naar koden er foraeldet, rydder linjen selv og viser rydningen i dashboardet"),
     ("7.19.0", "Autopilot-broen henter hele /snapshot (selvtjek, cron-forsinkelse, pause-aarsag) og holder WP-Cron i gang hvert 5. min"),
-    ("7.18.1", "Advarsel paa skaermen og i dashboardet, naar CC_ADMIN_PASSWORD i .env ikke laengere passer til kontoen"),
-    ("7.18.0", "Standardbrugeren oprettes ved opstart fra CC_ADMIN_EMAIL + CC_ADMIN_PASSWORD - /setup er kun reserve"),
     ("7.17.2", "Invitationen viser selv om mailen blev sendt - foer laa fejlen kun under Alarmer"),
     ("7.17.1", "MCP-noeglen ligger ikke laengere i klartekst i DB'en, og ukendte vaerktoejer havner i auditten"),
     ("7.17.0", "MCP fase 2: skrivende vaerktoejer med write-scope og audit pr. noegle"),

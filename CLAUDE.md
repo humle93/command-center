@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 5. november 2026 · **Version:** 7.19.2 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 5. november 2026 · **Version:** 7.20.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,12 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Release v7.20.0: `.env`-forløbet samlet (5. november)
+- **Hvad:** versionsbump til 7.20.0 og ét samlet nyhedspunkt i `NEWEST` i stedet for fire (7.18.0, 7.18.1, 7.19.1, 7.19.2). `NEWEST` er det, opstartsbanneret, `/health` og login-siden viser, så brugeren nu ser hele historien som én linje: “Standardbrugeren i .env: oprettes ved deployment, advarer naar koden er foraeldet, rydder linjen selv og viser rydningen i dashboardet”.
+- **README:** afsnittet hedder nu “Nyheder i v7.20” og indledes med det samlede forløb, hvor de fire trin står som underpunkter. Titlen er `v7.20 PRO`.
+- **Uændret:** al adfærd, ruter, tabeller og tests. De fire trin står stadig enkeltvis i `docs/Command_Center_Dokumentation.md` og i ROADMAP-tabellen, så historikken ikke er rørt.
+- **Verifikation:** `tests/test_v8_features.py` tjekker at toppunktet er 7.20.0, at der kun er ét `.env`-nedslag tilbage, og at login-siden viser den samlede linje.
 
 ### Rydningen vises i dashboardet (5. november, v7.19.2)
 - **Baggrund:** efter v7.19.1 var linjen væk — men der var ingen steder at se, at det var sket med vilje, eller hvem der skiftede koden.

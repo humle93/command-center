@@ -846,6 +846,18 @@ check("ryd .env: hverken den gamle eller den nye kode staar i filen",
 check("ryd .env: advarslen forsvinder med linjen", main.env_password_mismatch() == "",
       main.env_password_mismatch())
 check("ryd .env: baren er væk efter kodeskiftet", "border-red-500/40" not in sd.get("/").text)
+# --- v7.20.0: hele .env-forloebet er eet nyhedspunkt, ikke fire ---
+check("release: toppunktet i NEWEST er 7.20.0", main.NEWEST[0][0] == "7.20.0", main.NEWEST[0])
+_env_points = [(v, t) for v, t in main.NEWEST if ".env" in t]
+check("release: kun eet .env-nedslag tilbage", len(_env_points) == 1, _env_points)
+check("release: det samlede punkt naevner alle fire trin",
+      all(w in main.NEWEST[0][1] for w in ("deployment", "foraeldet", "rydder linjen selv", "dashboardet")))
+check("release: versionen i banner og nyheder stemmer",
+      main.APP_VERSION in "\n".join(main.startup_banner())
+      and all(f"nyhed {v}" in "\n".join(main.startup_banner()) for v, _ in main.NEWEST[:3]))
+_login = sd.get("/login")
+check("release: login-siden viser den samlede linje",
+      main.NEWEST[0][0] in _login.text and "rydder linjen selv" in _login.text, _login.status_code)
 # --- v7.19.2: dashboardet viser, hvornaar og af hvem linjen blev ryddet ---
 _notice = main.env_password_notice()
 _when = main.danish_time(main.env_password_cleared().get("at", ""))

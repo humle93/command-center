@@ -7,7 +7,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)
-os.environ.update(APP_TOKEN="", AIMLAPI_KEY="test-key", WP_URL="", WP_USER="", WP_APP_PASSWORD="")
+os.environ.update(APP_TOKEN="", CC_ALLOW_NO_AUTH="1", AIMLAPI_KEY="test-key", WP_URL="", WP_USER="", WP_APP_PASSWORD="")
 
 from app import main  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

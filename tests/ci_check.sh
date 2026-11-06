@@ -42,6 +42,20 @@ curl -s -o /dev/null -H "$A" -X POST $U/settings/module -d name=autopilot -d sta
 check "modules: switching off takes effect at once (cache cleared)" "$(curl -s -H "$A" $U/ | grep -c 'Autopilot-bro (WordPress)\" er slukket\|Modulet \"Autopilot-bro\" er slukket')" "1"
 curl -s -o /dev/null -H "$A" -X POST $U/settings/module -d name=autopilot -d state=on
 
+# --- v7.11: CSRF + sikkerhedsheaders ---
+JAR="$TMP/cookies.txt"; HDR="$TMP/login.hdr"; rm -f "$JAR" "$HDR"
+curl -s -c "$JAR" -D "$HDR" -o /dev/null -X POST $U/login -d token=citest
+CSRF=$(grep -i '^set-cookie: cc_csrf=' "$HDR" | head -1 | sed 's/.*cc_csrf=\([^;]*\).*/\1/' | tr -d '\r')
+check "csrf: login saetter cc_csrf-cookie" "$([ -n "$CSRF" ] && echo ja || echo nej)" "ja"
+check "csrf: POST uden token afvises" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -X POST $U/settings/module -d name=keywords -d state=on)" "403"
+check "csrf: csrf_token-felt accepteres" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -X POST $U/settings/module -d name=keywords -d state=on -d "csrf_token=$CSRF")" "303"
+check "csrf: X-CSRF-Token accepteres" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H "X-CSRF-Token: $CSRF" -X POST $U/settings/module -d name=keywords -d state=on)" "303"
+check "csrf: forket token afvises" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -X POST $U/settings/module -d name=keywords -d state=on -d csrf_token=forkert)" "403"
+check "csrf: X-CC-Token-klient er fritaget" "$(curl -s -o /dev/null -w '%{http_code}' -H "$A" -X POST $U/settings/module -d name=keywords -d state=on)" "303"
+check "headers: x-content-type-options" "$(curl -s -D - -o /dev/null -H "$A" $U/ | tr -d '\r' | grep -ci '^x-content-type-options: nosniff')" "1"
+check "headers: content-security-policy" "$(curl -s -D - -o /dev/null -H "$A" $U/ | tr -d '\r' | grep -ci '^content-security-policy: default-src')" "1"
+check "headers: x-frame-options" "$(curl -s -D - -o /dev/null -H "$A" $U/ | tr -d '\r' | grep -ci '^x-frame-options: deny')" "1"
+
 check "no Python tracebacks" "$(grep -c Traceback "$TMP/cc.log")" "0"
 [ "$FAIL" = 0 ] && echo "ALL PASS" || { echo "SOME FAILED"; tail -40 "$TMP/cc.log"; }
 exit $FAIL

@@ -7,6 +7,41 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <!-- v7.11: CSRF - alle POSTs fra dashboardet skal baere cc_csrf-tokenen (double-submit) -->
+    <script>
+      (function () {
+        function csrf() {
+          var m = document.cookie.match(/(?:^|;\s*)cc_csrf=([^;]+)/);
+          return m ? decodeURIComponent(m[1]) : '';
+        }
+        document.addEventListener('submit', function (e) {
+          var f = e.target;
+          if (!f || String(f.method || 'get').toLowerCase() !== 'post') return;
+          var field = f.querySelector('input[name="csrf_token"]');
+          if (!field) {
+            field = document.createElement('input');
+            field.type = 'hidden';
+            field.name = 'csrf_token';
+            f.appendChild(field);
+          }
+          field.value = csrf();
+        }, true);
+        var nativeFetch = window.fetch;
+        window.fetch = function (input, init) {
+          init = init || {};
+          var url = typeof input === 'string' ? input : (input && input.url) || '';
+          var method = String(init.method || (input && input.method) || 'GET').toUpperCase();
+          var unsafe = method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
+          var sameOrigin = !/^https?:\/\//i.test(url) || url.indexOf(location.origin) === 0;
+          if (unsafe && sameOrigin) {
+            var headers = new Headers(init.headers || {});
+            headers.set('X-CSRF-Token', csrf());
+            init.headers = headers;
+          }
+          return nativeFetch.call(window, input, init);
+        };
+      })();
+    </script>
     <link rel="preconnect" href="https://cdn.tailwindcss.com" crossorigin>
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
     <meta name="theme-color" content="#09090b">
@@ -37,7 +72,7 @@
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.10 PRO</span></h1>
+            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.11 PRO</span></h1>
             <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">

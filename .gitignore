@@ -3,3 +3,4 @@ app/data/
 app/static/
 .env
 venv/
+.mcp/

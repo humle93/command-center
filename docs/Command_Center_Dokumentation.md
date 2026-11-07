@@ -158,7 +158,7 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 - **v7.23.0** — Backup i UI: `POST /backup/now` og `POST /backup/restore` (kræver `GENDAN`), kort i fanen Moduler, `pre-restore`-backup før hver gendannelse
 - **v7.22.0** — Offline dashboard: Tailwind, Alpine og Chart.js serveres fra `app/static/vendor/` i stedet for CDN
 - **v7.21.0** — CSRF-beskyttelse (Origin/Sec-Fetch-Site-kontrol på muterende kald) og ny session ved hvert login
-- **v7.20.0** — månedligt API-budget og job-heartbeat vises på Cockpit; jobs pakkes i `job_heartbeat()` og alarmeres ved forsinkelse eller fejl (én gang pr. tilstand)
+- **v7.20.0** — månedligt API-budget og job-heartbeat vises på Cockpit; jobs pakkes i `job_heartbeat()` og alarmeres ved forsinkelse eller fejl (én gang pr. tilstand)  · **Release:** de fire `.env`-nedslag står nu som ét punkt i `NEWEST`, så opstartsbanner, `/health` og login-siden viser forløbet samlet
 - **v7.19.2** — rydningen kan ses i dashboardet: en blå bjælke øverst viser hvornår og af hvem `CC_ADMIN_PASSWORD` blev fjernet fra `.env`. Rækken `env_password_cleared` i `settings` holder navn og tidspunkt (aldrig koden), og "står linjen der?" læses fra filen selv
 - **v7.19.1** — `.env` rydder sig selv: når standardbrugeren skifter kode under Brugere, tømmer `clear_env_admin_password()` `CC_ADMIN_PASSWORD`-linjen (kun den linje, atomisk skrivning, filmode bevaret) og nulstiller advarsels-cachet
 - **v7.18.1** — advarsel når `.env`-koden er forældet: `env_password_mismatch()` sammenligner `CC_ADMIN_PASSWORD` med den gemte hash, `warn_stale_env_password()` skriver den til opstartsloggen og `alarms`, og dashboardet viser en rød bjælke (`env_password_warning`)

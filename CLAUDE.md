@@ -65,6 +65,13 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
   ikke kan vise hver sin sandhed.
 - Tests: 7 nye checks i `tests/test_v8_features.py` og 2 i `tests/ci_check.sh`; fake-WP har fået
   `/snapshot` og gemmer `X-Command-Center` i `<state>.cc`, så CI ser headeren.
+### Release v7.20.0: `.env`-forløbet samlet (5. november)
+- **Efter fletningen:** toppunktet i `NEWEST` er **7.23.0**, og `.env`-forløbet står som ét punkt på 7.19.0-linjen. Testen tjekker derfor mod `APP_VERSION` og mod det punkt, ikke mod indeks 0.
+- **Hvad:** versionsbump til 7.20.0 og ét samlet nyhedspunkt i `NEWEST` i stedet for fire (7.18.0, 7.18.1, 7.19.1, 7.19.2). `NEWEST` er det, opstartsbanneret, `/health` og login-siden viser, så brugeren nu ser hele historien som én linje: “Standardbrugeren i .env: oprettes ved deployment, advarer naar koden er foraeldet, rydder linjen selv og viser rydningen i dashboardet”.
+- **README:** afsnittet hedder nu “Nyheder i v7.20” og indledes med det samlede forløb, hvor de fire trin står som underpunkter. Titlen er `v7.20 PRO`.
+- **Uændret:** al adfærd, ruter, tabeller og tests. De fire trin står stadig enkeltvis i `docs/Command_Center_Dokumentation.md` og i ROADMAP-tabellen, så historikken ikke er rørt.
+- **Verifikation:** `tests/test_v8_features.py` tjekker at toppunktet er 7.20.0, at der kun er ét `.env`-nedslag tilbage, og at login-siden viser den samlede linje.
+
 ### Rydningen vises i dashboardet (5. november, v7.19.2)
 - **Baggrund:** efter v7.19.1 var linjen væk — men der var ingen steder at se, at det var sket med vilje, eller hvem der skiftede koden.
 - **Nyt:** `clear_env_admin_password()` gemmer `{at, by, account}` i `settings` under `env_password_cleared` (kun navn og tidspunkt, aldrig koden), og `env_password_notice()` læser den tilbage til en blå bjælke øverst i dashboardet: “CC_ADMIN_PASSWORD blev fjernet fra .env 5. november 2026 kl. 23:19 af henning — filen kan ikke blive forældet”.

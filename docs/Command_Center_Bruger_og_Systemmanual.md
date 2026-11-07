@@ -16,24 +16,37 @@ Derefter logger du ind med e-mail og adgangskode. Konti fra før v7.15 (oprettet
 
 Under fanen **Brugere**:
 
-- **Inviter bruger** — skriv en e-mail, og appen sender en invitation med en midlertidig adgangskode (12 tegn). Brugeren skal skifte den ved første login, og dashboardet viser en gul bjælke indtil da. Invitationen kræver `SMTP_HOST` + `SMTP_FROM` i `.env`: kan mailen ikke sendes, bliver brugeren **ikke** oprettet, og fejlen vises med det samme i formularen (og under fanen Alarmer). Formularen bliver stående på fanen Brugere, så du ikke skal lede efter svaret
-- **Slet bruger** gør det samme som før, og den sidste bruger kan ikke slettes, så du ikke låser dig ude
+- **Inviter bruger** — skriv en e-mail, og appen sender en invitation med en midlertidig adgangskode (12 tegn). Brugeren skal skifte den ved første login, og dashboardet viser en gul bjælke indtil da. Invitationen kræver `SMTP_HOST` + `SMTP_FROM` i `.env`: kan mailen ikke sendes, bliver brugeren **ikke** oprettet, og fejlen vises med det samme i formularen (og under fanen Alarmer). Formularen bliver stående på fanen Brugere, så du ikke skal lede efter svaret. Adressen tjekkes **før** der sendes noget: en pladsholder fra dokumentationen (`navn@domaene.dk`) eller en adresse uden `@` forklares i formularen i stedet for at blive en konto, ingen kan modtage post på — og er adressen rigtig alligevel, står der en **Opret alligevel**-knap ved siden af forklaringen
+- **Slet bruger** (✕ ud for brugeren) sletter kontoen og dens sessioner, og svaret kommer i fanen med det samme: grønt når brugeren er væk, rødt med en forklaring når sletningen blev afvist. Den sidste bruger kan ikke slettes, så du ikke låser dig ude; et id der ikke findes (fx slettet i en anden fane) eller et tomt id bliver sagt højt i stedet for at se ud som en gennemført sletning
 - Sletter du dig selv, bliver du logget ud
 
 Invitationen kan også sendes fra serveren uden browser — samme funktion, samme krav til SMTP:
 
 ```bash
 python3 scripts/invite.py cpaleadsis@gmail.com                      # adressen kommer fra CC_PUBLIC_URL
-python3 scripts/invite.py navn@domaene.dk https://cc.example.dk     # eller angiv den selv
+python3 scripts/invite.py cpaleadsis@gmail.com --base-url https://cc.example.dk   # eller angiv den selv
 python3 scripts/invite.py cpaleadsis@gmail.com --print              # ingen SMTP: udskriv mailen
 ```
 
 Scriptet skriver, hvad der blev sendt, og stopper med en fejl (intet oprettes), hvis mailen ikke kan sendes.
 Med `--print` kræves ingen SMTP: brugeren oprettes med en midlertidig kode, og den færdige mail
 (emne + tekst med koden) skrives til skærmen, så den kan sendes fra en anden mailkonto.
+
+Argumenterne tjekkes, **før** der oprettes noget, så en tastefejl ikke bliver en bruger, ingen kan bruge:
+
+- **én e-mailadresse ad gangen** — skal der inviteres flere, køres scriptet én gang pr. adresse. Et ekstra argument giver en fejl i stedet for en ekstra bruger
+- adressen i mailen angives som `--base-url https://…`; den gamle form `python3 scripts/invite.py <e-mail> <adresse>` virker stadig, når det andet argument er en http(s)-URL
+- **ukendte flag afvises** — fx `--prnt` svarer "mente du --print?" i stedet for stille at sende en rigtig mail
+- **eksempel-adresser afvises** — `navn@domaene.dk`, `dit.navn@…` og `example.com` stopper med en forklaring, fordi ingen kan modtage post der. Er adressen rigtig alligevel, tilføj `--force`
+- `--help` viser brugslinjen
+
+Ved fejl skrives forklaringen, brugslinjen og "Intet blev oprettet.", og scriptet afslutter med kode 2
+(kode 1 = mailen kunne ikke sendes).
 - **Skift min adgangskode** — kræver den nuværende; dine andre sessioner logges ud
 
 Efter 5 fejlede logins fra samme IP er login låst i 10 minutter.
+
+Hvert login giver en ny session, og den gamle session slettes. Ændringer, der sker fra en anden side (fx et skjult formularkald fra en anden hjemmeside), afvises med 403 — det er forventet, og du skal blot logge ind igen og prøve fra Command Center.
 
 ![Login](img/cc-login.png)
 
@@ -48,6 +61,8 @@ Fanerne er nummereret i den rækkefølge, et normalt arbejdsflow bruger dem.
 
 - **Opdatering fra GitHub**: installeret commit vs. seneste commit på `main`, "Tjek for nye commits" og "Opdater" (se nedenfor)
 - Domæneovervågning: uptime, svartid, SSL-udløb (historik + graf via 📈)
+- **💳 API-budget denne måned**: forbrug og loft for SerpAPI og AI (aimlapi). Ved 80 % kommer en advarsel, ved 100 % stoppes de betalte kald
+- **⏱️ Planlagte jobs (heartbeat)**: hvornår hvert job sidst kørte OK. Et job der er forsinket eller fejlet giver en alarm (én gang pr. tilstand), og alarmen forsvinder når jobbet kører igen
 - **"Sådan bruger du Command Center"**: 4 klikbare trin gennem workflowet
 - Alarmer og noter
 
@@ -103,7 +118,8 @@ Artikel-forhåndsvisningen i dashboardet vises med saniteret HTML: kun formateri
 
 ### 7. Social
 
-- **Steamgears Autopilot**: kø, kladder der venter på godkendelse, og udgivet/klik/ordrer/omsætning pr. kanal (30 dage). "→ Autopilot" sender et opslag som kladde til WordPress-pluginnet
+- **Steamgears Autopilot**: kø, kladder der venter på godkendelse, og udgivet/klik/ordrer/omsætning pr. kanal (30 dage). "→ Autopilot" sender et opslag som kladde til WordPress-pluginnet. **🔑 Log ind på Command Center** lægger et engangslink i pluginnet, så knappen dér logger dig ind her uden adgangskode — linket holder 10 minutter og virker kun én gang; er det brugt, siger login-siden det
+- **Hvornår kaldte CC sidst?** Under login-knappen står WordPress' eget svar: fx "WordPress hoerte sidst fra Command Center for 12 min. siden" med version, rute og bruger. Tallet er det samme som kortet i WordPress viser, fordi begge læser pluginnets `sgap_cc_seen` — og det regnes ud ved visning, så det vokser, når der ikke kommer kald. Over 45 min. er en sync-runde misset (gul), over 2 timer er broen sandsynligvis brudt (rød), og så peger linjen på WordPress, `WP_URL`, `WP_USER` og `WP_APP_PASSWORD`. Hvert kald har `X-Command-Center`, som er det, der får WordPress til at notere det
 - **Kun én kladde pr. opslag**: rækken låses før kaldet til WordPress. Et dobbeltklik eller et genforsøg sender derfor intet ekstra, og status skifter til "sender til autopilot" mens kaldet kører. Afviser WordPress kaldet, får opslaget sin gamle status tilbage og kan sendes igen. Svarer WordPress slet ikke (timeout), bliver status "sendt? (svar udeblev)" med en alarm — tjek AI Drafts i WordPress, før du sender igen
 - **Planlagt tid**: vælg et tidspunkt i feltet under opslaget. Det viser zonen (`CC_TZ`, standard Europe/Copenhagen), og tiden gemmes både som lokal tid og UTC. "→ Autopilot" sender begge med, så tjenesten og Android-klienten ikke skal gætte. En tid der ikke findes (fx 02:30 den nat sommertiden starter) **afvises** med en alarm i stedet for at blive gættet
 - Opslagskø med CSV-export (kolonner for både lokal tid og UTC + zone)
@@ -274,11 +290,13 @@ Rigtige miljøvariabler vinder over `.env`. `.env` læses før appens konfigurat
 - **Backup**: `app/backups/cc-daglig-*.db` (14 gemmes) og `cc-pre-update-*.db` før hver opdatering
 - **Health**: `/health` returnerer 503 ved kritisk DB/disk-tilstand og viser månedens API-forbrug
 - **Tests**: `python3 tests/test_v8_features.py` og `bash tests/ci_check.sh` (boot, alle sider, auth, WordPress-bro og link-audit)
-- **Rollback**: stop appen, gendan `app/data/center.db` fra `app/backups/`, og kør `install.sh`/GitHub-opdatering igen
+- **Backup og gendannelse i UI**: fanen Moduler viser alle backups (nyeste først) med størrelse og tidspunkt. "Tag backup nu" laver en manuel backup. "Gendan" kræver at du skriver `GENDAN` i feltet ved siden af; systemet tager først en `pre-restore`-backup af den nuværende database og gendanner kun en fil, der består integritetstjekket og indeholder brugertabellen. Hvis den sikkerhedskopi fejler, gendannes der intet.
+- **Rollback (manuelt, hvis UI'et ikke kan bruges)**: stop appen, gendan `app/data/center.db` fra `app/backups/`, og kør `install.sh`/GitHub-opdatering igen
 
 ## Fejlfinding
 
 | Symptom | Tjek |
+| "… er en intern adresse" | CC afviser at hente en URL, der peger på loopback, et privat net eller sky-metadata (SSRF). Ret URL'en, eller sæt `CC_SSRF_ALLOW=vaerten` i `.env`, hvis det er en intern side, du faktisk vil måle |
 | --- | --- |
 | Bliver logget ud hele tiden | Bag nginx: mangler `X-Forwarded-Proto`? Så sættes cookien ikke `Secure` korrekt, og HTTPS-advarslen vises |
 | "GITHUB_TOKEN mangler" i opdaterings-panelet | Sæt token i `.env` (privat repo) og genstart appen |
@@ -300,7 +318,7 @@ Scriptet selv-installerer (venv, deps, `.env`-skabelon, nginx-config, systemd-un
 
 ## Alarmer og kanaler (v7.12)
 
-Alarmer (døde domæner, ændrede priser, fejlede keyword-tjek, budgetloft, strategi-mangler) sendes nu
+Alarmer (døde domæner, ændrede priser, fejlede keyword-tjek, budgetloft, strategi-mangler, forsinkede eller fejlede jobs) sendes nu
 til de kanaler du sætter i `.env`:
 
 | Kanal | Variabler |

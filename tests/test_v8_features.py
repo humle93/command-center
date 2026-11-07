@@ -10,6 +10,7 @@ os.chdir(ROOT)
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)
 os.environ.update(AIMLAPI_KEY="test-key", WP_URL="", WP_USER="", WP_APP_PASSWORD="")
 
+__import__("os").environ.setdefault("CC_SSRF_ALLOW", "127.0.0.1")  # lokale testservere
 from app import main  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -292,6 +293,20 @@ check("login: IP gemmes paa bruger, session og i loggen",
       usr and usr["last_login_ip"] == "203.0.113.9" and ses and ses["ip"] == "203.0.113.9" and okn == 1,
       (usr and dict(usr), ses and dict(ses), okn))
 
+# Her findes praecis én bruger: en sletning af den skal forklares i fanen, ikke bare give en alarm.
+with main.get_db() as db:
+    only_id = db.execute("SELECT id FROM users WHERE email='iptest@example.dk'").fetchone()["id"]
+r = b.post("/users/delete", data={"id": str(only_id)}, follow_redirects=False)
+with main.get_db() as db:
+    survivors = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+check("delete: den sidste bruger kan ikke slettes - og svaret lander i Brugere-fanen",
+      r.status_code == 303 and survivors == 1 and "del_kind=sidste" in (r.headers.get("location") or ""),
+      (r.status_code, r.headers.get("location"), survivors))
+_del_side = b.get(r.headers["location"])
+check("delete: formularen forklarer hvorfor den sidste bruger bliver",
+      _del_side.status_code == 200 and "Brugeren blev ikke slettet" in _del_side.text
+      and "mindst én bruger" in _del_side.text, _del_side.text[:160])
+
 b.post("/login", data={"email": "iptest@example.dk", "password": "helt-forkert"}, follow_redirects=False,
        headers={"x-forwarded-for": "198.51.100.7"})
 with main.get_db() as db:
@@ -374,6 +389,174 @@ check("invite: dashboardet viser fejlen i formularen",
       _fail_side.text[:160])
 check("invite: en ukendt fane falder tilbage til Cockpit",
       "tab: 'cockpit'" in d.get("/?tab=findes-ikke").text)
+
+# --- v7.17.3: formularen bruger samme tjek som scripts/invite.py, saa en pladsholder forklares ---
+main.send_email = _fake_send
+r = d.post("/users/invite", data={"email": "dit.navn@domaene.dk"}, follow_redirects=False)
+with main.get_db() as db:
+    ph_user = db.execute("SELECT COUNT(*) FROM users WHERE email='dit.navn@domaene.dk'").fetchone()[0]
+check("invite: en eksempel-adresse afvises i formularen uden at blive en bruger",
+      r.status_code == 303 and ph_user == 0 and "invite_kind=eksempel" in (r.headers.get("location") or ""),
+      (r.status_code, r.headers.get("location"), ph_user))
+_ph_side = d.get(r.headers["location"])
+check("invite: formularen forklarer pladsholderen og tilbyder 'opret alligevel'",
+      _ph_side.status_code == 200 and "Adressen blev afvist" in _ph_side.text
+      and "Opret alligevel" in _ph_side.text and "domaene.dk" in _ph_side.text, _ph_side.text[:160])
+check("invite: formularens pladsholder er ikke selv en afvist adresse",
+      main.example_email_hint("bruger@ditfirma.dk") == "" and "placeholder=\"bruger@ditfirma.dk\"" in _ph_side.text)
+r = d.post("/users/invite", data={"email": "dit.navn@domaene.dk", "force": "1"}, follow_redirects=False)
+with main.get_db() as db:
+    forced_user = db.execute("SELECT COUNT(*) FROM users WHERE email='dit.navn@domaene.dk'").fetchone()[0]
+    db.execute("DELETE FROM users WHERE email='dit.navn@domaene.dk'")
+check("invite: force i formularen opretter brugeren alligevel",
+      (r.headers.get("location") or "").startswith("/?tab=brugere&invite=ok") and forced_user == 1,
+      (r.headers.get("location"), forced_user))
+r = d.post("/users/invite", data={"email": "ikke-en-mail"}, follow_redirects=False)
+check("invite: en ugyldig adresse forklares som en adressefejl, ikke en mailserver-fejl",
+      "invite_kind=adresse" in (r.headers.get("location") or ""), r.headers.get("location"))
+main.send_email = _orig_send
+
+# --- v7.17.4: sletning svarer i formularen, ligesom invitationen ---
+tmp_id = main.create_user("slettes@example.dk", "slettes-pass-1")
+r = d.post("/users/delete", data={"id": str(tmp_id)}, follow_redirects=False)
+with main.get_db() as db:
+    gone = db.execute("SELECT COUNT(*) FROM users WHERE id=?", (tmp_id,)).fetchone()[0]
+    logged = db.execute("SELECT COUNT(*) FROM alarms WHERE message LIKE '%blev slettet%'").fetchone()[0]
+check("delete: en slettet bruger er vaek, og sletningen staar i loggen",
+      r.status_code == 303 and "del=ok" in (r.headers.get("location") or "") and gone == 0 and logged >= 1,
+      (r.headers.get("location"), gone, logged))
+r = d.post("/users/delete", data={"id": "999999"}, follow_redirects=False)
+check("delete: et ukendt id forklares i stedet for at se ud som en sletning",
+      "del_kind=findes-ikke" in (r.headers.get("location") or ""), r.headers.get("location"))
+r = d.post("/users/delete", data={"id": "abc"}, follow_redirects=False)
+_bad_side = d.get(r.headers["location"])
+check("delete: et ugyldigt id forklares i formularen",
+      "del_kind=ugyldig" in (r.headers.get("location") or "")
+      and "Brugeren blev ikke slettet" in _bad_side.text, (r.headers.get("location"), _bad_side.text[:120]))
+
+# --- v7.17.5: knappen i WordPress faar et engangslink til Command Center ---
+_me = main.find_user("iptest@example.dk")
+code = main.cc_login_issue(_me["id"])
+check("cc-login: engangskoden virker en gang og derefter ikke",
+      main.cc_login_consume(code) == _me["id"] and main.cc_login_consume(code) is None)
+check("cc-login: tom og ukendt kode afvises",
+      main.cc_login_consume("") is None and main.cc_login_consume("findes-ikke") is None)
+with main.get_db() as db:
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+               (main.CC_LOGIN_KEY, __import__("json").dumps({"hash": main.hashlib.sha256(b"gammel").hexdigest(),
+                                                             "user_id": _me["id"], "exp": 1})))
+check("cc-login: en udloebet kode afvises", main.cc_login_consume("gammel") is None)
+z = TestClient(main.app)
+code2 = main.cc_login_issue(_me["id"])
+r = z.get("/cc-login?code=" + code2, follow_redirects=False)
+check("cc-login: linket logger ind uden adgangskode",
+      r.status_code == 303 and main.SESSION_COOKIE in (r.headers.get("set-cookie") or "")
+      and z.get("/").status_code == 200, r.status_code)
+r = z.get("/cc-login?code=" + code2, follow_redirects=False)
+check("cc-login: et brugt link sendes til login med en forklaring",
+      (r.headers.get("location") or "").startswith("/login?cc=")
+      and "allerede brugt" in TestClient(main.app).get("/login?cc=udloebet").text,
+      r.headers.get("location"))
+_ready, _api = main.sgap_ready, main.sgap_api
+pushed = []
+main.sgap_ready = lambda: True
+main.sgap_api = lambda method, path, **kw: (pushed.append((method, path, kw.get("json"))), {"ok": True})[1]
+r = d.post("/autopilot/login-link", follow_redirects=False)
+_sent = pushed[-1][2] if pushed else {}
+check("cc-login: CC laegger linket i WordPress med engangskode",
+      (r.headers.get("location") or "").startswith("/?tab=social&cc_link=ok")
+      and pushed and pushed[-1][0] == "POST" and pushed[-1][1] == "/login-link"
+      and "/cc-login?code=" in (_sent.get("url") or ""), (r.headers.get("location"), pushed[:1]))
+_wp_env = (main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD)
+main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD = "http://wp.test", "admin", "x"
+_social = d.get("/?tab=social")
+check("cc-login: knappen staar i fanen Social",
+      _social.status_code == 200 and "Log ind p\u00e5 Command Center" in _social.text
+      and "/autopilot/login-link" in _social.text, _social.text[:160])
+main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD = _wp_env
+_ok_code = (_sent.get("url") or "").split("code=")[-1]
+check("cc-login: koden i linket er den CC gemmer", main.cc_login_consume(_ok_code) == _me["id"])
+main.sgap_api = lambda method, path, **kw: (_ for _ in ()).throw(ValueError("nede"))
+r = d.post("/autopilot/login-link", follow_redirects=False)
+check("cc-login: en fejl fra WordPress svares i Social-fanen",
+      (r.headers.get("location") or "").startswith("/?tab=social&cc_link=fejl"), r.headers.get("location"))
+main.sgap_ready, main.sgap_api = _ready, _api
+
+# --- v7.18.0: begge sider viser hvornaar WordPress sidst hoerte fra Command Center ---
+import time as _cc_time
+check("cc-seen: CC markerer hvert kald med X-Command-Center",
+      main.sgap_headers().get("X-Command-Center") == main.APP_VERSION, main.sgap_headers())
+_ages = (0, 90, 3 * 3600 + 240, 2 * 86400)
+check("cc-seen: alderen skrives i ord",
+      [main.cc_age_text(n) for n in _ages] == ["lige nu", "1 min.", "3 t 4 min.", "2 dage"],
+      [main.cc_age_text(n) for n in _ages])
+_now = 1_800_000_000
+_live = main.cc_seen_view({"ok": True, "checked_at": "2026-11-06T14:31:00", "command_center": {
+    "ts": _now - 120, "version": "7.18.0", "last_route": "/sgap/v1/snapshot", "user": "admin"}}, now=_now)
+check("cc-seen: et kald for 2 min. er live med samme tal som WordPress",
+      _live["known"] and _live["state"] == "live" and _live["age"] == 120 and _live["tone"] == "ok"
+      and "2 min." in _live["headline"], _live)
+_sent_cc = main.cc_seen_view({"ok": True, "command_center": {"ts": _now - 3600}}, now=_now)
+check("cc-seen: en time er en misset runde", _sent_cc["state"] == "sent" and _sent_cc["tone"] == "warn", _sent_cc)
+_tavs = main.cc_seen_view({"ok": True, "command_center": {"ts": _now - 3 * 3600}}, now=_now)
+check("cc-seen: tre timer uden kald er tavst og peger paa WP-creds",
+      _tavs["state"] == "tavs" and _tavs["tone"] == "fejl" and "WP_APP_PASSWORD" in _tavs["hint"], _tavs)
+_ukendt = main.cc_seen_view({"ok": True})
+check("cc-seen: uden /snapshot forklares det i stedet for at gaettes",
+      not _ukendt["known"] and _ukendt["tone"] == "muted" and "7.33" in _ukendt["hint"], _ukendt)
+_wp_saved = (main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD)
+main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD = "http://wp.test", "admin", "x"
+with main.get_db() as db:
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('sgap_snapshot', ?)",
+               (json.dumps({"ok": True, "checked_at": "2026-11-06T14:31:00", "queue": {},
+                            "channels": [], "pending_drafts": 0, "command_center": {
+                   "ts": int(_cc_time.time()) - 120, "version": "7.18.0",
+                   "last_route": "/sgap/v1/snapshot", "user": "admin"}}),))
+_social_cc = d.get("/?tab=social")
+check("cc-seen: fanen Social viser hvornaar WordPress sidst hoerte fra CC",
+      _social_cc.status_code == 200 and "WordPress hoerte sidst fra Command Center" in _social_cc.text
+      and "2 min." in _social_cc.text, _social_cc.text[:160])
+with main.get_db() as db:
+    db.execute("DELETE FROM settings WHERE key='sgap_snapshot'")
+main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD = _wp_saved
+
+# --- v7.19.0: SSRF-beskyttelse paa alle udgaaende kald ---
+_ssrf_saved = main.SSRF_ALLOW_HOSTS
+main.SSRF_ALLOW_HOSTS = []          # uden allowlist, saa 127.0.0.1 faktisk afvises nedenfor
+_blocked_urls = ["http://127.0.0.1/", "http://localhost:8000/x", "http://169.254.169.254/latest/meta-data/",
+                 "http://10.1.2.3/", "http://192.168.0.5/", "http://[::1]/", "http://printer.local/",
+                 "http://metadata.internal/", "ftp://example.com/x", "gopher://127.0.0.1/"]
+_leaked = []
+for _u in _blocked_urls:
+    try:
+        main.assert_public_url(_u)
+        _leaked.append(_u)
+    except main.BlockedURL:
+        pass
+check("ssrf: interne adresser, interne navne og andre skemaer afvises", not _leaked, _leaked)
+check("ssrf: en offentlig IP slipper igennem",
+      main.assert_public_url("http://93.184.216.34/side") == "http://93.184.216.34/side")
+check("ssrf: BlockedURL er en ValueError, saa formularerne fanger den",
+      issubclass(main.BlockedURL, ValueError))
+_fetched = None
+try:
+    main.safe_request("http://127.0.0.1:9/", timeout=1)
+    _fetched = True
+except main.BlockedURL:
+    _fetched = False
+except Exception as e:
+    _fetched = "nettet: " + type(e).__name__
+check("ssrf: safe_request henter ikke en intern adresse", _fetched is False, _fetched)
+_denied = False
+try:
+    main.normalize_url("127.0.0.1/admin")
+except main.BlockedURL:
+    _denied = True
+check("ssrf: normalize_url afviser 127.0.0.1 i stedet for at gemme den", _denied)
+main.SSRF_ALLOW_HOSTS = ["127.0.0.1"]
+check("ssrf: CC_SSRF_ALLOW aabner for en enkelt vaert",
+      main.assert_public_url("http://127.0.0.1:8770/wp-json") == "http://127.0.0.1:8770/wp-json")
+main.SSRF_ALLOW_HOSTS = _ssrf_saved
 
 # --print-stien: mailen holdes tilbage, saa den kan sendes fra en anden mailkonto. Den skal
 # virke selv om SMTP fejler, og koden skal vaere den samme som i den udskrevne mail.
@@ -740,6 +923,97 @@ check("agent+skill: ingen hemmeligheder i filerne",
               for t in ("sk-ant", "api_key=", "password=", "ghp_")))
 check("agents: alle filer er danske/ascii (ingen utilsigtet fremmed tekst)",
       not any(_re.search(r"[\u4e00-\u9fff]", t) for t in (manifest, skill, *texts.values())))
+
+# --- v7.20.0: budget-kort og job-heartbeat paa Cockpit ---
+from datetime import timedelta as _td
+with main.get_db() as _db:
+    _db.execute("DELETE FROM alarms WHERE type='jobs'")
+    for _k in [r["key"] for r in _db.execute("SELECT key FROM settings WHERE key LIKE 'job_%'").fetchall()]:
+        _db.execute("DELETE FROM settings WHERE key=?", (_k,))
+_now = datetime.now()
+# Job 1 er ok for nylig, job 2 er ok for 30 timer siden (forsinket: max 26 t), job 3 fejlede
+main._job_mark("keyword_checks", True, "")
+with main.get_db() as _db:
+    _db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('job_ok_cleanup', ?)", ((_now - _td(hours=30)).isoformat(timespec="seconds"),))
+main._job_mark("db_backup", False, "RuntimeError('disk fuld')")
+st = {j["id"]: j["state"] for j in main.job_status()}
+check("heartbeat: ok, forsinket og fejlet skelnes", st["keyword_checks"] == "ok" and st["cleanup"] == "forsinket" and st["db_backup"] == "fejlet", st)
+import asyncio as _aio
+_aio.run(main.job_heartbeat_check())
+_aio.run(main.job_heartbeat_check())  # anden koersel maa ikke give dubletter
+with main.get_db() as _db:
+    _al = [r["message"] for r in _db.execute("SELECT message FROM alarms WHERE type='jobs' ORDER BY id").fetchall()]
+check("heartbeat: forsinket og fejl alarmeres praecis én gang", len(_al) == 2 and any("fejlede" in m for m in _al) and any("forsinket" in m for m in _al), _al)
+# Jobbet der fejlede koerer ok igen -> ingen ny alarm, og tilstanden nulstilles
+main._job_mark("db_backup", True, "")
+_aio.run(main.job_heartbeat_check())
+with main.get_db() as _db:
+    _n = _db.execute("SELECT COUNT(*) FROM alarms WHERE type='jobs'").fetchone()[0]
+check("heartbeat: et job der er ok igen giver ingen ekstra alarm", _n == 2, _n)
+# Ny installation: et job der aldrig har koert alarmeres ikke foer appen har koert laenger end maks-alderen
+with main.get_db() as _db:
+    _db.execute("DELETE FROM settings WHERE key IN ('last_start') OR key LIKE 'job_%'")
+    _db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_start', ?)", (_now.isoformat(timespec="seconds"),))
+check("heartbeat: nyt job der aldrig har koert er ikke forsinket endnu", all(j["state"] == "ok" for j in main.job_status()),
+      [(j["id"], j["state"]) for j in main.job_status() if j["state"] != "ok"])
+with main.get_db() as _db:
+    _db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_start', ?)", ((_now - _td(hours=30)).isoformat(timespec="seconds"),))
+check("heartbeat: et job der aldrig har koert er forsinket efter maks-alderen", next(j for j in main.job_status() if j["id"] == "cleanup")["state"] == "forsinket")
+# Cockpit viser budget-kortet og job-listen
+with main.get_db() as _db:
+    _db.execute("DELETE FROM settings WHERE key LIKE 'job_%'")
+_h = TestClient(main.app).get("/health").json()
+_bu = main.budget_usage()
+check("budget: /health og budget_usage() giver samme tal", _h["budget"] == {s: {"used": u, "limit": l} for s, (u, l) in _bu.items()}, _h["budget"])
+
+# --- CSRF og session-rotation (roadmap 2) ---
+_cs = TestClient(main.app)
+_cs.post("/login", data={"email": "iptest@example.dk", "password": "iptest-pass"}, follow_redirects=False)
+_old_sid = _cs.cookies.get(main.SESSION_COOKIE)
+_cross = _cs.post("/alerts/test", headers={"Sec-Fetch-Site": "cross-site", "Origin": "https://ondskab.example"}, follow_redirects=False)
+check("csrf: cross-site POST afvises med 403", _cross.status_code == 403, _cross.status_code)
+_cross2 = _cs.post("/alerts/test", headers={"Origin": "https://ondskab.example"}, follow_redirects=False)
+check("csrf: fremmed Origin uden Sec-Fetch-Site afvises", _cross2.status_code == 403, _cross2.status_code)
+_same = _cs.post("/alerts/test", headers={"Sec-Fetch-Site": "same-origin", "Origin": "http://testserver"}, follow_redirects=False)
+check("csrf: same-origin POST gaar igennem (ikke 403)", _same.status_code != 403, _same.status_code)
+_cs.post("/login", data={"email": "iptest@example.dk", "password": "iptest-pass"}, follow_redirects=False)
+_new_sid = _cs.cookies.get(main.SESSION_COOKIE)
+check("session: login giver ny sid", bool(_new_sid) and _new_sid != _old_sid)
+_stale = TestClient(main.app, cookies={main.SESSION_COOKIE: _old_sid or "x"})
+check("session: gammel sid er ugyldig efter login-rotation", _stale.get("/api/history/1", follow_redirects=False).status_code == 401 or _stale.get("/", follow_redirects=False).status_code in (303, 307), "")
+
+# --- Offline dashboard: ingen CDN-scripts (roadmap 3) ---
+_html = open(os.path.join(ROOT, "app", "templates", "dashboard.html"), encoding="utf-8").read()
+_ext = _re.findall(r'<(?:script|link)[^>]+(?:src|href)="(https?://[^"]+)"', _html)
+check("offline: dashboard.html har ingen eksterne script/link-URL'er", not _ext, _ext)
+for _vf in ("tailwind.js", "alpine.min.js", "chart.umd.min.js"):
+    _vr = _cs.get(f"/static/vendor/{_vf}")
+    check(f"offline: /static/vendor/{_vf} serveres lokalt", _vr.status_code == 200 and len(_vr.content) > 1000, _vr.status_code)
+
+# --- Backup og restore i UI (roadmap 2) ---
+_bk_ok = _cs.post("/backup/now", headers={"Origin": "http://testserver"}, follow_redirects=False)
+check("backup: manuel backup laver fil og redirect til Moduler", _bk_ok.status_code == 303 and "bk=ok" in _bk_ok.headers.get("location", ""), _bk_ok.headers.get("location"))
+_bks = main.list_backups()
+check("backup: list_backups viser manuel backup", any(b["name"].startswith("cc-manuel-") for b in _bks), _bks)
+check("backup: navn med sti/.. afvises", main._backup_path("../center.db") is None and main._backup_path("cc-x/../../center.db") is None)
+check("backup: fri filnavn afvises (kun cc-tag-YYYYMMDD-HHMM.db)", main._backup_path("center.db") is None and main._backup_path("cc-manuel-x.db") is None)
+_no_confirm = _cs.post("/backup/restore", data={"name": _bks[0]["name"], "confirm": "nej"}, headers={"Origin": "http://testserver"}, follow_redirects=False)
+check("restore: uden bekraeftelsesordet GENDAN gendannes intet", "bk=fejl" in _no_confirm.headers.get("location", ""), _no_confirm.headers.get("location"))
+_bad = os.path.join(main.BASE_DIR, "backups", "cc-broken-20990101-0000.db")
+with open(_bad, "wb") as _f:
+    _f.write(b"ikke en database")
+check("restore: ugyldig fil afvises af integritetstjek", main._check_backup_file(_bad) is not None and main.restore_backup_sync("cc-broken-20990101-0000.db")[0] is False)
+os.remove(_bad)
+_before = os.path.getsize(main.DB_PATH)
+_good = _cs.post("/backup/restore", data={"name": _bks[0]["name"], "confirm": "GENDAN"}, headers={"Origin": "http://testserver"}, follow_redirects=False)
+check("restore: med GENDAN gendannes og redirect viser ok", "bk=ok" in _good.headers.get("location", ""), _good.headers.get("location"))
+check("restore: der tages en pre-restore-kopi foer gendannelse", any(b["name"].startswith("cc-pre-restore-") for b in main.list_backups()))
+check("restore: login virker efter gendannelse", TestClient(main.app).post("/login", data={"email": "iptest@example.dk", "password": "iptest-pass"}, follow_redirects=False).status_code in (303, 307))
+# Gendannelsen erstatter databasen, så den gamle session er ugyldig: log ind igen.
+_cs2 = TestClient(main.app)
+_cs2.post("/login", data={"email": "iptest@example.dk", "password": "iptest-pass"}, follow_redirects=False)
+_dash = _cs2.get("/?tab=moduler&bk=ok&bk_msg=test").text
+check("backup: dashboard viser backup-kort og feedback", "Database-backup" in _dash and "skriv GENDAN" in _dash and "Tag backup nu" in _dash, "")
 
 srv.shutdown()
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)

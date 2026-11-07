@@ -1,6 +1,7 @@
 # Fake WordPress with the Steamgears Autopilot REST API (sgap/v1), for tests/ci_check.sh.
 # Usage: python3 tests/fake_wp.py <state-file>   (state file holds: ok | failed2 | 404)
-import json, base64, os, sys
+# <state-file>.cc  = the X-Command-Center header of the last /snapshot call (empty when missing)
+import json, base64, os, sys, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 STATE = sys.argv[1]  # file: "ok" | "404" | "failed2"
 drafts = []
@@ -15,6 +16,15 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.auth_ok(): return self.send(401, {"code": "rest_not_logged_in"})
         if self.mode() == "404": return self.send(404, {"code": "rest_no_route"})
+        # Command Center-status: hvornaar WordPress sidst hoerte fra CC (SGAP_CC::status()).
+        # Headeren gemmes, saa CI kan se at CC markerer sig som Command Center.
+        if self.path.startswith("/wp-json/sgap/v1/snapshot"):
+            open(STATE + ".cc", "w").write(self.headers.get("X-Command-Center") or "")
+            ts = int(time.time()) - 120
+            return self.send(200, {"version": "7.33.3", "status": {"command_center": {
+                "state": "connected", "connected": True, "ts": ts, "age": 120, "minutes_ago": 2,
+                "last_seen": time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)),
+                "version": "7.18.0", "last_route": "/sgap/v1/snapshot", "user": "admin"}}})
         if self.path.startswith("/wp-json/sgap/v1/stats"):
             failed = 2 if self.mode() == "failed2" else 0
             return self.send(200, {"days": 30, "events": [
@@ -28,6 +38,9 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.auth_ok(): return self.send(401, {})
         n = int(self.headers.get("content-length", 0)); data = json.loads(self.rfile.read(n) or b"{}")
+        if self.path == "/wp-json/sgap/v1/login-link":
+            open(STATE + ".link", "w").write(json.dumps(data))
+            return self.send(201, {"ok": True, "url": data.get("url"), "expires_in": data.get("expires_in")})
         if self.path == "/wp-json/sgap/v1/drafts":
             drafts.append({"id": len(drafts) + 1, "status": "pending", **data})
             open(STATE + ".last", "w").write(json.dumps(data))

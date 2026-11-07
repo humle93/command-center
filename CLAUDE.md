@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 3. november 2026 · **Version:** 7.17.2 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 6. november 2026 · **Version:** 7.23.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,45 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
 
 ## Ændringer i denne arbejdsperiode
 
+### Backup/restore i UI (v7.23.0) — implementeret
+- Fanen Moduler viser backup-kortet: `POST /backup/now` tager en `manuel`-backup, og `POST /backup/restore` gendanner en fil fra `backups/` når feltet `confirm` er `GENDAN`.
+- Kun filer på formatet `cc-<tag>-YYYYMMDD-HHMM.db` accepteres (`_backup_path`). `_check_backup_file` kører `PRAGMA integrity_check` og kræver tabellen `users`. `restore_backup_sync` tager altid en `pre-restore`-backup først og afbryder, hvis den fejler.
+- Test: "Backup og restore i UI" i `tests/test_v8_features.py`.
+
+### Offline dashboard (v7.22.0) — implementeret
+- Tailwind (play-CDN), Alpine og Chart.js ligger i `app/static/vendor/` og indlæses fra `/static/vendor/`. Dashboardet henter intet eksternt. `.gitignore` undtager `vendor/` fra `app/static/*`.
+- Test: "Offline dashboard" i `tests/test_v8_features.py`.
+
+### CSRF og session-rotation (v7.21.0) — implementeret
+- `auth_middleware` afviser muterende kald med `Sec-Fetch-Site` fra et andet site eller `Origin` der ikke matcher `Host` (403). Kald uden browser-headers passerer. `/mcp` har egen kontrol.
+- `start_session(user_id, ip, old_sid)` sletter den gamle sid ved login.
+- Tests: blok "CSRF og session-rotation (roadmap 2)" i `tests/test_v8_features.py`.
+
+### Budget og job-heartbeat (v7.20.0) — implementeret
+- Cockpit viser "💳 API-budget denne måned" (`budget_rows` fra `budget_usage()`, samme tal som `/health`) og "⏱️ Planlagte jobs (heartbeat)" (`job_rows` fra `job_status()`).
+- Alle 8 scheduler-jobs er pakket i `job_heartbeat(job_id, fn)`, som skriver `job_<id>_last_start/last_end/last_status` i `settings`. Async jobs pakkes som async, så APScheduler stadig ser coroutines.
+- `job_heartbeat_check()` (hvert 15. min.) alarmerer forsinkede (`JOB_MAX_AGE_HOURS`) og fejlede jobs én gang pr. tilstand; tilstanden ligger i `settings.job_alarm_<id>`. Et aldrig-kørt job tæller først efter appens `last_start` er ældre end grænsen.
+- 1 ny sektion i `tests/test_v8_features.py`, 2 checks i `tests/ci_check.sh`.
+
+### SSRF-beskyttelse (v7.19.0) — implementeret
+- `assert_public_url()` afviser loopback, private net, link-local (169.254.169.254), reserverede/multicast-adresser og navne som `.local`/`.internal`; den slår også værtsnavne op og afviser, hvis **nogen** adresse bag navnet er intern (DNS-rebinding). `BlockedURL` er en `ValueError`, så de eksisterende formular-grene fanger den.
+- `safe_request()` følger viderestillinger manuelt (max 3 hop) og tjekker **hvert** hop — ellers kunne en 302 pege ind i det lokale net. `normalize_url()` tjekker med, så afvisningen sker før URL'en gemmes.
+- `CC_SSRF_ALLOW=a,b` er den eneste undtagelse (fx en intern side under udvikling); testene bruger den til 127.0.0.1. 6 nye checks i `tests/test_v8_features.py`.
+
+### WordPress-broen set fra begge sider (v7.18.0) — implementeret
+- `sgap_api()` sender nu `X-Command-Center: <APP_VERSION>` (ny `sgap_headers()`). **Uden den header
+  noterede pluginnet intet** — `SGAP_CC::note_call` kræver den — så WordPress-kortet ville altid sige
+  "not yet", og CC kunne ikke se, om dets egne kald nåede frem.
+- `sgap_sync()` henter også `/snapshot` og gemmer `status.command_center` (`ts`, `version`,
+  `last_route`, `user`, `last_seen`) i `settings.sgap_snapshot`. Et ældre plugin uden ruten (før 7.33)
+  vælter ikke synken; så forklares det i stedet.
+- `cc_age_text()` / `cc_seen_view()` regner alderen ud **ved visning** (45 min. = misset runde, 2 t =
+  tavs), og fanen Social viser WordPress' eget svar: "WordPress hørte sidst fra Command Center for
+  12 min. siden" + version, rute og bruger. Samme tal som pluginnets kort (7.33.3), så de to sider
+  ikke kan vise hver sin sandhed.
+- Tests: 7 nye checks i `tests/test_v8_features.py` og 2 i `tests/ci_check.sh`; fake-WP har fået
+  `/snapshot` og gemmer `X-Command-Center` i `<state>.cc`, så CI ser headeren.
+
 ### Adgang og brugere (v7.15)
 - Token-login (`APP_TOKEN`) er fjernet. Første besøg opretter bruger via `/setup` med **e-mail**;
   derefter logger man ind med e-mail + adgangskode (PBKDF2-SHA256, 240k iterationer, salt pr. bruger).
@@ -38,8 +77,11 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
   `/users/password` rydder flaget; dashboardet viser en gul bjælke indtil da.
 - `send_email(to, subject, body)` er fælles for alarmer (`SMTP_TO`) og invitationer (modtageren).
 - `invite_user(email, base_url, deliver=None)` kan sende ad en anden vej end SMTP: `scripts/invite.py
-  navn@domaene.dk --print` opretter brugeren og udskriver den færdige mail, så den kan sendes fra en
-  anden mailkonto (fx Gmail) når `SMTP_HOST` ikke kan sættes op på serveren.
+  bruger@ditfirma.dk --print` opretter brugeren og udskriver den færdige mail, så den kan sendes fra en
+  anden mailkonto (fx Gmail) når `SMTP_HOST` ikke kan sættes op på serveren. Scriptet validerer
+  argumenterne **før** `invite_user` kaldes: én adresse ad gangen, `--base-url` til adressen i mailen,
+  ukendte flag afvises, og eksempel-adresser (`navn@domaene.dk`, `example.*`) stoppes med mindre
+  `--force` — så en pladsholder ikke bliver en rigtig bruger. **Formularen i fanen Brugere bruger samme regel** (`example_email_hint()` i `app/main.py`): `POST /users/invite` svarer `invite_kind=adresse|eksempel|smtp`, forklarer afvisningen i formularen og tilbyder **Opret alligevel** (`force=1`). **Sletning svarer samme sted** (`users_delete_redirect()`): `POST /users/delete` tager `id` som tekst, redirecter til Brugere med `del=ok|fejl` + `del_kind=slettet|sidste|findes-ikke|ugyldig`, forklarer afvisningen i formularen og logger både afvist og gennemført sletning som alarm. **Login fra WordPress (v7.17.5)**: knappen i fanen Social (`POST /autopilot/login-link`) lægger et engangslink i pluginnet via `sgap_api`, og `GET /cc-login?code=…` logger ind med det én gang inden for 10 min. (`settings.cc_login_code` = sha256 + `exp`; koden slettes først når den er godkendt). Broen er stadig CC → site; pluginnet er 7.33.3.
 - Sessioner ligger i `sessions` som `sha256(id)`, HttpOnly-cookie `cc_session` (30 dage, `Secure` på https).
 - Fane **Brugere**: invitér/slet brugere og skift adgangskode (logger andre sessioner ud).
 - Login-lås: 5 fejl pr. IP = 10 min. Adgangskode ≥ 8 tegn; invitationer kræver `SMTP_HOST` + `SMTP_FROM`.
@@ -346,15 +388,11 @@ noter, og hvert punkt har nu en verifikationslinje (et grep, en rute eller en ta
 
 1. **Google Search Console** (read-only): clicks/impressions/queries/pages, striking distance,
    content decay, indexation. Største hul efter Juno-fjernelsen — der findes ingen GSC-kode i dag.
-2. **SSRF-beskyttelse** på de syv URL-felter; ingen IP-/værts-guard findes (`ipaddress` er ikke importeret).
-3. **CSRF + session-rotation**: ingen CSRF-token og ingen session-rotation ved login i dag.
-4. **Offline dashboard-assets**: Tailwind, Alpine og Chart.js hentes stadig fra CDN.
-5. **Backup/restore i UI**: backup skrives på disk, men der er ingen visning eller gendan-rute.
-6. **Månedligt budget i UI**: tallet findes i `/health`, men ikke på Cockpit.
-7. **Job-heartbeat (dead-man's switch)**: ingen pr.-job `last_run`/`next_run`.
-8. **E2E-test af opdateringen** mod en fake GitHub-API.
-9. **Tests for login-rate-limit og job-guards** (dækket indirekte i dag).
-10. **Alarmer, resten**: maintenance windows, ugentlig digest, evt. Apprise. Dedup, stille timer, backoff
+2. **CSRF + session-rotation**: ingen CSRF-token og ingen session-rotation ved login i dag.
+3. **Offline dashboard-assets**: Tailwind, Alpine og Chart.js hentes stadig fra CDN.
+4. **E2E-test af opdateringen** mod en fake GitHub-API.
+6. **Tests for login-rate-limit og job-guards** (dækket indirekte i dag).
+7. **Alarmer, resten**: maintenance windows, ugentlig digest, evt. Apprise. Dedup, stille timer, backoff
     og fire kanaler er færdige i v7.12.
 
 Færdige punkter fra den gamle liste: alarm-routing (v7.12), API-nøgler/MCP fase 1-2 (v7.16-v7.17) og

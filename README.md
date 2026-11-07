@@ -5,13 +5,26 @@
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
 
+## Nyheder i v7.22
+
+- **Backup i UI (v7.23.0)** — fanen Moduler viser alle backups med "Tag backup nu" og "Gendan". Gendannelse kræver at skrive `GENDAN`, og der tages altid en `pre-restore`-kopi først.
+- **Offline dashboard (v7.22.0)** — dashboardet henter ikke længere Tailwind, Alpine eller Chart.js fra CDN. De ligger lokalt i `app/static/vendor/`, så UI'et virker uden internet.
+
+## Nyheder i v7.21
+
+- **CSRF-beskyttelse (v7.21.0)** — muterende kald fra et andet site afvises med 403. Hvert login giver en ny session, og den gamle sid slettes.
+
+## Nyheder i v7.20
+
+- **Budget og jobstatus på Cockpit (v7.20.0)** — kortet "API-budget denne måned" viser forbrug og loft for SerpAPI og AI, og "Planlagte jobs (heartbeat)" viser hvornår hvert job sidst kørte. Et job der holder op med at køre, eller fejler, giver én alarm.
+
 ## Nyheder i v7.17
 
 - **MCP-hærdning (v7.17.1)** — nøglen ligger ikke længere i klartekst i databasen: rækken i `settings` slettes i samme kald som dashboardet viser den (højst 15 min. hvis siden aldrig åbnes, og oprydningen fjerner resten). "Jeg har gemt nøglen"-knappen er derfor væk. Ukendte værktøjsnavne på `/mcp` havner nu også i auditten, så en nøgle der famler kan ses.
 - **MCP skriver nu også (fase 2)** — med `read,write` på nøglen kan en agent starte et site-crawl, oprette en monitor, løse en alarm og skrive en note (`start_crawl`, `add_monitor`, `resolve_alarm`, `add_note`). Hvert kald — også afviste — havner i en **audit pr. nøgle** (`api_audit`) med værktøj, varighed og fejl, som du ser i fanen **Brugere** og med `python3 scripts/api_key.py audit`. Værktøjerne har `readOnlyHint`/`destructiveHint`, så klienten kan advare før et kald.
 - **MCP-adgang (fase 1)** — agenter og editorer kan læse Command Center direkte. Under fanen **Brugere** opretter du en nøgle pr. klient (ingen fælles token); den vises én gang, gemmes kun som sha256 og kan tilbagekaldes enkeltvis. `POST /mcp` tilbyder syv læse-værktøjer: `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes` og `history`. Endpointet validerer `Origin`/`Host` (DNS-rebinding) og svarer `401` med `WWW-Authenticate` uden nøgle — se [docs/Command_Center_MCP.md](docs/Command_Center_MCP.md).
 - **E-mail er login (v7.15)** — første besøg opretter din bruger med e-mail + adgangskode (`/setup`), derefter logger du ind med e-mail og adgangskode (PBKDF2-SHA256, salt pr. bruger, 30 dages HttpOnly-session). Gamle konti fra brugernavn-tiden kan stadig logge ind med deres brugernavn, indtil de får en e-mail.
-- **Invitation på mail (v7.15, svar i v7.17.2)** — fanen **Brugere** har "Inviter bruger": du skriver en e-mail, og appen sender en invitation med en midlertidig adgangskode, som brugeren skifter ved første login (dashboardet minder om det). Der er ingen invite-links og ingen tokens - kun en adgangskode. Svaret lander i den samme formular: blev mailen sendt, står der hvilken adresse den gik til, og fejler den, står mailserverens fejl der med det samme i stedet for kun under Alarmer.
+- **Invitation på mail (v7.15, svar i v7.17.2)** — fanen **Brugere** har "Inviter bruger": du skriver en e-mail, og appen sender en invitation med en midlertidig adgangskode, som brugeren skifter ved første login (dashboardet minder om det). Der er ingen invite-links og ingen tokens - kun en adgangskode. Svaret lander i den samme formular: blev mailen sendt, står der hvilken adresse den gik til, og fejler den, står mailserverens fejl der med det samme i stedet for kun under Alarmer. En adresse, der ligner eksemplet fra dokumentationen (`navn@domaene.dk`), afvises med en forklaring i formularen — så en pladsholder eller tastefejl ikke bliver en konto uden modtager; er adressen rigtig alligevel, oprettes den med knappen **Opret alligevel**.
 - ⏱️ **Fremdrift på opgaver** — tunge handlinger (crawl, AI-artikel, keyword-tjek, backlink-prospecting …) viser timer, procent og "~N s igen"; crawl læser de rigtige tal (sider/total + ETA) fra `/api/crawl/status`
 - **Opdatering fra GitHub** — Cockpit viser installeret commit vs. seneste commit på `main`, tjekker selv kl. 05:00, og "Opdater" laver DB-backup og henter kun projektets filer. Den gamle "hent install.sh og kør den"-vej er fjernet.
 - **nginx / Ultra.cc** — `deploy/nginx-command-center.conf`, `deploy/command-center.user.service` og proxy-header-understøttelse, så appen bliver på `127.0.0.1` bag nginx med korrekte Secure-cookies og rigtig klient-IP.
@@ -31,7 +44,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 - 🩺 **Monitors** — tekst/JSON/pris-overvågning med alarmer ved ændring
 - 🤖 **AI-synlighed** — stil en kundes spørgsmål til AI-modellen og se, om `TRACK_DOMAIN` nævnes i svaret (historik i `ai_visibility`)
 - 📝 **Noter** — hurtige workflow-noter i dashboardet (`/notes/add`, `/notes/delete`)
-- 👤 **Brugere** — invitér/slet brugere, skift adgangskode og opret **MCP-nøgler** pr. klient (hash, scopes, tilbagekald); den sidste bruger kan ikke slettes
+- 👤 **Brugere** — invitér/slet brugere, skift adgangskode og opret **MCP-nøgler** pr. klient (hash, scopes, tilbagekald); den sidste bruger kan ikke slettes, og både en gennemført og en afvist sletning svarer i fanen med det samme i stedet for kun at ende som en alarm
 - 🚨 **Alarmer** — SSL-udløb, nedetid, brudte links, fejlede scans, nye GitHub-commits; valgfrit Telegram-push
 - 📈 **Historik** — svartid per domæne, site-health og visibility over tid (Chart.js)
 
@@ -49,7 +62,7 @@ Cockpit med opdaterings-panel og alarmer. Login-siden og alle 14 faner ligger i 
 1. `cp .env.example .env` og udfyld nøgler
 2. `./run.sh` — scriptet udskriver den adresse appen lytter på (samt LAN-IP når `CC_HOST=0.0.0.0`)
 3. Åbn adressen: **første besøg opretter din bruger** (`/setup`) — derefter log ind med e-mail + adgangskode. Der er ingen token i `.env`.
-4. Nye brugere inviteres på mail, og sletning/adgangskode-skift klares under fanen **Brugere** (kræver `SMTP_HOST` + `SMTP_FROM`); fra serveren kan samme invitation sendes med `python3 scripts/invite.py navn@domaene.dk` — og med `--print` udskrives mailen i stedet, så den kan sendes fra en anden mailkonto når SMTP ikke er sat op
+4. Nye brugere inviteres på mail, og sletning/adgangskode-skift klares under fanen **Brugere** (kræver `SMTP_HOST` + `SMTP_FROM`); fra serveren kan samme invitation sendes med `python3 scripts/invite.py bruger@ditfirma.dk` — og med `--print` udskrives mailen i stedet, så den kan sendes fra en anden mailkonto når SMTP ikke er sat op. Scriptet tager én adresse ad gangen og afviser eksempel-adresser som `navn@domaene.dk`, så en tastefejl ikke bliver en bruger
 5. (VPS) kør bag reverse proxy med TLS, eller brug `deploy/command-center.service` + SSH-tunnel
 6. Vil du have en agent på? Opret en nøgle under **Brugere → MCP-adgang** og peg klienten på `https://<din-adresse>/mcp` (se nedenfor)
 
@@ -109,7 +122,9 @@ Command Center og WordPress-pluginnet **Steamgears Autopilot** snakker sammen vi
 - **Status hver 30. min** (fanen Social → "Steamgears Autopilot"): kø, kladder der venter på godkendelse, og udgivet/klik/ordrer/omsætning pr. kanal de sidste 30 dage
 - **Alarmer** når noget ændrer sig: nye fejlede opslag, nye kladder, eller pluginnet svarer ikke
 - **"→ Autopilot"** sender et opslag som kladde til pluginnet (godkendes i WordPress under Steamgears → AI Drafts). Opslaget sendes **kun én gang**: rækken låses før kaldet, så et dobbeltklik eller et genforsøg ikke giver to kladder. Svarer WordPress ikke (timeout), bliver status "sendt? (svar udeblev)" — tjek AI Drafts, før du sender igen
+- **Log ind på Command Center fra WordPress** — knappen **🔑 Log ind på Command Center** i fanen Social lægger et engangslink i pluginnet (`POST /login-link` på `sgap/v1`, gemt som option), og knappen i WordPress åbner det. Linket logger dig ind på CC uden adgangskode: koden gemmes kun som sha256, virker **én gang** og udløber efter 10 minutter. Er den brugt eller udløbet, forklarer login-siden det — så en gammel knap ikke ser ud som et brudt login. Retningen er stadig CC → site
 - Slå til/fra under Moduler ("Autopilot-bro"). Retningen er altid CC → site, så CC kan blive på 127.0.0.1
+- **Begge sider viser, hvornår CC sidst kaldte**: hvert kald har `X-Command-Center`-headeren, så WordPress noterer tid, version, rute og bruger (`sgap_cc_seen`). Pluginnets kort viser alderen (`live` / `late` / `silent`), og fanen Social viser **WordPress' eget svar** — samme tal, regnet ud ved visning. Er broen brudt, siger begge sider det i stedet for at se stille ud
 
 ## Installering
 
@@ -124,7 +139,7 @@ skriver alle filer (inkl. `deploy/nginx-command-center.conf` og `deploy/command-
 ## Drift & test
 
 - **Cron**: domæne-tjek hver 6. time, keyword-tjek 06:00, autopilot 05:15, oprydning 04:30, DB-backup 04:40, GitHub-tjek 05:00, Autopilot-bro hver 30. min
-- **Backup**: `app/backups/cc-daglig-*.db` (14 gemmes) + `cc-pre-update-*.db` før hver opdatering
+- **Backup**: `app/backups/cc-daglig-*.db` (14 gemmes) + `cc-pre-update-*.db` før hver opdatering. Gendan fra Moduler-fanen (skriv `GENDAN`)
 - **Health**: `/health` (200, eller 503 ved kritisk DB/disk-tilstand) viser også månedens API-forbrug
 - **Tests**: `python3 tests/test_v8_features.py` (enhedstests), `bash tests/ci_check.sh` (boot + alle sider + auth + WordPress-bro + link-audit)
 - **Screenshots**: `python3 scripts/screenshots.py` tager login-siden og alle 14 faner ind i `docs/img/` (kræver `pip install playwright` + `python3 -m playwright install chromium`; kør mod en kørende app med `--base/--user/--password`). CI advarer, hvis billederne er ældre end dashboard-skabelonen
@@ -187,12 +202,14 @@ og handoff, `AGENTS.md` er de korte regler for agenter.
 
 - **Brugere**: PBKDF2-SHA256 med salt pr. bruger; sessioner er HttpOnly-cookies (30 dage) gemt som `sha256(id)` i databasen, så en DB-kopi ikke giver adgang. Skift af adgangskode logger dine andre sessioner ud.
 - **Cookie/HTTPS**: cookien sættes `Secure` når appen ser https (kræver `X-Forwarded-Proto` bag proxy — se nginx-afsnittet).
-- **API-budget**: SerpAPI og aimlapi tælles pr. måned og stoppes ved loftet (`SERPAPI_MONTHLY_LIMIT`, `AI_MONTHLY_LIMIT`), med alarm ved 80 % og 100 %.
+- **API-budget**: SerpAPI og aimlapi tælles pr. måned og stoppes ved loftet (`SERPAPI_MONTHLY_LIMIT`, `AI_MONTHLY_LIMIT`), med alarm ved 80 % og 100 %. Forbruget vises på Cockpit.
+- **Job-heartbeat**: hvert planlagt job skriver sin sidste kørsel; forsinkede eller fejlede jobs alarmeres (v7.20).
 - Default binding er 127.0.0.1 — sæt aldrig `0.0.0.0` uden reverse proxy + TLS.
+- **SSRF**: alle udgående kald med en URL fra et felt går gennem `safe_request()`. Loopback, private net, link-local (`169.254.169.254` = sky-metadata), reserverede adresser og navne som `.local`/`.internal` afvises, og en viderestilling tjekkes hop for hop — så en 302 ikke kan føre ind i det lokale net. Afvisningen forklares i formularen. Skal CC måle en intern side, åbner `CC_SSRF_ALLOW=vaert.ditdomaene` for netop den værtsadresse.
 
 ## Kendte begrænsninger
 
-- Dashboardet henter Tailwind, Alpine.js og Chart.js fra CDN (login-siden er helt selvstændig). Uden internetadgang ser dashboardet stadig ud, men uden styling/interaktivitet.
+- Dashboardet henter Tailwind, Alpine.js og Chart.js lokalt fra `app/static/vendor/` (siden v7.22), så det virker uden internetadgang. Login-siden er helt selvstændig.
 - Opdatering kræver `GITHUB_TOKEN`; ændringer i `requirements.txt` rapporteres men installeres først ved næste `./run.sh`.
 - `install.sh` indeholder kopier af projektets filer (CI tjekker at de matcher); ret derfor altid kildefilerne og kør regen, ikke installeren.
 - Screenshots i `docs/img/` er taget med `python3 scripts/screenshots.py` mod v7.13.x-UI'et; kør scriptet igen efter større UI-ændringer.

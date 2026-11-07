@@ -2,8 +2,13 @@
 set -e
 PROJECT_DIR="$HOME/command-center"
 
-echo "⚡ Command Center v7.17.2 - installerer i $PROJECT_DIR..."
+echo "⚡ Command Center v7.23.0 - installerer i $PROJECT_DIR..."
 mkdir -p "$PROJECT_DIR/app/templates" "$PROJECT_DIR/app/data" "$PROJECT_DIR/app/static" "$PROJECT_DIR/deploy" "$PROJECT_DIR/scripts"
+echo "📦 Offline-scripts (Tailwind, Alpine, Chart.js)..."
+mkdir -p "$PROJECT_DIR/app/static/vendor"
+curl -sSfL -o "$PROJECT_DIR/app/static/vendor/tailwind.js" https://cdn.tailwindcss.com
+curl -sSfL -o "$PROJECT_DIR/app/static/vendor/alpine.min.js" https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js
+curl -sSfL -o "$PROJECT_DIR/app/static/vendor/chart.umd.min.js" https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js
 echo "📄 requirements.txt..."
 cat << 'EOF_REQ' > "$PROJECT_DIR/requirements.txt"
 fastapi==0.115.6
@@ -25,6 +30,9 @@ cat << 'EOF_ENVDOT' > "$PROJECT_DIR/.env.example"
 # Hvor run.sh lytter. 127.0.0.1 = kun denne maskine; 0.0.0.0 = ogsaa fra netvaerket (kraever TLS/proxy).
 CC_HOST=127.0.0.1
 CC_PORT=8000
+# SSRF: udgaaende kald afviser loopback, private net og sky-metadata (169.254.169.254).
+# Aabn enkelte vaertsnavne her, adskilt af komma, hvis CC skal maale en intern side.
+CC_SSRF_ALLOW=
 # Adressen du aabner i browseren bag nginx (bruges kun til at printe den rigtige adresse).
 # Ultra.cc: fx https://<bruger>.<server>.ultra.cc - tom = ingen nginx. Bruges ogsaa som adresse
 # i invitationsmailen.
@@ -103,6 +111,8 @@ from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 import os
 import shutil
+import ipaddress
+import socket
 import sqlite3
 import requests
 import ssl
@@ -197,10 +207,20 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.17.2"
+APP_VERSION = "7.23.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.23.0", "Backup i UI: tag en backup nu og gendan en gemt backup med bekraeftelse - der tages altid en pre-restore-kopi foerst"),
+    ("7.22.0", "Offline dashboard: Tailwind, Alpine og Chart.js ligger lokalt under /static/vendor - ingen CDN-afhaengighed"),
+    ("7.21.0", "CSRF-beskyttelse: muterende kald fra andre sites afvises (403); ny session ved hvert login og gammel sid slettes"),
+    ("7.20.0", "Cockpit viser API-budget og jobstatus; forsinkede eller fejlede jobs giver alarm (job-heartbeat)"),
+
+    ("7.19.0", "SSRF-beskyttelse: udgaaende kald afviser interne adresser, sky-metadata og viderestillinger ind i det lokale net"),
+    ("7.18.0", "Social viser hvornaar WordPress sidst hoerte fra Command Center - CC sender X-Command-Center"),
+    ("7.17.5", "Knappen Log ind paa Command Center i WordPress bruger et engangslink fra CC"),
+    ("7.17.4", "Sletning af brugere svarer i formularen - en afvist sletning forklares i stedet for kun at blive en alarm"),
+    ("7.17.3", "Invitationen afviser pladsholder-adresser med en forklaring - i formularen og fra terminalen"),
     ("7.17.2", "Invitationen viser selv om mailen blev sendt - foer laa fejlen kun under Alarmer"),
     ("7.17.1", "MCP-noeglen ligger ikke laengere i klartekst i DB'en, og ukendte vaerktoejer havner i auditten"),
     ("7.17.0", "MCP fase 2: skrivende vaerktoejer med write-scope og audit pr. noegle"),
@@ -215,7 +235,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Invitationen viser resultatet med det samme - og MCP-noeglen ligger ikke laengere i klartekst"
+NEWEST_LINE = "WordPress-knappen logger ind paa Command Center med et engangslink - uden adgangskode"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -743,8 +763,25 @@ def normalize_email(value: str) -> str:
     """E-mailen er login-id: trimmet, smaa bogstaver og i et format der kan modtage post."""
     email = (value or "").strip().lower()
     if len(email) > EMAIL_MAX_LEN or not _USER_EMAIL_RE.fullmatch(email):
-        raise ValueError("E-mail: brug en gyldig adresse, fx navn@domaene.dk")
+        raise ValueError("E-mail: brug en gyldig adresse, fx bruger@ditfirma.dk")
     return email
+
+
+# Eksempel-adresserne fra dokumentationen - dem kan ingen modtage post paa. Baade formularen i fanen
+# Brugere og scripts/invite.py bruger den samme regel, saa en pladsholder ikke bliver en rigtig bruger.
+# example.dk er ikke med: repoets egne tests bruger det som et almindeligt testdomaene.
+EXAMPLE_EMAIL_DOMAINS = {"domaene.dk", "domæne.dk", "example.com", "example.org", "example.net"}
+EXAMPLE_EMAIL_LOCALS = {"dit.navn", "ditnavn", "navn", "dit", "din", "adresse"}
+
+
+def example_email_hint(email: str) -> str:
+    """Forklarer hvorfor adressen ligner et eksempel (tom tekst = den ser rigtig ud)."""
+    local, _, domain = (email or "").partition("@")
+    if domain in EXAMPLE_EMAIL_DOMAINS:
+        return f"domaene-navnet {domain} er et eksempel"
+    if local in EXAMPLE_EMAIL_LOCALS:
+        return f"'{local}' er et eksempel paa et navn"
+    return ""
 
 
 def create_user(email: str, password: str, must_change: bool = False, username: str = "") -> int:
@@ -796,18 +833,22 @@ def invitation_body(email: str, base_url: str, password: str) -> str:
     )
 
 
-def invite_user(email: str, base_url: str = "", deliver=None) -> tuple:
+def invite_user(email: str, base_url: str = "", deliver=None, allow_example: bool = False) -> tuple:
     """Inviterer en bruger: opretter kontoen med en midlertidig kode og mailer den.
 
     Returnerer (ok, fejl). Der sendes ingen links og ingen tokens - kun en e-mailadresse og en
     midlertidig adgangskode, som brugeren skifter ved foerste login.
 
     deliver(subject, body) -> (ok, fejl) bruges, naar mailen skal afsted ad en anden vej end SMTP
-    (fx printes, saa ejeren kan sende den fra sin egen mailkonto)."""
+    (fx printes, saa ejeren kan sende den fra sin egen mailkonto). allow_example=True springer
+    pladsholder-tjekket over, naar ejeren har bekræftet at adressen er rigtig alligevel."""
     try:
         email = normalize_email(email)
     except ValueError as e:
         return False, str(e)
+    hint = example_email_hint(email)
+    if hint and not allow_example:
+        return False, f"'{email}' ligner eksemplet fra dokumentationen ({hint}) - skriv den rigtige adresse"
     with get_db() as db:
         if db.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone():
             return False, f"Der findes allerede en bruger med {email}"
@@ -832,13 +873,34 @@ DASHBOARD_TABS = ("cockpit", "seo", "keywords", "articles", "links", "spy", "soc
                   "ai", "pro", "moduler", "brugere", "alarms", "notes")
 
 
-def invite_redirect(ok: bool, text: str) -> str:
+def invite_redirect(ok: bool, text: str, email: str = "", kind: str = "") -> str:
     """Sender brugeren tilbage til Brugere-fanen med invitationens resultat i URL'en.
 
     Uden det her landede svaret paa Cockpit, og en mislykket invitation var kun synlig som en
-    alarm i en anden fane - det ligner en mail der bare er tabt."""
+    alarm i en anden fane - det ligner en mail der bare er tabt. kind="adresse"/"eksempel" goer
+    det muligt for formularen at forklare et afvist argument i stedet for en mailserver-fejl."""
     state = "ok" if ok else "fejl"
-    return f"/?tab=brugere&invite={state}&invite_msg={urllib.parse.quote((text or '').strip()[:180])}"
+    url = f"/?tab=brugere&invite={state}&invite_msg={urllib.parse.quote((text or '').strip()[:180])}"
+    if email:
+        url += f"&invite_email={urllib.parse.quote(email[:254])}"
+    if kind:
+        url += f"&invite_kind={urllib.parse.quote(kind[:16])}"
+    return url
+
+
+def users_delete_redirect(ok: bool, text: str, kind: str = "", email: str = "") -> str:
+    """Sender brugeren tilbage til Brugere-fanen med sletningens resultat i URL'en.
+
+    Foer landede bade en afvist og en gennemfoert sletning paa Cockpit, saa svaret var vaek med det
+    samme - kun alarmen under Alarmer vidste hvad der skete. kind goer det muligt at forklare den
+    enkelte afvisning (sidste bruger, ukendt id, ugyldigt id) i selve fanen."""
+    state = "ok" if ok else "fejl"
+    url = f"/?tab=brugere&del={state}&del_msg={urllib.parse.quote((text or '').strip()[:180])}"
+    if kind:
+        url += f"&del_kind={urllib.parse.quote(kind[:16])}"
+    if email:
+        url += f"&del_email={urllib.parse.quote(email[:254])}"
+    return url
 
 
 # ---------- API-noegler: personlige noegler pr. MCP-klient (ingen global token) ----------
@@ -977,8 +1039,23 @@ def record_login(ip: str, username: str, ok: bool):
         pass
 
 
-def start_session(user_id: int, ip: str = "") -> str:
+def _same_origin(request: Request) -> bool:
+    """Er en muterende forespoergsel fra samme site (eller uden browser-headers)?"""
+    fetch_site = (request.headers.get("sec-fetch-site") or "").lower()
+    if fetch_site and fetch_site not in ("same-origin", "none"):
+        return False
+    origin = request.headers.get("origin") or ""
+    if origin and origin != "null":
+        host = request.headers.get("host") or ""
+        return urlparse(origin).netloc.lower() == host.lower()
+    return True
+
+
+def start_session(user_id: int, ip: str = "", old_sid: str = "") -> str:
+    """Ny sid ved hvert login. Den gamle sid (hvis den findes) slettes, saa en stjålet/fikseret sid er vaerdiloes."""
     sid = secrets.token_urlsafe(32)
+    if old_sid:
+        end_session(old_sid)
     expires = (datetime.now() + timedelta(seconds=SESSION_MAX_AGE)).isoformat(timespec="seconds")
     with get_db() as db:
         db.execute("DELETE FROM sessions WHERE expires_at < ?", (now_iso(),))
@@ -1068,8 +1145,12 @@ async def auth_middleware(request: Request, call_next):
     # scheme er allerede X-Forwarded-Proto-resolveret af uvicorn/starlette.
     request.state.insecure = request.url.scheme == "http" and host not in ("127.0.0.1", "::1", "localhost")
     request.state.user = current_user(request)
-    if any(path.startswith(p) for p in ("/login", "/setup", "/health", "/static", "/mcp")):
+    if any(path.startswith(p) for p in ("/login", "/cc-login", "/setup", "/health", "/static", "/mcp")):
         return await call_next(request)
+    # CSRF: en muterende forespoergsel fra et andet site afvises. Browsere sender Sec-Fetch-Site
+    # (og Origin) paa cross-site POST; kald uden de headers (scripts, API-noegler) roeres ikke.
+    if request.method not in ("GET", "HEAD", "OPTIONS") and not _same_origin(request):
+        return JSONResponse({"error": "cross-site forespoergsel afvist"}, status_code=403)
     if request.state.user:
         return await call_next(request)
     if path.startswith("/api/"):
@@ -1116,14 +1197,16 @@ async def setup_user(request: Request):
         add_alarm(db, "brugere", f"Foerste bruger '{email}' oprettet", "info")
         db.execute("UPDATE users SET last_login_ip=?, last_login_at=? WHERE id=?", (ip, now_iso(), user_id))
     record_login(ip, email, True)
-    return session_redirect(request, start_session(user_id, ip))
+    return session_redirect(request, start_session(user_id, ip, request.cookies.get(SESSION_COOKIE) or ""))
 
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
     if user_count() == 0:
         return RedirectResponse("/setup", status_code=303)
-    return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "error": "", "email": "",
+    cc_msg = ("Login-linket fra WordPress er allerede brugt eller udloebet (de holder 10 min.). "
+              "Log ind med e-mail og adgangskode, og lav et nyt link i fanen Social.") if request.query_params.get("cc") else ""
+    return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "error": cc_msg, "email": "",
                                                      "report": last_run_report(), "client_ip": client_ip(request),
                                                      "app_version": APP_VERSION})
 
@@ -1145,7 +1228,7 @@ async def login(request: Request):
         with get_db() as db:
             db.execute("UPDATE users SET last_login_ip=?, last_login_at=? WHERE id=?", (ip, now_iso(), user["id"]))
         record_login(ip, email, True)
-        return session_redirect(request, start_session(user["id"], ip))
+        return session_redirect(request, start_session(user["id"], ip, request.cookies.get(SESSION_COOKIE) or ""))
     record_login(ip, email, False)
     fails += 1
     _LOGIN_FAILS[ip] = (0, now + _LOGIN_LOCK_SECONDS) if fails >= _LOGIN_MAX_FAILS else (fails, locked_until)
@@ -1166,32 +1249,72 @@ async def logout(request: Request):
 
 
 @app.post("/users/invite")
-async def users_invite(request: Request, email: str = Form(...)):
+async def users_invite(request: Request, email: str = Form(...), force: str = Form("")):
     """Inviterer en bruger paa mail. Fejler SMTP, oprettes brugeren ikke - fejlen bliver en alarm
-    og vises samtidig i formularen, saa en manglende mail ikke ser ud som en tabt mail."""
-    ok, err = invite_user(email, str(request.base_url).rstrip("/"))
+    og vises samtidig i formularen, saa en manglende mail ikke ser ud som en tabt mail.
+
+    Adressen tjekkes foer SMTP: en pladsholder som navn@domaene.dk eller en adresse uden @ forklares
+    i formularen i stedet for at blive en konto, ingen kan bruge. force=1 opretter alligevel, naar
+    ejeren har bekræftet at adressen er rigtig."""
+    raw = (email or "").strip()
+    try:
+        clean = normalize_email(raw)
+    except ValueError as e:
+        with get_db() as db:
+            add_alarm(db, "brugere", f"Invitation til '{raw[:64]}' blev ikke sendt: {str(e)[:160]}", "advarsel")
+        return RedirectResponse(invite_redirect(False, str(e), email=raw, kind="adresse"), status_code=303)
+    hint = example_email_hint(clean)
+    if hint and not force.strip():
+        msg = f"'{clean}' ligner eksemplet fra dokumentationen ({hint}) - skriv den rigtige adresse"
+        with get_db() as db:
+            add_alarm(db, "brugere", f"Invitation til '{clean[:64]}' blev ikke sendt: {msg[:160]}", "advarsel")
+        return RedirectResponse(invite_redirect(False, msg, email=clean, kind="eksempel"), status_code=303)
+    ok, err = invite_user(clean, str(request.base_url).rstrip("/"), allow_example=bool(force.strip()))
     if not ok:
         with get_db() as db:
-            add_alarm(db, "brugere", f"Invitation til '{email.strip()[:64]}' blev ikke sendt: {str(err)[:160]}", "advarsel")
-        return RedirectResponse(invite_redirect(False, err), status_code=303)
-    return RedirectResponse(invite_redirect(True, email.strip().lower()), status_code=303)
+            add_alarm(db, "brugere", f"Invitation til '{clean[:64]}' blev ikke sendt: {str(err)[:160]}", "advarsel")
+        return RedirectResponse(invite_redirect(False, err, email=clean, kind="smtp"), status_code=303)
+    return RedirectResponse(invite_redirect(True, clean), status_code=303)
 
 
 @app.post("/users/delete")
-async def users_delete(request: Request, id: int = Form(...)):
+async def users_delete(request: Request, id: str = Form("")):
+    """Sletter en bruger - og svarer i fanen Brugere, hvor knappen blev trykket.
+
+    id tages som tekst, saa et tomt eller forkert id bliver en forklaring i formularen i stedet for
+    et 422-svar uden tekst. En afvist sletning (sidste bruger, ukendt id) aendrer intet i listen og
+    bliver baade en alarm og en besked i fanen."""
     me = getattr(request.state, "user", None)
+    raw = (id or "").strip()
+    try:
+        uid = int(raw)
+        if uid <= 0:
+            raise ValueError
+    except ValueError:
+        msg = f"'{raw[:32]}' er ikke et bruger-id - der blev ikke slettet noget"
+        with get_db() as db:
+            add_alarm(db, "brugere", f"Sletning afvist: {msg[:160]}", "advarsel")
+        return RedirectResponse(users_delete_redirect(False, msg, kind="ugyldig"), status_code=303)
     with get_db() as db:
+        row = db.execute("SELECT email FROM users WHERE id=?", (uid,)).fetchone()
         total = db.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+        if not row:
+            msg = f"Der findes ingen bruger med id {uid} - den kan allerede vaere slettet"
+            add_alarm(db, "brugere", f"Sletning afvist: {msg[:160]}", "advarsel")
+            return RedirectResponse(users_delete_redirect(False, msg, kind="findes-ikke"), status_code=303)
+        email = row["email"]
         if total <= 1:
-            add_alarm(db, "brugere", "Den sidste bruger kan ikke slettes - opret en ny bruger foerst", "advarsel")
-            return RedirectResponse("/", status_code=303)
-        db.execute("DELETE FROM sessions WHERE user_id=?", (id,))
-        db.execute("DELETE FROM users WHERE id=?", (id,))
-    if me and me["id"] == id:
+            msg = f"'{email}' er den sidste bruger og kan ikke slettes - opret en ny bruger foerst"
+            add_alarm(db, "brugere", f"Sletning afvist: {msg[:160]}", "advarsel")
+            return RedirectResponse(users_delete_redirect(False, msg, kind="sidste", email=email), status_code=303)
+        db.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+        db.execute("DELETE FROM users WHERE id=?", (uid,))
+        add_alarm(db, "brugere", f"Brugeren '{email}' blev slettet", "info")
+    if me and me["id"] == uid:
         resp = RedirectResponse("/login", status_code=303)
         resp.delete_cookie(SESSION_COOKIE)
         return resp
-    return RedirectResponse("/", status_code=303)
+    return RedirectResponse(users_delete_redirect(True, "", kind="slettet", email=email), status_code=303)
 
 
 @app.post("/users/password")
@@ -1224,6 +1347,7 @@ def normalize_url(url: str) -> str:
     parsed = urlparse(url)
     if not parsed.netloc or "." not in parsed.netloc:
         raise ValueError("Ugyldig URL")
+    assert_public_url(url)          # SSRF: afvises foer URL'en gemmes eller hentes
     return url.rstrip("/")
 
 
@@ -1290,13 +1414,74 @@ HTTP.mount("https://", _adapter)
 HTTP.mount("http://", _adapter)
 
 
-def safe_request(url: str, timeout: int = 6):
-    return HTTP.get(
-        url,
-        timeout=timeout,
-        allow_redirects=True,
-        headers={"User-Agent": "Mozilla/5.0 CommandCenter/7.4"},
-    )
+# ---------- SSRF-beskyttelse (v7.19.0) ----------
+# Alle udgaaende kald med en brugerangivet URL gaar gennem safe_request(), saa guarden staar ét sted:
+# loopback, private net, link-local (169.254.169.254 = sky-metadata), reserverede og multicast-adresser
+# afvises, og viderestillinger valideres hop for hop - ellers kunne en 302 pege ind i det lokale net.
+# CC_SSRF_ALLOW=a, b aabner for enkelte vaertsnavne (fx en intern WooCommerce under udvikling).
+SSRF_ALLOW_HOSTS = [h.strip().lower() for h in (os.getenv("CC_SSRF_ALLOW") or "").split(",") if h.strip()]
+
+
+class BlockedURL(ValueError):
+    """En URL der peger ind i det lokale net - afvist foer der hentes noget."""
+
+
+def _ip_is_public(ip) -> bool:
+    return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified)
+
+
+def assert_public_url(url: str) -> str:
+    """SSRF-guard: afviser URL'er der peger paa det lokale net. Rejser BlockedURL (en ValueError)."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise BlockedURL("Kun http:// og https:// er tilladt")
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        raise BlockedURL("URL mangler et vaertsnavn")
+    bare = host.strip("[]")
+    if bare in SSRF_ALLOW_HOSTS:
+        return url
+    if bare == "localhost" or bare.endswith((".localhost", ".local", ".internal", ".home.arpa")):
+        raise BlockedURL(f"{bare} er en intern adresse")
+    try:
+        if not _ip_is_public(ipaddress.ip_address(bare)):
+            raise BlockedURL(f"{bare} er en intern adresse")
+        return url
+    except ValueError as e:
+        if isinstance(e, BlockedURL):
+            raise
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        infos = socket.getaddrinfo(bare, port, proto=socket.IPPROTO_TCP)
+    except OSError:
+        raise BlockedURL(f"Vaertsnavnet {bare} kan ikke slaaes op")
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if not _ip_is_public(ip):
+            raise BlockedURL(f"{bare} peger paa en intern adresse ({ip})")
+    return url
+
+
+def safe_request(url: str, timeout: int = 6, max_redirects: int = 3):
+    """Henter en URL efter SSRF-tjek - ogsaa for hvert viderestillingshop."""
+    current = assert_public_url(url)
+    for _ in range(max_redirects + 1):
+        response = HTTP.get(
+            current,
+            timeout=timeout,
+            allow_redirects=False,
+            headers={"User-Agent": "Mozilla/5.0 CommandCenter/7.19"},
+        )
+        location = response.headers.get("location") or ""
+        if response.status_code in (301, 302, 303, 307, 308) and location:
+            current = assert_public_url(urllib.parse.urljoin(current, location))
+            continue
+        return response
+    raise BlockedURL("For mange viderestillinger")
 
 
 def now_iso():
@@ -2865,8 +3050,18 @@ def sgap_ready() -> bool:
     return bool(WP_URL and WP_USER and WP_APP_PASSWORD) and module_on("autopilot")
 
 
+def sgap_headers() -> dict:
+    """Headerne paa hvert kald til pluginnet.
+
+    X-Command-Center goer at WordPress kan se, hvem der kalder (SGAP_CC::note_call): pluginnet
+    noterer tidsstempel, version, rute og bruger i optionen sgap_cc_seen og svarer med det i
+    /snapshot. Uden headeren ville WordPress altid mene, at Command Center aldrig havde kaldt."""
+    return {"X-Command-Center": APP_VERSION}
+
+
 def sgap_api(method: str, path: str, **kwargs):
     """Kald pluginnets REST-API. Kaster requests.HTTPError ved fejl-svar."""
+    kwargs["headers"] = {**sgap_headers(), **(kwargs.get("headers") or {})}
     resp = HTTP.request(
         method,
         f"{WP_URL.rstrip('/')}/wp-json/sgap/v1{path}",
@@ -2891,6 +3086,49 @@ def sgap_error_text(exc: Exception) -> str:
     if status == 404:
         return "Autopilot-API'et findes ikke (404): er Steamgears Autopilot 7.5+ installeret og aktiveret?"
     return f"Autopilot-pluginnet svarer ikke: {exc}"
+
+
+# ---------- Engangslink til login fra WordPress (Steamgears Autopilot) ----------
+# Broen er envejs (CC -> site, fordi CC kun lytter paa 127.0.0.1). Knappen i WordPress kan derfor
+# ikke selv spoerge CC om noget: CC laver et faerdigt engangslink og laegger det i pluginnet, som
+# viser knappen. Koden gemmes kun som sha256, kan bruges én gang og udloeber efter CC_LOGIN_TTL.
+CC_LOGIN_TTL = 600
+CC_LOGIN_KEY = "cc_login_code"
+
+
+def cc_login_issue(user_id: int) -> str:
+    """Laver en engangskode til brugeren og gemmer hashen (koden findes kun i linket)."""
+    code = secrets.token_urlsafe(32)
+    with get_db() as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                   (CC_LOGIN_KEY, jsonlib.dumps({"hash": hashlib.sha256(code.encode()).hexdigest(),
+                                                 "user_id": int(user_id),
+                                                 "exp": int(time.time()) + CC_LOGIN_TTL})))
+    return code
+
+
+def cc_login_consume(code: str):
+    """Returnerer user_id for en gyldig kode - og sletter den i samme kald (engangsbrug).
+
+    Koden slettes foerst naar den er godkendt, saa et forkert gaet ikke kan braende ejerens link."""
+    code = (code or "").strip()
+    if not code:
+        return None
+    digest = hashlib.sha256(code.encode()).hexdigest()
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key=?", (CC_LOGIN_KEY,)).fetchone()
+        if not row or not row["value"]:
+            return None
+        try:
+            data = jsonlib.loads(row["value"])
+        except Exception:
+            return None
+        if not isinstance(data, dict) or int(data.get("exp") or 0) < int(time.time()):
+            return None
+        if not hmac.compare_digest(str(data.get("hash") or ""), digest):
+            return None
+        db.execute("DELETE FROM settings WHERE key=?", (CC_LOGIN_KEY,))
+    return int(data.get("user_id") or 0) or None
 
 
 # Idempotens for "-> Autopilot": statusfeltet er laasen. Samme opslag maa kun give EN kladde,
@@ -2921,6 +3159,75 @@ def sgap_snapshot() -> dict:
         return {}
 
 
+# ---------- Naar WordPress sidst hoerte fra Command Center ----------
+# Pluginnet noterer hvert CC-kald i optionen sgap_cc_seen og svarer med det i /snapshot. Samme tal
+# staar i WordPress-kortet (SGAP_CC::last_call), saa de to sider ikke viser hver sin sandhed.
+CC_SEEN_LATE = 45 * 60       # en 30-minutters-sync misset
+CC_SEEN_STALE = 2 * 60 * 60  # tre misset: saa er broen sandsynligvis brudt
+
+
+def cc_age_text(seconds: int) -> str:
+    """Alder i ord paa dansk: 'lige nu', '12 min.', '3 t 4 min.', '2 dage'."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return "lige nu"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} min."
+    hours = minutes // 60
+    if hours < 24:
+        rest = minutes % 60
+        return f"{hours} t" + (f" {rest} min." if rest else "")
+    days = hours // 24
+    return "1 dag" if days == 1 else f"{days} dage"
+
+
+def cc_seen_view(sgap: dict, now: float | None = None) -> dict:
+    """WordPress' eget svar paa, hvornaar det sidst hoerte fra Command Center.
+
+    Alderen regnes ud her og nu (ikke ved synken), saa tallet ikke fryser mellem to kald. 'known'
+    er False, naar pluginnet ikke svarer med /snapshot endnu (Steamgears Autopilot < 7.33)."""
+    sgap = sgap or {}
+    view = {"known": False, "state": "ukendt", "ts": None, "age": None, "when": "",
+            "headline": "WordPress svarer ikke med Command Center-status endnu",
+            "hint": "Alder paa sidste CC-kald kraever Steamgears Autopilot 7.33+ - opdater pluginnet.",
+            "tone": "muted", "detail": "", "last_seen": "", "version": "", "route": "", "user": "",
+            "checked_at": sgap.get("checked_at") or ""}
+    cc = sgap.get("command_center") or {}
+    try:
+        ts = int(cc.get("ts"))
+    except (TypeError, ValueError):
+        return view
+    age = max(0, int((time.time() if now is None else now) - ts))
+    if age <= CC_SEEN_LATE:
+        state, tone = "live", "ok"
+    elif age <= CC_SEEN_STALE:
+        state, tone = "sent", "warn"
+    else:
+        state, tone = "tavs", "fejl"
+    view.update({
+        "known": True, "state": state, "ts": ts, "age": age, "tone": tone,
+        "when": "lige nu" if age < 60 else f"for {cc_age_text(age)} siden",
+        "last_seen": str(cc.get("last_seen") or ""),
+        "version": str(cc.get("version") or ""),
+        "route": str(cc.get("last_route") or ""),
+        "user": str(cc.get("user") or ""),
+    })
+    view["headline"] = ("WordPress hoerte fra Command Center " if age < 60
+                        else "WordPress hoerte sidst fra Command Center ") + view["when"]
+    facts = [(("v" + view["version"]) if view["version"] else ""), view["route"],
+             (("som " + view["user"]) if view["user"] else "")]
+    view["detail"] = " - ".join([f for f in facts if f])
+    if state == "live":
+        view["hint"] = "Broen virker: WordPress noterer hvert kald fra CC. Kortet i WordPress viser samme tal."
+    elif state == "sent":
+        view["hint"] = "En sync-runde er misset - naeste kald kommer om lidt. Kortet i WordPress viser samme tal."
+    else:
+        view["hint"] = ("WordPress har ikke hoert fra Command Center i over 2 timer. Tjek at WordPress "
+                        "koerer, og at WP_URL, WP_USER og WP_APP_PASSWORD stadig passer.")
+    return view
+
+
 def sgap_sync() -> dict:
     """Henter status fra pluginnet, gemmer et snapshot og alarmerer ved nye fejl eller nye kladder."""
     if not sgap_ready():
@@ -2941,6 +3248,18 @@ def sgap_sync() -> dict:
                 c["revenue"] = round(float(r["value"] or 0), 2)
         snap["channels"] = sorted(channels.values(), key=lambda c: (-c["revenue"], -c["click"]))
         snap["pending_drafts"] = len(drafts) if isinstance(drafts, list) else 0
+        # Kaldet her ER et CC-kald (headeren), saa svaret baade bekraefter at broen virker og
+        # hvornaar WordPress noterede det. Et aeldre plugin uden /snapshot maa ikke vaelte synken.
+        try:
+            doc = sgap_api("GET", "/snapshot", params={"days": 7})
+            cc_seen = ((doc or {}).get("status") or {}).get("command_center") or {}
+            if isinstance(cc_seen, dict) and cc_seen.get("ts"):
+                snap["command_center"] = {k: cc_seen.get(k) for k in
+                                          ("state", "ts", "age", "version", "last_route", "user", "last_seen")}
+            else:
+                snap.pop("command_center", None)
+        except Exception:
+            snap.pop("command_center", None)
     except Exception as e:
         snap["error"] = sgap_error_text(e)
     with get_db() as db:
@@ -2968,6 +3287,48 @@ async def job_sgap_sync():
 async def autopilot_sync_now():
     await asyncio.get_running_loop().run_in_executor(executor, sgap_sync)
     return RedirectResponse("/", status_code=303)
+
+
+@app.post("/autopilot/login-link")
+async def autopilot_login_link(request: Request):
+    """Laegger et engangslink til Command Center i WordPress-pluginnet.
+
+    Knappen i WordPress kan ikke selv kalde CC (CC lytter kun paa 127.0.0.1), saa CC laegger linket
+    derud, hvor knappen er - og svarer i fanen Social, hvor der blev trykket."""
+    me = getattr(request.state, "user", None)
+    if not me:
+        return RedirectResponse("/login", status_code=303)
+    if not sgap_ready():
+        return RedirectResponse("/?tab=social&cc_link=fejl&cc_msg=" + urllib.parse.quote(
+            "WP_URL/WP_USER/WP_APP_PASSWORD mangler, eller modulet Autopilot-bro er slukket"), status_code=303)
+    base = (CC_PUBLIC_URL or str(request.base_url)).rstrip("/")
+    code = cc_login_issue(me["id"])
+    try:
+        sgap_api("POST", "/login-link", json={"url": f"{base}/cc-login?code={urllib.parse.quote(code)}",
+                                             "expires_in": CC_LOGIN_TTL, "user": me["email"]})
+    except Exception as e:
+        return RedirectResponse("/?tab=social&cc_link=fejl&cc_msg="
+                                + urllib.parse.quote(sgap_error_text(e)), status_code=303)
+    return RedirectResponse("/?tab=social&cc_link=ok&cc_msg=" + urllib.parse.quote(
+        "Engangslinket ligger nu i WordPress i 10 min. - aabn Steamgears der, og tryk Log ind paa Command Center"),
+        status_code=303)
+
+
+@app.get("/cc-login")
+async def cc_login(request: Request, code: str = ""):
+    """Logger ind med engangskoden fra WordPress-knappen (bruges én gang, holder 10 min.)."""
+    user_id = cc_login_consume(code)
+    if not user_id:
+        return RedirectResponse("/login?cc=udloebet", status_code=303)
+    ip = client_ip(request)
+    with get_db() as db:
+        user = db.execute("SELECT id, email FROM users WHERE id=?", (user_id,)).fetchone()
+        if user:
+            db.execute("UPDATE users SET last_login_ip=?, last_login_at=? WHERE id=?", (ip, now_iso(), user_id))
+    if not user:
+        return RedirectResponse("/login?cc=udloebet", status_code=303)
+    record_login(ip, user["email"], True)
+    return session_redirect(request, start_session(user["id"], ip, request.cookies.get(SESSION_COOKIE) or ""))
 
 
 @app.post("/social/to-autopilot")
@@ -3196,6 +3557,111 @@ def startup_selftest_sync():
 async def job_backup_db():
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(executor, backup_db_sync)
+
+
+# ---------- v7.23 Backup/restore i UI ----------
+BACKUP_NAME_RE = re.compile(r"^cc-[a-z0-9-]{1,32}-\d{8}-\d{4}\.db$")
+
+
+def _backup_path(name: str):
+    """Sti til en backupfil - kun hvis navnet matcher det faste format (ingen stier, ingen '..')."""
+    if not BACKUP_NAME_RE.fullmatch(name or ""):
+        return None
+    bdir = os.path.abspath(os.path.join(BASE_DIR, "backups"))
+    p = os.path.join(bdir, name)
+    if os.path.dirname(os.path.abspath(p)) != bdir or not os.path.isfile(p):
+        return None
+    return p
+
+
+def list_backups():
+    """Alle gyldige backupfiler, nyeste først."""
+    bdir = os.path.join(BASE_DIR, "backups")
+    out = []
+    try:
+        names = os.listdir(bdir)
+    except OSError:
+        return out
+    for n in names:
+        p = _backup_path(n)
+        if not p:
+            continue
+        st = os.stat(p)
+        out.append({"name": n, "size_kb": round(st.st_size / 1024),
+                    "mtime": datetime.fromtimestamp(st.st_mtime).strftime("%d-%m-%Y %H:%M")})
+    return sorted(out, key=lambda b: b["name"], reverse=True)
+
+
+def _check_backup_file(path: str):
+    """Er filen en brugbar CC-database? Returnerer en dansk fejltekst eller None."""
+    try:
+        conn = sqlite3.connect("file:" + path + "?mode=ro", uri=True)
+        try:
+            res = conn.execute("PRAGMA integrity_check").fetchone()
+            has_users = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        return "filen kan ikke læses som database: " + str(e)[:80]
+    if not res or res[0] != "ok":
+        return "integritetstjek fejlede"
+    if not has_users:
+        return "filen er ikke en Command Center-database (mangler tabellen users)"
+    return None
+
+
+def restore_backup_sync(name: str):
+    """Gendanner en backup. Tager altid en pre-restore-kopi først; fejler den, sker der intet."""
+    p = _backup_path(name)
+    if not p:
+        return False, "ugyldigt backupnavn - der blev ikke gendannet noget"
+    err = _check_backup_file(p)
+    if err:
+        return False, "'" + name + "' kan ikke gendannes: " + err
+    safety = backup_db_sync(tag="pre-restore")
+    if not safety:
+        return False, "sikkerhedskopi før gendannelse fejlede - der blev ikke gendannet noget"
+    try:
+        src = sqlite3.connect(p)
+        dst = sqlite3.connect(DB_PATH)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+    except sqlite3.Error as e:
+        return False, "gendannelsen fejlede: " + str(e)[:120]
+    with get_db() as db:
+        add_alarm(db, "backup", "Databasen blev gendannet fra '" + name + "' (før-kopi: '"
+                  + os.path.basename(safety) + "')", "kritisk")
+    return True, name
+
+
+def backup_redirect(ok: bool, text: str) -> str:
+    state = "ok" if ok else "fejl"
+    return "/?tab=moduler&bk=" + state + "&bk_msg=" + urllib.parse.quote((text or "").strip()[:180])
+
+
+@app.post("/backup/now")
+async def backup_now(request: Request):
+    loop = asyncio.get_running_loop()
+    path = await loop.run_in_executor(executor, backup_db_sync, "manuel")
+    if not path:
+        return RedirectResponse(backup_redirect(False, "backup fejlede - se alarmer"), status_code=303)
+    return RedirectResponse(backup_redirect(True, "Backup gemt: " + os.path.basename(path)), status_code=303)
+
+
+@app.post("/backup/restore")
+async def backup_restore(request: Request, name: str = Form(""), confirm: str = Form("")):
+    if (confirm or "").strip() != "GENDAN":
+        return RedirectResponse(backup_redirect(False, "skriv GENDAN for at bekræfte - der blev ikke gendannet noget"), status_code=303)
+    loop = asyncio.get_running_loop()
+    ok, msg = await loop.run_in_executor(executor, restore_backup_sync, (name or "").strip())
+    if not ok:
+        with get_db() as db:
+            add_alarm(db, "backup", "Gendannelse afvist: " + msg[:160], "advarsel")
+        return RedirectResponse(backup_redirect(False, msg), status_code=303)
+    return RedirectResponse(backup_redirect(True, "Databasen er gendannet fra " + msg), status_code=303)
 
 
 @app.post("/self-update")
@@ -4028,6 +4494,16 @@ async def dashboard(request: Request):
     tab = (request.query_params.get("tab") or "").strip().lower()
     invite = (request.query_params.get("invite") or "").strip().lower()
     invite_msg = (request.query_params.get("invite_msg") or "").strip()[:180]
+    invite_email = (request.query_params.get("invite_email") or "").strip()[:254]
+    invite_kind = (request.query_params.get("invite_kind") or "").strip().lower()[:16]
+    del_state = (request.query_params.get("del") or "").strip().lower()[:8]
+    del_msg = (request.query_params.get("del_msg") or "").strip()[:180]
+    del_kind = (request.query_params.get("del_kind") or "").strip().lower()[:16]
+    del_email = (request.query_params.get("del_email") or "").strip()[:254]
+    bk_state = (request.query_params.get("bk") or "").strip().lower()[:8]
+    bk_msg = (request.query_params.get("bk_msg") or "").strip()[:200]
+    cc_link = (request.query_params.get("cc_link") or "").strip().lower()[:8]
+    cc_msg = (request.query_params.get("cc_msg") or "").strip()[:180]
     with get_db() as db:
         domains = db.execute("SELECT * FROM domains ORDER BY id DESC").fetchall()
         competitors = db.execute("SELECT * FROM competitors ORDER BY id DESC LIMIT 20").fetchall()
@@ -4076,6 +4552,10 @@ async def dashboard(request: Request):
         update_state = jsonlib.loads(update_row["value"]) if update_row and update_row["value"] else None
     except Exception:
         update_state = None
+    try:
+        sgap_state = jsonlib.loads(sgap_row["value"]) if sgap_row and sgap_row["value"] else {}
+    except Exception:
+        sgap_state = {}
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
         "domains": domains,
@@ -4087,6 +4567,11 @@ async def dashboard(request: Request):
         "notes": notes,
         "keywords": keywords,
         "alarms": alarms,
+        "budget_rows": [
+            {"service": s, "used": u, "limit": l, "pct": (round(u / l * 100) if l else 0)}
+            for s, (u, l) in budget_usage().items()
+        ],
+        "job_rows": job_status(),
         "ai_enabled": bool(AIMLAPI_KEY),
         "wp_enabled": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "serpapi_enabled": bool(SERPAPI_KEY),
@@ -4103,6 +4588,9 @@ async def dashboard(request: Request):
         "task_estimates": TASK_ESTIMATES,
         "current_commit": deployed_commit(),
         "users": users,
+        "backups": list_backups(),
+        "backup_feedback": ({"ok": bk_state == "ok", "message": bk_msg}
+                            if bk_state in ("ok", "fejl") else None),
         "api_clients": api_client_rows(),
         "api_key_once": pending_api_key(),
         "api_usage": api_usage(),
@@ -4123,8 +4611,11 @@ async def dashboard(request: Request):
         "crawl": crawl,
         "track_domain": TRACK_DOMAIN,
         "difficulties": difficulties,
-        "sgap": jsonlib.loads(sgap_row["value"]) if sgap_row and sgap_row["value"] else {},
+        "sgap": sgap_state,
+        "cc_seen": cc_seen_view(sgap_state),
         "sgap_ready": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
+        "cc_link": cc_link,
+        "cc_msg": cc_msg,
         "modules": modules_state(),
         "strategies": STRATEGIES,
         "active_strategy": active_key,
@@ -4133,8 +4624,12 @@ async def dashboard(request: Request):
         "insecure": getattr(request.state, "insecure", False),
         "strategy_check": jsonlib.loads(check_row["value"]) if check_row and check_row["value"] else None,
         "initial_tab": tab if tab in DASHBOARD_TABS else "cockpit",
-        "invite_feedback": ({"ok": invite == "ok", "message": invite_msg}
+        "invite_feedback": ({"ok": invite == "ok", "message": invite_msg,
+                             "email": invite_email, "kind": invite_kind}
                             if invite in ("ok", "fejl") else None),
+        "delete_feedback": ({"ok": del_state == "ok", "message": del_msg, "kind": del_kind,
+                             "email": del_email}
+                            if del_state in ("ok", "fejl") else None),
     })
 
 
@@ -4615,6 +5110,110 @@ async def api_keys_revoke(client_id: int = Form(...)):
 
 
 
+# ---------- Job-heartbeat (v7.20.0): er de planlagte jobs stille eller fejlende? ----------
+# Hvert scheduler-job skriver sidste succes og sidste fejl i settings. job_heartbeat_check() (hvert 15. min)
+# alarmerer, hvis et job er forsinket for meget, eller hvis det fejlede. Hver tilstand alarmeres kun én gang.
+JOB_MAX_AGE_HOURS = {
+    "domain_checks": 7, "keyword_checks": 26, "growth_autopilot": 26, "cleanup": 26,
+    "db_backup": 26, "update_check": 26, "sgap_sync": 1.5, "alert_outbox": 0.1,
+}
+JOB_LABELS = {
+    "domain_checks": "Domæne-tjek", "keyword_checks": "Keyword-tjek", "growth_autopilot": "Vækst-autopilot",
+    "cleanup": "Oprydning", "db_backup": "DB-backup", "update_check": "Opdateringstjek",
+    "sgap_sync": "WordPress-synk", "alert_outbox": "Alarm-udsendelse",
+}
+
+
+def job_heartbeat(job_id: str, fn):
+    """Pakker et job: skriver succes/fejl i settings. Fejlen rethrows, saa APScheduler stadig logger den.
+    Async jobs pakkes som async, saa AsyncIOScheduler stadig kender dem som coroutines."""
+    if asyncio.iscoroutinefunction(fn):
+        async def wrapped_async(*args, **kwargs):
+            try:
+                out = await fn(*args, **kwargs)
+            except Exception as e:
+                _job_mark(job_id, False, repr(e))
+                raise
+            _job_mark(job_id, True, "")
+            return out
+        wrapped_async.__name__ = fn.__name__
+        return wrapped_async
+
+    def wrapped(*args, **kwargs):
+        try:
+            out = fn(*args, **kwargs)
+        except Exception as e:
+            _job_mark(job_id, False, repr(e))
+            raise
+        _job_mark(job_id, True, "")
+        return out
+    wrapped.__name__ = fn.__name__
+    return wrapped
+
+
+def _job_mark(job_id: str, ok: bool, err: str):
+    try:
+        with get_db() as db:
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (f"job_ok_{job_id}", now_iso() if ok else (get_setting_value(db, f"job_ok_{job_id}") or "")))
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (f"job_err_{job_id}", "" if ok else f"{now_iso()} {err[:200]}"))
+    except Exception as e:
+        print("[cc] kunne ikke skrive job-status:", repr(e), flush=True)
+
+
+def get_setting_value(db, key: str):
+    row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def job_status() -> list[dict]:
+    """Status for alle planlagte jobs: sidst ok, sidste fejl, og om jobbet er forsinket."""
+    out = []
+    now = datetime.now()
+    with get_db() as db:
+        for job_id, max_hours in JOB_MAX_AGE_HOURS.items():
+            ok_at = get_setting_value(db, f"job_ok_{job_id}") or ""
+            err = get_setting_value(db, f"job_err_{job_id}") or ""
+            stale = True
+            age_hours = None
+            if ok_at:
+                try:
+                    age_hours = round((now - datetime.fromisoformat(ok_at)).total_seconds() / 3600, 1)
+                    stale = age_hours > max_hours
+                except Exception:
+                    stale = True
+            else:
+                # Aldrig koert: forsinket foerst naar appen selv har koert laenger end jobbets maks-alder
+                try:
+                    started = datetime.fromisoformat(get_setting_value(db, "last_start") or "")
+                    stale = (now - started).total_seconds() / 3600 > max_hours
+                except Exception:
+                    stale = False
+            state = "fejlet" if err else ("forsinket" if stale else "ok")
+            out.append({"id": job_id, "label": JOB_LABELS.get(job_id, job_id), "state": state,
+                        "last_ok": ok_at, "age_hours": age_hours, "last_error": err})
+    return out
+
+
+async def job_heartbeat_check():
+    """Alarmerer en gang pr. tilstand: forsinket eller fejlet. Naar jobbet er ok igen, nulstilles tilstanden."""
+    for j in job_status():
+        key = f"job_alarm_{j['id']}"
+        with get_db() as db:
+            prev = get_setting_value(db, key) or "ok"
+            if j["state"] == prev:
+                continue
+            if j["state"] == "ok":
+                db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, 'ok')", (key,))
+                continue
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, j["state"]))
+            if j["state"] == "fejlet":
+                msg = f"Job '{j['label']}' fejlede: {j['last_error'][:160]}"
+                add_alarm(db, "jobs", msg, "kritisk")
+            else:
+                hrs = "aldrig koert" if j["age_hours"] is None else f"sidst ok for {j['age_hours']} t siden"
+                add_alarm(db, "jobs", f"Job '{j['label']}' er forsinket ({hrs})", "advarsel")
+
+
 # ---------- Scheduler ----------
 async def job_check_domains():
     if not module_on("domains"):
@@ -4644,14 +5243,15 @@ async def lifespan(app_: FastAPI):
     except Exception:
         pass
     try:
-        scheduler.add_job(job_check_domains, IntervalTrigger(hours=6), id="domain_checks", replace_existing=True, max_instances=1, coalesce=True)
-        scheduler.add_job(job_check_keywords, CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True, max_instances=1, coalesce=True)
-        scheduler.add_job(job_growth_autopilot, CronTrigger(hour=5, minute=15), id="growth_autopilot", replace_existing=True, max_instances=1, coalesce=True)
-        scheduler.add_job(cleanup_old_data, CronTrigger(hour=4, minute=30), id="cleanup", replace_existing=True, max_instances=1, coalesce=True)
-        scheduler.add_job(job_backup_db, CronTrigger(hour=4, minute=40), id="db_backup", replace_existing=True, max_instances=1, coalesce=True)
-        scheduler.add_job(job_update_check, CronTrigger(hour=5, minute=0), id="update_check", replace_existing=True, max_instances=1, coalesce=True)
-        scheduler.add_job(job_sgap_sync, IntervalTrigger(minutes=30), id="sgap_sync", replace_existing=True, max_instances=1, coalesce=True)
-        scheduler.add_job(job_drain_alerts, IntervalTrigger(minutes=1), id="alert_outbox", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("domain_checks", job_check_domains), IntervalTrigger(hours=6), id="domain_checks", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("keyword_checks", job_check_keywords), CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("growth_autopilot", job_growth_autopilot), CronTrigger(hour=5, minute=15), id="growth_autopilot", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("cleanup", cleanup_old_data), CronTrigger(hour=4, minute=30), id="cleanup", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("db_backup", job_backup_db), CronTrigger(hour=4, minute=40), id="db_backup", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("update_check", job_update_check), CronTrigger(hour=5, minute=0), id="update_check", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("sgap_sync", job_sgap_sync), IntervalTrigger(minutes=30), id="sgap_sync", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("alert_outbox", job_drain_alerts), IntervalTrigger(minutes=1), id="alert_outbox", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat_check, IntervalTrigger(minutes=15), id="job_heartbeat", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.start()
         try:
             executor.submit(startup_selftest_sync)  # v7.9: selvtest ved hver opstart (efter self-update/install)
@@ -4675,11 +5275,9 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-    <link rel="preconnect" href="https://cdn.tailwindcss.com" crossorigin>
-    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+    <script src="/static/vendor/tailwind.js"></script>
+    <script defer src="/static/vendor/alpine.min.js"></script>
+    <script src="/static/vendor/chart.umd.min.js"></script>
     <meta name="theme-color" content="#09090b">
     <style>
       html { scroll-behavior: smooth; }
@@ -4771,6 +5369,31 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             {% for alarm in alarms[:3] %}<p class="text-xs text-zinc-300">• [{{ alarm.severity }}] {{ alarm.type }}: {{ alarm.message }}</p>{% endfor %}
         </div>
         {% endif %}
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">💳 API-budget denne måned</h2>
+                {% for b in budget_rows %}
+                <div class="mb-3">
+                    <div class="flex justify-between text-xs text-zinc-300"><span>{{ b.service }}</span><span>{{ b.used }} / {{ b.limit if b.limit else '∞' }} kald{% if b.limit %} ({{ b.pct }} %){% endif %}</span></div>
+                    <div class="h-1.5 bg-zinc-800 rounded-full overflow-hidden mt-1"><div class="h-full {% if b.pct >= 100 %}bg-rose-500{% elif b.pct >= 80 %}bg-amber-500{% else %}bg-emerald-500{% endif %}" style="width:{{ [b.pct, 100]|min if b.limit else 0 }}%"></div></div>
+                </div>
+                {% endfor %}
+                <p class="text-[10px] text-zinc-600">Grænsen sættes med SERPAPI_MONTHLY_LIMIT og AI_MONTHLY_LIMIT i .env (0 = ingen grænse). Ved 80 % og 100 % kommer der alarm.</p>
+            </div>
+            <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">⏱️ Planlagte jobs (heartbeat)</h2>
+                {% for j in job_rows %}
+                <div class="flex justify-between items-start text-xs py-1 border-b border-zinc-800/60 last:border-0">
+                    <span class="text-zinc-300">{{ j.label }}</span>
+                    <span class="text-right {% if j.state == 'ok' %}text-emerald-400{% elif j.state == 'forsinket' %}text-amber-400{% else %}text-rose-400{% endif %}">
+                        {% if j.state == 'ok' %}ok · {{ j.last_ok[0:16] }}{% elif j.state == 'forsinket' %}forsinket{% else %}fejlet{% endif %}
+                    </span>
+                </div>
+                {% endfor %}
+                <p class="text-[10px] text-zinc-600 mt-2">Et job er forsinket, hvis det ikke er kørt inden for sin forventede periode. Tjekket kører hvert 15. minut.</p>
+            </div>
+        </div>
 
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <div class="flex items-center justify-between mb-3">
@@ -5268,6 +5891,27 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             </table>
             <p class="text-[10px] text-zinc-500 mt-2">Tjekket {{ sgap.checked_at }} · Godkend kladder i WordPress: Steamgears → AI Drafts</p>
             {% endif %}
+            {% if sgap_ready and modules['autopilot'] %}
+            <div class="mt-3 pt-3 border-t border-zinc-800">
+                <div class="mb-3">
+                    {% set cc_tone = {'ok': 'text-emerald-300', 'warn': 'text-amber-300', 'fejl': 'text-rose-300', 'muted': 'text-zinc-500'}.get(cc_seen.tone, 'text-zinc-500') %}
+                    <p class="text-[11px] {{ cc_tone }}">{{ cc_seen.headline }}{% if cc_seen.checked_at %} <span class="text-zinc-600">(svaret fra {{ cc_seen.checked_at }})</span>{% endif %}</p>
+                    {% if cc_seen.detail %}<p class="text-[10px] text-zinc-500">{{ cc_seen.detail }}</p>{% endif %}
+                    <p class="text-[10px] text-zinc-500">{{ cc_seen.hint }}</p>
+                </div>
+                {% if cc_link == 'ok' %}
+                <p class="text-[11px] text-emerald-300 mb-2">✅ {{ cc_msg }}</p>
+                {% elif cc_link == 'fejl' %}
+                <p class="text-[11px] text-rose-300 mb-2">❌ Linket kunne ikke lægges i WordPress: {{ cc_msg }}</p>
+                {% endif %}
+                <div class="flex flex-wrap items-center gap-3">
+                    <form action="/autopilot/login-link" method="POST">
+                        <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-2 rounded-xl text-xs">🔑 Log ind på Command Center</button>
+                    </form>
+                    <span class="text-[10px] text-zinc-500">Lægger et engangslink i WordPress, så knappen der logger dig ind her — uden adgangskode. Linket holder 10 min. og virker én gang.</span>
+                </div>
+            </div>
+            {% endif %}
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Tilføj socialt opslag</h2>
@@ -5526,11 +6170,64 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
         </div>
     </section>
 
+    <!-- BACKUP -->
+    <section x-show="tab === 'moduler'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">Database-backup</h2>
+            <p class="text-xs text-zinc-500 mb-3">Den nyeste backup tages automatisk hver nat kl. 04:40 og før hver opdatering. Her kan du tage en manuel backup og gendanne en af de gemte. Ved gendannelse tages først en kopi af den nuværende database.</p>
+            {% if backup_feedback %}
+            {% if backup_feedback.ok %}
+            <div class="bg-emerald-500/10 border border-emerald-500/40 text-emerald-300 rounded-xl px-3 py-2 mb-3 text-xs">✅ {{ backup_feedback.message }}</div>
+            {% else %}
+            <div class="bg-rose-500/10 border border-rose-500/40 text-rose-300 rounded-xl px-3 py-2 mb-3 text-xs">❌ <b>Handlingen blev ikke gennemført</b> — <code class="break-all">{{ backup_feedback.message }}</code></div>
+            {% endif %}
+            {% endif %}
+            <form action="/backup/now" method="POST" class="mb-4">
+                <button class="text-[11px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-3 py-1.5 rounded-lg">💾 Tag backup nu</button>
+            </form>
+            {% if backups %}
+            <div class="space-y-2">
+                {% for b in backups %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 flex flex-wrap items-center justify-between gap-2">
+                    <span class="text-xs text-zinc-300 break-all"><code>{{ b.name }}</code> <span class="text-zinc-500">· {{ b.size_kb }} KB · {{ b.mtime }}</span></span>
+                    <form action="/backup/restore" method="POST" class="flex items-center gap-2">
+                        <input type="hidden" name="name" value="{{ b.name }}">
+                        <input type="text" name="confirm" autocomplete="off" placeholder="skriv GENDAN" aria-label="Skriv GENDAN for at bekræfte gendannelse af {{ b.name }}" class="bg-zinc-900 border border-zinc-700 rounded-lg px-2 py-1 text-[11px] text-zinc-200 w-32">
+                        <button class="text-[11px] bg-rose-500/10 text-rose-300 border border-rose-500/40 px-3 py-1 rounded-lg">↺ Gendan</button>
+                    </form>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p class="text-xs text-zinc-500">Ingen backups endnu.</p>
+            {% endif %}
+        </div>
+    </section>
+
     <!-- BRUGERE -->
     <section x-show="tab === 'brugere'" class="space-y-4" style="display: none;">
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Brugere ({{ users|length }})</h2>
             <p class="text-xs text-zinc-500 mb-3">Adgang sker med e-mail + adgangskode (PBKDF2-SHA256). Den foerste bruger blev oprettet ved foerste besoeg — invitér gerne en ekstra, saa du ikke laaser dig ude.</p>
+            {% if delete_feedback %}
+            {% if delete_feedback.ok %}
+            <div class="bg-emerald-500/10 border border-emerald-500/40 text-emerald-300 rounded-xl px-3 py-2 mb-3 text-xs">
+                ✅ <b>Brugeren er slettet</b>{% if delete_feedback.email %} — <b>{{ delete_feedback.email }}</b>{% endif %}. Sessionerne er ryddet, så en åben fane ikke kan bruge kontoen længere.
+            </div>
+            {% else %}
+            <div class="bg-rose-500/10 border border-rose-500/40 text-rose-300 rounded-xl px-3 py-2 mb-3 text-xs">
+                ❌ <b>Brugeren blev ikke slettet</b> — der er ikke ændret noget i listen.
+                <code class="block mt-1 text-rose-200 break-all">{{ delete_feedback.message }}</code>
+                {% if delete_feedback.kind == 'sidste' %}
+                <span class="block mt-1 text-rose-300/80">Der skal altid være mindst én bruger, så du ikke låser dig ude. Invitér en ny bruger, og prøv igen.</span>
+                {% elif delete_feedback.kind == 'findes-ikke' %}
+                <span class="block mt-1 text-rose-300/80">Listen nedenfor er den nyeste — brugeren kan være slettet i en anden fane, så genindlæs siden.</span>
+                {% elif delete_feedback.kind == 'ugyldig' %}
+                <span class="block mt-1 text-rose-300/80">Siden sendte ikke et gyldigt bruger-id. Genindlæs siden, og brug ✕ ud for brugeren igen.</span>
+                {% endif %}
+            </div>
+            {% endif %}
+            {% endif %}
             <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
                 <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3">
                     <div class="text-[11px] uppercase tracking-wider text-zinc-500 mb-2">Seneste login pr. bruger</div>
@@ -5561,7 +6258,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                     </div>
                     <form action="/users/delete" method="POST">
                         <input type="hidden" name="id" value="{{ u.id }}">
-                        <button class="text-zinc-500 hover:text-rose-400">✕</button>
+                        <button class="text-zinc-500 hover:text-rose-400" title="Slet {{ u.email }}">✕</button>
                     </form>
                 </div>
                 {% endfor %}
@@ -5576,14 +6273,25 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             </div>
             {% else %}
             <div class="bg-rose-500/10 border border-rose-500/40 text-rose-300 rounded-xl px-3 py-2 mb-3 text-xs">
-                ❌ <b>Invitationen blev ikke sendt</b> — og der blev ikke oprettet nogen bruger. Fejlen fra mailserveren:
+                ❌ <b>Invitationen blev ikke sendt</b> — og der blev ikke oprettet nogen bruger.
+                {% if invite_feedback.kind == 'adresse' or invite_feedback.kind == 'eksempel' %}Adressen blev afvist, før der blev sendt noget:{% else %}Fejlen fra mailserveren:{% endif %}
                 <code class="block mt-1 text-rose-200 break-all">{{ invite_feedback.message }}</code>
-                <span class="block mt-1 text-rose-300/80">Mangler <b>SMTP_HOST</b> + <b>SMTP_FROM</b> i <code>.env</code>, bliver der ikke sendt noget. Uden SMTP kan invitationen i stedet læses op med <code>python3 scripts/invite.py navn@domaene.dk --print</code>.</span>
+                {% if invite_feedback.kind != 'adresse' and invite_feedback.kind != 'eksempel' %}
+                <span class="block mt-1 text-rose-300/80">Mangler <b>SMTP_HOST</b> + <b>SMTP_FROM</b> i <code>.env</code>, bliver der ikke sendt noget. Uden SMTP kan invitationen i stedet læses op med <code>python3 scripts/invite.py bruger@ditfirma.dk --print</code>.</span>
+                {% endif %}
+                {% if invite_feedback.kind == 'eksempel' and invite_feedback.email %}
+                <form action="/users/invite" method="POST" class="mt-2 flex flex-wrap items-center gap-2">
+                    <input type="hidden" name="email" value="{{ invite_feedback.email }}">
+                    <input type="hidden" name="force" value="1">
+                    <span class="text-rose-300/80">Er <b>{{ invite_feedback.email }}</b> rigtig alligevel?</span>
+                    <button class="bg-rose-500/10 text-rose-200 border border-rose-500/40 px-3 py-1 rounded-lg text-xs">Opret alligevel</button>
+                </form>
+                {% endif %}
             </div>
             {% endif %}
             {% endif %}
             <form action="/users/invite" method="POST" class="grid grid-cols-1 md:grid-cols-2 gap-2">
-                <input type="email" name="email" placeholder="navn@domaene.dk" required maxlength="254" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <input type="email" name="email" placeholder="bruger@ditfirma.dk" required maxlength="254" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Send invitation</button>
             </form>
             <p class="text-[10px] text-zinc-600 mt-2">Invitationen er en mail med en midlertidig adgangskode, som brugeren skifter ved foerste login. Kraever SMTP_HOST + SMTP_FROM i .env — mangler de, oprettes ingen bruger, og fejlen staar under Alarmer.</p>
@@ -6143,13 +6851,26 @@ cat << 'EOF_README' > "$PROJECT_DIR/README.md"
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
 
+## Nyheder i v7.22
+
+- **Backup i UI (v7.23.0)** — fanen Moduler viser alle backups med "Tag backup nu" og "Gendan". Gendannelse kræver at skrive `GENDAN`, og der tages altid en `pre-restore`-kopi først.
+- **Offline dashboard (v7.22.0)** — dashboardet henter ikke længere Tailwind, Alpine eller Chart.js fra CDN. De ligger lokalt i `app/static/vendor/`, så UI'et virker uden internet.
+
+## Nyheder i v7.21
+
+- **CSRF-beskyttelse (v7.21.0)** — muterende kald fra et andet site afvises med 403. Hvert login giver en ny session, og den gamle sid slettes.
+
+## Nyheder i v7.20
+
+- **Budget og jobstatus på Cockpit (v7.20.0)** — kortet "API-budget denne måned" viser forbrug og loft for SerpAPI og AI, og "Planlagte jobs (heartbeat)" viser hvornår hvert job sidst kørte. Et job der holder op med at køre, eller fejler, giver én alarm.
+
 ## Nyheder i v7.17
 
 - **MCP-hærdning (v7.17.1)** — nøglen ligger ikke længere i klartekst i databasen: rækken i `settings` slettes i samme kald som dashboardet viser den (højst 15 min. hvis siden aldrig åbnes, og oprydningen fjerner resten). "Jeg har gemt nøglen"-knappen er derfor væk. Ukendte værktøjsnavne på `/mcp` havner nu også i auditten, så en nøgle der famler kan ses.
 - **MCP skriver nu også (fase 2)** — med `read,write` på nøglen kan en agent starte et site-crawl, oprette en monitor, løse en alarm og skrive en note (`start_crawl`, `add_monitor`, `resolve_alarm`, `add_note`). Hvert kald — også afviste — havner i en **audit pr. nøgle** (`api_audit`) med værktøj, varighed og fejl, som du ser i fanen **Brugere** og med `python3 scripts/api_key.py audit`. Værktøjerne har `readOnlyHint`/`destructiveHint`, så klienten kan advare før et kald.
 - **MCP-adgang (fase 1)** — agenter og editorer kan læse Command Center direkte. Under fanen **Brugere** opretter du en nøgle pr. klient (ingen fælles token); den vises én gang, gemmes kun som sha256 og kan tilbagekaldes enkeltvis. `POST /mcp` tilbyder syv læse-værktøjer: `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes` og `history`. Endpointet validerer `Origin`/`Host` (DNS-rebinding) og svarer `401` med `WWW-Authenticate` uden nøgle — se [docs/Command_Center_MCP.md](docs/Command_Center_MCP.md).
 - **E-mail er login (v7.15)** — første besøg opretter din bruger med e-mail + adgangskode (`/setup`), derefter logger du ind med e-mail og adgangskode (PBKDF2-SHA256, salt pr. bruger, 30 dages HttpOnly-session). Gamle konti fra brugernavn-tiden kan stadig logge ind med deres brugernavn, indtil de får en e-mail.
-- **Invitation på mail (v7.15, svar i v7.17.2)** — fanen **Brugere** har "Inviter bruger": du skriver en e-mail, og appen sender en invitation med en midlertidig adgangskode, som brugeren skifter ved første login (dashboardet minder om det). Der er ingen invite-links og ingen tokens - kun en adgangskode. Svaret lander i den samme formular: blev mailen sendt, står der hvilken adresse den gik til, og fejler den, står mailserverens fejl der med det samme i stedet for kun under Alarmer.
+- **Invitation på mail (v7.15, svar i v7.17.2)** — fanen **Brugere** har "Inviter bruger": du skriver en e-mail, og appen sender en invitation med en midlertidig adgangskode, som brugeren skifter ved første login (dashboardet minder om det). Der er ingen invite-links og ingen tokens - kun en adgangskode. Svaret lander i den samme formular: blev mailen sendt, står der hvilken adresse den gik til, og fejler den, står mailserverens fejl der med det samme i stedet for kun under Alarmer. En adresse, der ligner eksemplet fra dokumentationen (`navn@domaene.dk`), afvises med en forklaring i formularen — så en pladsholder eller tastefejl ikke bliver en konto uden modtager; er adressen rigtig alligevel, oprettes den med knappen **Opret alligevel**.
 - ⏱️ **Fremdrift på opgaver** — tunge handlinger (crawl, AI-artikel, keyword-tjek, backlink-prospecting …) viser timer, procent og "~N s igen"; crawl læser de rigtige tal (sider/total + ETA) fra `/api/crawl/status`
 - **Opdatering fra GitHub** — Cockpit viser installeret commit vs. seneste commit på `main`, tjekker selv kl. 05:00, og "Opdater" laver DB-backup og henter kun projektets filer. Den gamle "hent install.sh og kør den"-vej er fjernet.
 - **nginx / Ultra.cc** — `deploy/nginx-command-center.conf`, `deploy/command-center.user.service` og proxy-header-understøttelse, så appen bliver på `127.0.0.1` bag nginx med korrekte Secure-cookies og rigtig klient-IP.
@@ -6169,7 +6890,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 - 🩺 **Monitors** — tekst/JSON/pris-overvågning med alarmer ved ændring
 - 🤖 **AI-synlighed** — stil en kundes spørgsmål til AI-modellen og se, om `TRACK_DOMAIN` nævnes i svaret (historik i `ai_visibility`)
 - 📝 **Noter** — hurtige workflow-noter i dashboardet (`/notes/add`, `/notes/delete`)
-- 👤 **Brugere** — invitér/slet brugere, skift adgangskode og opret **MCP-nøgler** pr. klient (hash, scopes, tilbagekald); den sidste bruger kan ikke slettes
+- 👤 **Brugere** — invitér/slet brugere, skift adgangskode og opret **MCP-nøgler** pr. klient (hash, scopes, tilbagekald); den sidste bruger kan ikke slettes, og både en gennemført og en afvist sletning svarer i fanen med det samme i stedet for kun at ende som en alarm
 - 🚨 **Alarmer** — SSL-udløb, nedetid, brudte links, fejlede scans, nye GitHub-commits; valgfrit Telegram-push
 - 📈 **Historik** — svartid per domæne, site-health og visibility over tid (Chart.js)
 
@@ -6187,7 +6908,7 @@ Cockpit med opdaterings-panel og alarmer. Login-siden og alle 14 faner ligger i 
 1. `cp .env.example .env` og udfyld nøgler
 2. `./run.sh` — scriptet udskriver den adresse appen lytter på (samt LAN-IP når `CC_HOST=0.0.0.0`)
 3. Åbn adressen: **første besøg opretter din bruger** (`/setup`) — derefter log ind med e-mail + adgangskode. Der er ingen token i `.env`.
-4. Nye brugere inviteres på mail, og sletning/adgangskode-skift klares under fanen **Brugere** (kræver `SMTP_HOST` + `SMTP_FROM`); fra serveren kan samme invitation sendes med `python3 scripts/invite.py navn@domaene.dk` — og med `--print` udskrives mailen i stedet, så den kan sendes fra en anden mailkonto når SMTP ikke er sat op
+4. Nye brugere inviteres på mail, og sletning/adgangskode-skift klares under fanen **Brugere** (kræver `SMTP_HOST` + `SMTP_FROM`); fra serveren kan samme invitation sendes med `python3 scripts/invite.py bruger@ditfirma.dk` — og med `--print` udskrives mailen i stedet, så den kan sendes fra en anden mailkonto når SMTP ikke er sat op. Scriptet tager én adresse ad gangen og afviser eksempel-adresser som `navn@domaene.dk`, så en tastefejl ikke bliver en bruger
 5. (VPS) kør bag reverse proxy med TLS, eller brug `deploy/command-center.service` + SSH-tunnel
 6. Vil du have en agent på? Opret en nøgle under **Brugere → MCP-adgang** og peg klienten på `https://<din-adresse>/mcp` (se nedenfor)
 
@@ -6247,7 +6968,9 @@ Command Center og WordPress-pluginnet **Steamgears Autopilot** snakker sammen vi
 - **Status hver 30. min** (fanen Social → "Steamgears Autopilot"): kø, kladder der venter på godkendelse, og udgivet/klik/ordrer/omsætning pr. kanal de sidste 30 dage
 - **Alarmer** når noget ændrer sig: nye fejlede opslag, nye kladder, eller pluginnet svarer ikke
 - **"→ Autopilot"** sender et opslag som kladde til pluginnet (godkendes i WordPress under Steamgears → AI Drafts). Opslaget sendes **kun én gang**: rækken låses før kaldet, så et dobbeltklik eller et genforsøg ikke giver to kladder. Svarer WordPress ikke (timeout), bliver status "sendt? (svar udeblev)" — tjek AI Drafts, før du sender igen
+- **Log ind på Command Center fra WordPress** — knappen **🔑 Log ind på Command Center** i fanen Social lægger et engangslink i pluginnet (`POST /login-link` på `sgap/v1`, gemt som option), og knappen i WordPress åbner det. Linket logger dig ind på CC uden adgangskode: koden gemmes kun som sha256, virker **én gang** og udløber efter 10 minutter. Er den brugt eller udløbet, forklarer login-siden det — så en gammel knap ikke ser ud som et brudt login. Retningen er stadig CC → site
 - Slå til/fra under Moduler ("Autopilot-bro"). Retningen er altid CC → site, så CC kan blive på 127.0.0.1
+- **Begge sider viser, hvornår CC sidst kaldte**: hvert kald har `X-Command-Center`-headeren, så WordPress noterer tid, version, rute og bruger (`sgap_cc_seen`). Pluginnets kort viser alderen (`live` / `late` / `silent`), og fanen Social viser **WordPress' eget svar** — samme tal, regnet ud ved visning. Er broen brudt, siger begge sider det i stedet for at se stille ud
 
 ## Installering
 
@@ -6262,7 +6985,7 @@ skriver alle filer (inkl. `deploy/nginx-command-center.conf` og `deploy/command-
 ## Drift & test
 
 - **Cron**: domæne-tjek hver 6. time, keyword-tjek 06:00, autopilot 05:15, oprydning 04:30, DB-backup 04:40, GitHub-tjek 05:00, Autopilot-bro hver 30. min
-- **Backup**: `app/backups/cc-daglig-*.db` (14 gemmes) + `cc-pre-update-*.db` før hver opdatering
+- **Backup**: `app/backups/cc-daglig-*.db` (14 gemmes) + `cc-pre-update-*.db` før hver opdatering. Gendan fra Moduler-fanen (skriv `GENDAN`)
 - **Health**: `/health` (200, eller 503 ved kritisk DB/disk-tilstand) viser også månedens API-forbrug
 - **Tests**: `python3 tests/test_v8_features.py` (enhedstests), `bash tests/ci_check.sh` (boot + alle sider + auth + WordPress-bro + link-audit)
 - **Screenshots**: `python3 scripts/screenshots.py` tager login-siden og alle 14 faner ind i `docs/img/` (kræver `pip install playwright` + `python3 -m playwright install chromium`; kør mod en kørende app med `--base/--user/--password`). CI advarer, hvis billederne er ældre end dashboard-skabelonen
@@ -6325,12 +7048,14 @@ og handoff, `AGENTS.md` er de korte regler for agenter.
 
 - **Brugere**: PBKDF2-SHA256 med salt pr. bruger; sessioner er HttpOnly-cookies (30 dage) gemt som `sha256(id)` i databasen, så en DB-kopi ikke giver adgang. Skift af adgangskode logger dine andre sessioner ud.
 - **Cookie/HTTPS**: cookien sættes `Secure` når appen ser https (kræver `X-Forwarded-Proto` bag proxy — se nginx-afsnittet).
-- **API-budget**: SerpAPI og aimlapi tælles pr. måned og stoppes ved loftet (`SERPAPI_MONTHLY_LIMIT`, `AI_MONTHLY_LIMIT`), med alarm ved 80 % og 100 %.
+- **API-budget**: SerpAPI og aimlapi tælles pr. måned og stoppes ved loftet (`SERPAPI_MONTHLY_LIMIT`, `AI_MONTHLY_LIMIT`), med alarm ved 80 % og 100 %. Forbruget vises på Cockpit.
+- **Job-heartbeat**: hvert planlagt job skriver sin sidste kørsel; forsinkede eller fejlede jobs alarmeres (v7.20).
 - Default binding er 127.0.0.1 — sæt aldrig `0.0.0.0` uden reverse proxy + TLS.
+- **SSRF**: alle udgående kald med en URL fra et felt går gennem `safe_request()`. Loopback, private net, link-local (`169.254.169.254` = sky-metadata), reserverede adresser og navne som `.local`/`.internal` afvises, og en viderestilling tjekkes hop for hop — så en 302 ikke kan føre ind i det lokale net. Afvisningen forklares i formularen. Skal CC måle en intern side, åbner `CC_SSRF_ALLOW=vaert.ditdomaene` for netop den værtsadresse.
 
 ## Kendte begrænsninger
 
-- Dashboardet henter Tailwind, Alpine.js og Chart.js fra CDN (login-siden er helt selvstændig). Uden internetadgang ser dashboardet stadig ud, men uden styling/interaktivitet.
+- Dashboardet henter Tailwind, Alpine.js og Chart.js lokalt fra `app/static/vendor/` (siden v7.22), så det virker uden internetadgang. Login-siden er helt selvstændig.
 - Opdatering kræver `GITHUB_TOKEN`; ændringer i `requirements.txt` rapporteres men installeres først ved næste `./run.sh`.
 - `install.sh` indeholder kopier af projektets filer (CI tjekker at de matcher); ret derfor altid kildefilerne og kør regen, ikke installeren.
 - Screenshots i `docs/img/` er taget med `python3 scripts/screenshots.py` mod v7.13.x-UI'et; kør scriptet igen efter større UI-ændringer.

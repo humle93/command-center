@@ -34,11 +34,44 @@ check "invite: the failure is visible as an alarm" "$(q "SELECT COUNT(*) FROM al
 # ... og svaret lander i Brugere-fanen, saa fejlen ikke ser ud som en tabt mail.
 check "invite: failure redirects to the Brugere tab" \
     "$(curl -s -o /dev/null -b "$JAR" -X POST $U/users/invite -d email=ci3@example.dk -w '%{redirect_url}' | sed "s|^$U||")" \
-    "/?tab=brugere&invite=fejl&invite_msg=SMTP_HOST%20/%20SMTP_FROM%20mangler%20i%20.env%20-%20der%20blev%20ikke%20sendt%20noget"
+    "/?tab=brugere&invite=fejl&invite_msg=SMTP_HOST%20/%20SMTP_FROM%20mangler%20i%20.env%20-%20der%20blev%20ikke%20sendt%20noget&invite_email=ci3%40example.dk&invite_kind=smtp"
 check "invite: the page shows the error in the form" \
     "$(curl -s -b "$JAR" "$U/?tab=brugere&invite=fejl&invite_msg=SMTP_HOST%20mangler" | grep -c 'Invitationen blev ikke sendt')" "1"
 check "invite: the Brugere tab opens from the URL" \
     "$(curl -s -b "$JAR" "$U/?tab=brugere" | grep -c "tab: 'brugere'")" "1"
+# v7.17.3: samme tjek i formularen som i scripts/invite.py - en pladsholder bliver ikke en bruger.
+check "invite: a placeholder address is refused in the form" \
+    "$(curl -s -o /dev/null -b "$JAR" -X POST $U/users/invite -d email=dit.navn@domaene.dk -w '%{redirect_url}' | grep -c 'invite_kind=eksempel')" "1"
+check "invite: the placeholder never becomes a user" "$(q "SELECT COUNT(*) FROM users")" "1"
+check "invite: the form explains the refusal and offers to continue" \
+    "$(curl -s -b "$JAR" "$U/?tab=brugere&invite=fejl&invite_msg=x&invite_kind=eksempel&invite_email=dit.navn%40domaene.dk" | grep -c 'Opret alligevel')" "1"
+# v7.17.4: en afvist eller gennemfoert sletning svarer i fanen, ikke kun i Alarmer.
+check "delete: the last user is refused with a reason" \
+    "$(curl -s -o /dev/null -b "$JAR" -X POST $U/users/delete -d id=1 -w '%{redirect_url}' | grep -c 'del_kind=sidste')" "1"
+check "delete: the last user survives" "$(q "SELECT COUNT(*) FROM users")" "1"
+check "delete: the page explains the refusal" \
+    "$(curl -s -b "$JAR" "$U/?tab=brugere&del=fejl&del_msg=x&del_kind=sidste" | grep -c 'Brugeren blev ikke slettet')" "1"
+check "delete: an unknown id does not look like a deletion" \
+    "$(curl -s -o /dev/null -b "$JAR" -X POST $U/users/delete -d id=999999 -w '%{redirect_url}' | grep -c 'del_kind=findes-ikke')" "1"
+python3 -c "import app.main as m; m.create_user('slettes@example.dk','slettes-pass-1')"
+DEL_ID=$(q "SELECT id FROM users WHERE email='slettes@example.dk'")
+check "delete: a second user can be deleted" \
+    "$(curl -s -o /dev/null -b "$JAR" -X POST $U/users/delete -d id=$DEL_ID -w '%{redirect_url}' | grep -c 'del=ok')" "1"
+check "delete: the deleted user is gone" "$(q "SELECT COUNT(*) FROM users WHERE email='slettes@example.dk'")" "0"
+# v7.17.5: knappen i WordPress faar et engangslink fra CC - og det link logger ind én gang.
+check "cc-login: CC pushes a one-time link to WordPress" \
+    "$(curl -s -o /dev/null -b "$JAR" -X POST $U/autopilot/login-link -w '%{redirect_url}' | grep -c 'cc_link=ok')" "1"
+LINK=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['url'])" "$TMP/state.link")
+check "cc-login: the link points at this app" "$(printf '%s' "$LINK" | grep -c '^http://127.0.0.1:8765/cc-login?code=')" "1"
+curl -s -o /dev/null -c "$TMP/ccjar" "$LINK"
+check "cc-login: the link opens the dashboard" "$(curl -s -o /dev/null -b "$TMP/ccjar" -w '%{http_code}' $U/)" "200"
+check "cc-login: the button is in the Social tab" \
+    "$(curl -s -b "$JAR" "$U/?tab=social" | grep -c 'Log ind på Command Center')" "1"
+check "cc-login: the same link cannot be used twice" "$(curl -s -o /dev/null -w '%{redirect_url}' "$LINK" | sed "s|^$U||")" "/login?cc=udloebet"
+# --- v7.20.0: Cockpit viser budget-kort og job-heartbeat ---
+check "cockpit: budgetkort vises" "$(curl -s -b "$JAR" $U/ | grep -c 'API-budget denne m')" "1"
+check "cockpit: job-heartbeat vises" "$(curl -s -b "$JAR" $U/ | grep -c 'Planlagte jobs (heartbeat)')" "1"
+
 # --- MCP fase 1: personlige noegler + laese-vaerktoejer paa /mcp ---
 mcp() { curl -s -X POST $U/mcp -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d "$1"; }
 check "mcp: uden noegle svarer 401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST $U/mcp \
@@ -103,6 +136,11 @@ echo "PASS GET routes swept"
 curl -s -o /dev/null -b "$JAR" -X POST $U/autopilot/sync
 check "bridge: snapshot ok" "$(q "SELECT json_extract(value,'\$.ok') FROM settings WHERE key='sgap_snapshot'")" "1"
 check "bridge: dashboard shows panel" "$(curl -s -b "$JAR" $U/ | grep -c 'Kladder venter')" "1"
+# v7.18.0: CC markerer sig som Command Center, og fanen Social viser WordPress' eget svar.
+check "bridge: CC markerer sig med X-Command-Center" \
+    "$(cat "$TMP/state.cc" 2>/dev/null)" "$(grep -oP 'APP_VERSION = "\K[^"]+' app/main.py)"
+check "bridge: Social viser hvornaar WordPress sidst hoerte fra CC" \
+    "$(curl -s -b "$JAR" "$U/?tab=social" | grep -c 'WordPress hoerte sidst fra Command Center')" "1"
 curl -s -o /dev/null -b "$JAR" -X POST $U/social/add -d platform=X -d message=Hello
 curl -s -o /dev/null -b "$JAR" -X POST $U/social/to-autopilot -d id=1
 check "bridge: social post sent as draft" "$(q "SELECT status FROM socialqueue WHERE id=1")" "sendt til autopilot (kladde #1)"

@@ -4,11 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-    <link rel="preconnect" href="https://cdn.tailwindcss.com" crossorigin>
-    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+    <script src="/static/vendor/tailwind.js"></script>
+    <script defer src="/static/vendor/alpine.min.js"></script>
+    <script src="/static/vendor/chart.umd.min.js"></script>
     <meta name="theme-color" content="#09090b">
     <style>
       html { scroll-behavior: smooth; }
@@ -100,6 +98,31 @@
             {% for alarm in alarms[:3] %}<p class="text-xs text-zinc-300">• [{{ alarm.severity }}] {{ alarm.type }}: {{ alarm.message }}</p>{% endfor %}
         </div>
         {% endif %}
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">💳 API-budget denne måned</h2>
+                {% for b in budget_rows %}
+                <div class="mb-3">
+                    <div class="flex justify-between text-xs text-zinc-300"><span>{{ b.service }}</span><span>{{ b.used }} / {{ b.limit if b.limit else '∞' }} kald{% if b.limit %} ({{ b.pct }} %){% endif %}</span></div>
+                    <div class="h-1.5 bg-zinc-800 rounded-full overflow-hidden mt-1"><div class="h-full {% if b.pct >= 100 %}bg-rose-500{% elif b.pct >= 80 %}bg-amber-500{% else %}bg-emerald-500{% endif %}" style="width:{{ [b.pct, 100]|min if b.limit else 0 }}%"></div></div>
+                </div>
+                {% endfor %}
+                <p class="text-[10px] text-zinc-600">Grænsen sættes med SERPAPI_MONTHLY_LIMIT og AI_MONTHLY_LIMIT i .env (0 = ingen grænse). Ved 80 % og 100 % kommer der alarm.</p>
+            </div>
+            <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">⏱️ Planlagte jobs (heartbeat)</h2>
+                {% for j in job_rows %}
+                <div class="flex justify-between items-start text-xs py-1 border-b border-zinc-800/60 last:border-0">
+                    <span class="text-zinc-300">{{ j.label }}</span>
+                    <span class="text-right {% if j.state == 'ok' %}text-emerald-400{% elif j.state == 'forsinket' %}text-amber-400{% else %}text-rose-400{% endif %}">
+                        {% if j.state == 'ok' %}ok · {{ j.last_ok[0:16] }}{% elif j.state == 'forsinket' %}forsinket{% else %}fejlet{% endif %}
+                    </span>
+                </div>
+                {% endfor %}
+                <p class="text-[10px] text-zinc-600 mt-2">Et job er forsinket, hvis det ikke er kørt inden for sin forventede periode. Tjekket kører hvert 15. minut.</p>
+            </div>
+        </div>
 
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <div class="flex items-center justify-between mb-3">
@@ -597,6 +620,27 @@
             </table>
             <p class="text-[10px] text-zinc-500 mt-2">Tjekket {{ sgap.checked_at }} · Godkend kladder i WordPress: Steamgears → AI Drafts</p>
             {% endif %}
+            {% if sgap_ready and modules['autopilot'] %}
+            <div class="mt-3 pt-3 border-t border-zinc-800">
+                <div class="mb-3">
+                    {% set cc_tone = {'ok': 'text-emerald-300', 'warn': 'text-amber-300', 'fejl': 'text-rose-300', 'muted': 'text-zinc-500'}.get(cc_seen.tone, 'text-zinc-500') %}
+                    <p class="text-[11px] {{ cc_tone }}">{{ cc_seen.headline }}{% if cc_seen.checked_at %} <span class="text-zinc-600">(svaret fra {{ cc_seen.checked_at }})</span>{% endif %}</p>
+                    {% if cc_seen.detail %}<p class="text-[10px] text-zinc-500">{{ cc_seen.detail }}</p>{% endif %}
+                    <p class="text-[10px] text-zinc-500">{{ cc_seen.hint }}</p>
+                </div>
+                {% if cc_link == 'ok' %}
+                <p class="text-[11px] text-emerald-300 mb-2">✅ {{ cc_msg }}</p>
+                {% elif cc_link == 'fejl' %}
+                <p class="text-[11px] text-rose-300 mb-2">❌ Linket kunne ikke lægges i WordPress: {{ cc_msg }}</p>
+                {% endif %}
+                <div class="flex flex-wrap items-center gap-3">
+                    <form action="/autopilot/login-link" method="POST">
+                        <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-2 rounded-xl text-xs">🔑 Log ind på Command Center</button>
+                    </form>
+                    <span class="text-[10px] text-zinc-500">Lægger et engangslink i WordPress, så knappen der logger dig ind her — uden adgangskode. Linket holder 10 min. og virker én gang.</span>
+                </div>
+            </div>
+            {% endif %}
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Tilføj socialt opslag</h2>
@@ -855,11 +899,64 @@
         </div>
     </section>
 
+    <!-- BACKUP -->
+    <section x-show="tab === 'moduler'" class="space-y-4" style="display: none;">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">Database-backup</h2>
+            <p class="text-xs text-zinc-500 mb-3">Den nyeste backup tages automatisk hver nat kl. 04:40 og før hver opdatering. Her kan du tage en manuel backup og gendanne en af de gemte. Ved gendannelse tages først en kopi af den nuværende database.</p>
+            {% if backup_feedback %}
+            {% if backup_feedback.ok %}
+            <div class="bg-emerald-500/10 border border-emerald-500/40 text-emerald-300 rounded-xl px-3 py-2 mb-3 text-xs">✅ {{ backup_feedback.message }}</div>
+            {% else %}
+            <div class="bg-rose-500/10 border border-rose-500/40 text-rose-300 rounded-xl px-3 py-2 mb-3 text-xs">❌ <b>Handlingen blev ikke gennemført</b> — <code class="break-all">{{ backup_feedback.message }}</code></div>
+            {% endif %}
+            {% endif %}
+            <form action="/backup/now" method="POST" class="mb-4">
+                <button class="text-[11px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-3 py-1.5 rounded-lg">💾 Tag backup nu</button>
+            </form>
+            {% if backups %}
+            <div class="space-y-2">
+                {% for b in backups %}
+                <div class="bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 flex flex-wrap items-center justify-between gap-2">
+                    <span class="text-xs text-zinc-300 break-all"><code>{{ b.name }}</code> <span class="text-zinc-500">· {{ b.size_kb }} KB · {{ b.mtime }}</span></span>
+                    <form action="/backup/restore" method="POST" class="flex items-center gap-2">
+                        <input type="hidden" name="name" value="{{ b.name }}">
+                        <input type="text" name="confirm" autocomplete="off" placeholder="skriv GENDAN" aria-label="Skriv GENDAN for at bekræfte gendannelse af {{ b.name }}" class="bg-zinc-900 border border-zinc-700 rounded-lg px-2 py-1 text-[11px] text-zinc-200 w-32">
+                        <button class="text-[11px] bg-rose-500/10 text-rose-300 border border-rose-500/40 px-3 py-1 rounded-lg">↺ Gendan</button>
+                    </form>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p class="text-xs text-zinc-500">Ingen backups endnu.</p>
+            {% endif %}
+        </div>
+    </section>
+
     <!-- BRUGERE -->
     <section x-show="tab === 'brugere'" class="space-y-4" style="display: none;">
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Brugere ({{ users|length }})</h2>
             <p class="text-xs text-zinc-500 mb-3">Adgang sker med e-mail + adgangskode (PBKDF2-SHA256). Den foerste bruger blev oprettet ved foerste besoeg — invitér gerne en ekstra, saa du ikke laaser dig ude.</p>
+            {% if delete_feedback %}
+            {% if delete_feedback.ok %}
+            <div class="bg-emerald-500/10 border border-emerald-500/40 text-emerald-300 rounded-xl px-3 py-2 mb-3 text-xs">
+                ✅ <b>Brugeren er slettet</b>{% if delete_feedback.email %} — <b>{{ delete_feedback.email }}</b>{% endif %}. Sessionerne er ryddet, så en åben fane ikke kan bruge kontoen længere.
+            </div>
+            {% else %}
+            <div class="bg-rose-500/10 border border-rose-500/40 text-rose-300 rounded-xl px-3 py-2 mb-3 text-xs">
+                ❌ <b>Brugeren blev ikke slettet</b> — der er ikke ændret noget i listen.
+                <code class="block mt-1 text-rose-200 break-all">{{ delete_feedback.message }}</code>
+                {% if delete_feedback.kind == 'sidste' %}
+                <span class="block mt-1 text-rose-300/80">Der skal altid være mindst én bruger, så du ikke låser dig ude. Invitér en ny bruger, og prøv igen.</span>
+                {% elif delete_feedback.kind == 'findes-ikke' %}
+                <span class="block mt-1 text-rose-300/80">Listen nedenfor er den nyeste — brugeren kan være slettet i en anden fane, så genindlæs siden.</span>
+                {% elif delete_feedback.kind == 'ugyldig' %}
+                <span class="block mt-1 text-rose-300/80">Siden sendte ikke et gyldigt bruger-id. Genindlæs siden, og brug ✕ ud for brugeren igen.</span>
+                {% endif %}
+            </div>
+            {% endif %}
+            {% endif %}
             <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
                 <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3">
                     <div class="text-[11px] uppercase tracking-wider text-zinc-500 mb-2">Seneste login pr. bruger</div>
@@ -890,7 +987,7 @@
                     </div>
                     <form action="/users/delete" method="POST">
                         <input type="hidden" name="id" value="{{ u.id }}">
-                        <button class="text-zinc-500 hover:text-rose-400">✕</button>
+                        <button class="text-zinc-500 hover:text-rose-400" title="Slet {{ u.email }}">✕</button>
                     </form>
                 </div>
                 {% endfor %}
@@ -905,14 +1002,25 @@
             </div>
             {% else %}
             <div class="bg-rose-500/10 border border-rose-500/40 text-rose-300 rounded-xl px-3 py-2 mb-3 text-xs">
-                ❌ <b>Invitationen blev ikke sendt</b> — og der blev ikke oprettet nogen bruger. Fejlen fra mailserveren:
+                ❌ <b>Invitationen blev ikke sendt</b> — og der blev ikke oprettet nogen bruger.
+                {% if invite_feedback.kind == 'adresse' or invite_feedback.kind == 'eksempel' %}Adressen blev afvist, før der blev sendt noget:{% else %}Fejlen fra mailserveren:{% endif %}
                 <code class="block mt-1 text-rose-200 break-all">{{ invite_feedback.message }}</code>
-                <span class="block mt-1 text-rose-300/80">Mangler <b>SMTP_HOST</b> + <b>SMTP_FROM</b> i <code>.env</code>, bliver der ikke sendt noget. Uden SMTP kan invitationen i stedet læses op med <code>python3 scripts/invite.py navn@domaene.dk --print</code>.</span>
+                {% if invite_feedback.kind != 'adresse' and invite_feedback.kind != 'eksempel' %}
+                <span class="block mt-1 text-rose-300/80">Mangler <b>SMTP_HOST</b> + <b>SMTP_FROM</b> i <code>.env</code>, bliver der ikke sendt noget. Uden SMTP kan invitationen i stedet læses op med <code>python3 scripts/invite.py bruger@ditfirma.dk --print</code>.</span>
+                {% endif %}
+                {% if invite_feedback.kind == 'eksempel' and invite_feedback.email %}
+                <form action="/users/invite" method="POST" class="mt-2 flex flex-wrap items-center gap-2">
+                    <input type="hidden" name="email" value="{{ invite_feedback.email }}">
+                    <input type="hidden" name="force" value="1">
+                    <span class="text-rose-300/80">Er <b>{{ invite_feedback.email }}</b> rigtig alligevel?</span>
+                    <button class="bg-rose-500/10 text-rose-200 border border-rose-500/40 px-3 py-1 rounded-lg text-xs">Opret alligevel</button>
+                </form>
+                {% endif %}
             </div>
             {% endif %}
             {% endif %}
             <form action="/users/invite" method="POST" class="grid grid-cols-1 md:grid-cols-2 gap-2">
-                <input type="email" name="email" placeholder="navn@domaene.dk" required maxlength="254" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <input type="email" name="email" placeholder="bruger@ditfirma.dk" required maxlength="254" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Send invitation</button>
             </form>
             <p class="text-[10px] text-zinc-600 mt-2">Invitationen er en mail med en midlertidig adgangskode, som brugeren skifter ved foerste login. Kraever SMTP_HOST + SMTP_FROM i .env — mangler de, oprettes ingen bruger, og fejlen staar under Alarmer.</p>

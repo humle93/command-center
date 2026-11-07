@@ -1,6 +1,7 @@
 __pycache__/
 app/data/
-app/static/
+app/static/*
+!app/static/vendor/
 .env
 venv/
 

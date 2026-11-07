@@ -14,7 +14,7 @@ og hvad der er næste skridt i [ROADMAP.md](ROADMAP.md).
 ```
 app/
   main.py                  # routes, jobs, DB, integrationer (én fil, ~2.900 linjer)
-  templates/dashboard.html # hele UI'et (Alpine.js + Chart.js fra CDN)
+  templates/dashboard.html # hele UI'et (Alpine.js + Chart.js lokalt i static/vendor)
   templates/login.html     # login/setup, helt selvstændig (ingen CDN)
   data/center.db           # SQLite (gitignored)
   backups/cc-*.db          # daglige + pre-update-backups
@@ -38,7 +38,7 @@ install.sh                 # selvstændig installer (indeholder kopier af filern
 | --- | --- |
 | Brugere | `users(id, email UNIQUE, username (legacy, kan vaere NULL), password_hash, must_change_password, created_at, last_login_ip, last_login_at)` |
 | Login-id | e-mail i smaa bogstaver (`normalize_email`); et gammelt brugernavn accepteres stadig, saa migrerede konti ikke laases ude |
-| Invitation | `POST /users/invite` → `send_email()` med en midlertidig adgangskode. Brugeren oprettes **først naar mailen er sendt**; fejler SMTP, oprettes ingen bruger, fejlen bliver en alarm og svares tilbage i URL'en. `must_change_password` ryddes af `/users/password` |
+| Invitation | `POST /users/invite` → `send_email()` med en midlertidig adgangskode. Brugeren oprettes **først naar mailen er sendt**; fejler SMTP, oprettes ingen bruger, fejlen bliver en alarm og svares tilbage i URL'en. Adressen valideres **før** SMTP: `normalize_email()` og `example_email_hint()` afviser ugyldige adresser og pladsholdere fra dokumentationen (`invite_kind=adresse|eksempel`, `force=1` opretter alligevel). `must_change_password` ryddes af `/users/password` |
 | Hash | `pbkdf2_sha256$240000$<salt>$<hash>` (salt pr. bruger, `hmac.compare_digest`) |
 | Sessioner | `sessions(id=sha256(cookie), user_id, created_at, last_seen, expires_at)`, 30 dage |
 | Cookie | `cc_session`, HttpOnly, SameSite=Lax, `Secure` når scheme er https |
@@ -77,6 +77,7 @@ Alle queries er parameteriserede. `settings` bruges til små tilstande (JSON), s
 | GitHub-opdaterings-tjek | 05:00 | `GITHUB_TOKEN` |
 | Autopilot-bro (WordPress) | hvert 30. min | modul `autopilot` + WP-creds |
 | Alarmkø (`alert_outbox`) | hvert minut | — (leverer med dedupe, backoff og stille timer) |
+| Job-heartbeat | hvert 15. min. | — (alarmerer forsinkede og fejlede jobs, se §8b) |
 
 Modulerne (`MODULES` i `app/main.py`, 11 stk.): `domains`, `keywords`, `ai`, `monitors`, `social`,
 `links`, `spy`, `wp_push`, `telegram`, `growth` og `autopilot`. Et slukket modul skjuler UI'et
@@ -103,6 +104,12 @@ handlers, `javascript:`-links eller billeder), fordi indholdet kommer fra en eks
 
 `budget_spend()` tælles pr. kalendermåned i `settings` og kaster `BudgetExceeded` **før** kaldet sendes, når loftet er nået.
 Alarm (og Telegram) ved 80 % og 100 %. `/health` viser `budget: {serpapi: {used, limit}, ai: {...}}`.
+Cockpit viser de samme tal i kortet "💳 API-budget denne måned" (`budget_rows` i dashboard-konteksten).
+
+### 8b. Job-heartbeat (v7.20.0)
+
+Hvert scheduler-job pakkes i `job_heartbeat(job_id, fn)`. Den skriver `job_<id>_last_start`, `job_<id>_last_end` og `job_<id>_last_status` (`ok` eller `fejl`) i `settings`, og fejlen rethrows, så APScheduler stadig logger den. Async jobs pakkes som async.
+`job_heartbeat_check()` kører hvert 15. min. og markerer et job som **forsinket**, når `last_end` er ældre end `JOB_MAX_AGE_HOURS` (domæne 7 t, sgap_sync 1,5 t, alert_outbox 6 min., øvrige 26 t). Et job der aldrig er kørt tæller først, når appens `last_start` er ældre end grænsen, så en frisk installation ikke alarmerer. Hver tilstand (`ok`/`forsinket`/`fejlet`) alarmeres én gang; tilstanden gemmes i `settings.job_alarm_<id>`, og genopretning nulstiller stille. Cockpit viser kortet "⏱️ Planlagte jobs (heartbeat)".
 
 ## 9. Opdatering fra GitHub
 
@@ -121,13 +128,16 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 - Adgangskoder: PBKDF2-SHA256 (240k iterationer), salt pr. bruger
 - Sessioner: tilfældig 256-bit id, kun `sha256(id)` i DB, HttpOnly + SameSite
 - Token-sammenligning: `secrets.compare_digest` (sessioner)
+- CSRF (v7.21): muterende kald (POST/PUT/DELETE) med `Sec-Fetch-Site` der ikke er `same-origin`/`none`, eller `Origin` der ikke matcher `Host`, afvises med 403. `/mcp` har egen Origin-kontrol. Kald uden browser-headers roeres ikke (API-noegler, scripts)
+- Session-rotation (v7.21): hvert login giver ny sid, og den gamle sid slettes; SameSite=Lax beholdes
 - HTML fra AI/SERP saniteres før `|safe` i skabelonen
 - Netværkskald: alle med timeout; budget-guard stopper betalte API'er
 - Invitationer: midlertidig adgangskode er tilfældig (12 tegn), staar kun i mailen, og `must_change_password` vises som gul bjælke i dashboardet indtil koden er skiftet
 - MCP-nøgler: `cc_` + 32 tegn, kun `sha256` i DB, `Bearer` i header (aldrig query), `read`/`write`-scopes, tilbagekald pr. nøgle, `Origin`/`Host`-validering mod `CC_PUBLIC_URL` (DNS-rebinding) og samme rate-limit-tænkning som login
 - MCP-hærdning (v7.17.1): klartekst-nøglen lever kun til den er vist (slettes i samme kald, TTL 15 min.), og et ukendt værktøjsnavn giver både `-32602` og en række i `api_audit`, så et nøgle der prøver navne af ikke er usynligt
 - MCP-skrivning (v7.17): kun nøgler med `write` kan kalde `start_crawl`, `add_monitor`, `resolve_alarm` og `add_note`; handlingerne går gennem de samme funktioner som UI'et (validering, `normalize_url`, dublet-tjek), og alt logges i `api_audit` uden nøglen i klartekst
-- Kendte, ikke-lukkede punkter (se ROADMAP): udgående requests kan pege på private IP'er (SSRF-flade), Telegram-kald sker inde i en åben DB-transaktion, og der er ingen CSRF-token (SameSite dækker cross-site POST)
+- **SSRF (v7.19.0)**: `assert_public_url()` afviser loopback/private/link-local/reserverede adresser og interne navne (også når et værtsnavn peger på en intern IP), og `safe_request()` følger viderestillinger manuelt (max 3 hop) og tjekker hvert hop; `normalize_url()` tjekker med, så en intern URL forklares i formularen. `CC_SSRF_ALLOW` er den eneste undtagelse
+- Kendte, ikke-lukkede punkter (se ROADMAP): Telegram-kald sker inde i en åben DB-transaktion, og der er ingen CSRF-token (SameSite dækker cross-site POST)
 
 ## 11. Test og CI
 
@@ -139,6 +149,14 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 
 ## 12. Versionshistorik (kort)
 
+- **v7.23.0** — Backup i UI: `POST /backup/now` og `POST /backup/restore` (kræver `GENDAN`), kort i fanen Moduler, `pre-restore`-backup før hver gendannelse
+- **v7.22.0** — Offline dashboard: Tailwind, Alpine og Chart.js serveres fra `app/static/vendor/` i stedet for CDN
+- **v7.21.0** — CSRF-beskyttelse (Origin/Sec-Fetch-Site-kontrol på muterende kald) og ny session ved hvert login
+- **v7.20.0** — månedligt API-budget og job-heartbeat vises på Cockpit; jobs pakkes i `job_heartbeat()` og alarmeres ved forsinkelse eller fejl (én gang pr. tilstand)
+- **v7.18.0** — WordPress-broen er tovejs i *læsning*: `sgap_headers()` giver hvert kald `X-Command-Center` (pluginnet noterer tid, version, rute og bruger i `sgap_cc_seen`), `sgap_sync()` gemmer `status.command_center` fra `/snapshot` i `settings.sgap_snapshot`, og `cc_seen_view()` regner alderen ud ved visning (45 min. = misset runde, 2 t = tavs) til fanen Social; retningen CC → site er uændret
+- **v7.17.5** — login fra WordPress: `POST /autopilot/login-link` lægger et engangslink i pluginnet (`settings.cc_login_code` = sha256 + `exp`), og `GET /cc-login` logger ind med det én gang inden for 10 min. Knappen i WordPress viser linket; CC → site-retningen er uændret
+- **v7.17.4** — sletning svarer i fanen: `POST /users/delete` tager `id` som tekst (tomt/forkert id giver en forklaring i stedet for 422), afviser den sidste bruger og ukendte id'er med `del_kind` og redirecter til Brugere i stedet for Cockpit; en gennemført sletning giver `del=ok` og en info-alarm
+- **v7.17.3** — invitationen afviser pladsholdere: `POST /users/invite` tjekker adressen med `normalize_email()` + `example_email_hint()` før SMTP, svarer `invite_kind=adresse|eksempel|smtp` og tilbyder **Opret alligevel** (`force=1`). Samme regel bruges af `scripts/invite.py` (`--force`)
 - **v7.17.2** — invitationen svarer i sin egen formular: `POST /users/invite` redirecter til `/?tab=brugere&invite=ok|fejl&invite_msg=…`, dashboardet åbner den fane (`initial_tab`, kun kendte faner) og viser enten "sendt til X" eller mailserverens fejl. Før landede svaret på Cockpit, og en mislykket invitation var kun synlig som alarm
 - **v7.17.1** — MCP-hærdning: nøglen ligger ikke længere i klartekst i databasen (rækken i `settings.api_key_once` slettes ved visning, TTL 15 min., oprydningen fjerner resten; `POST /api-keys/dismiss` er fjernet), og ukendte værktøjsnavne på `/mcp` logges nu i `api_audit`
 - **v7.17** — MCP fase 2: fire skrive-værktøjer bag `write`-scope (`start_crawl`, `add_monitor`, `resolve_alarm`, `add_note`), `readOnlyHint`/`destructiveHint` i `tools/list`, audit pr. nøgle i `api_audit` (vist i UI + `scripts/api_key.py audit`) og oprydning efter 90 dage
@@ -235,7 +253,8 @@ ved hvert CI-løb, så tabellen og koden ikke kan glide fra hinanden ubemærket.
 | Område | Ruter |
 | --- | --- |
 | Opstart og auth | `GET /setup`, `POST /setup`, `GET /login`, `POST /login`, `GET /logout` |
-| Brugere | `POST /users/invite` (mail med midlertidig kode), `POST /users/delete`, `POST /users/password` |
+| Brugere | `POST /users/invite` (mail med midlertidig kode), `POST /users/delete` (svar `del=ok|fejl` + `del_kind=slettet|sidste|findes-ikke|ugyldig`), `POST /users/password` |
+| Login fra WordPress | `POST /autopilot/login-link` (kræver session) laver en engangskode, gemmer `sha256` + `user_id` + `exp` i `settings.cc_login_code` og sender linket til pluginnet med `POST sgap/v1/login-link`. `GET /cc-login?code=…` validerer koden, sletter den i samme kald (engangsbrug, 10 min.) og opretter en normal session. Ugyldig eller brugt kode → `/login?cc=udloebet` med forklaring; koden slettes først når den er godkendt, så et forkert gæt ikke kan brænde linket |
 | API-nøgler | `POST /api-keys/create`, `POST /api-keys/revoke` (nøglen vises én gang og slettes fra `settings` i samme kald) |
 | MCP | `POST /mcp` — JSON-RPC 2.0 (`initialize`, `ping`, `tools/list`, `tools/call`) med Bearer-nøgle |
 | Dashboard | `GET /` |

@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Tager screenshots af login-siden og alle faner i dashboardet.
+"""screenshots.py - tager screenshots af login-siden og alle faner i dashboardet.
 
+Brug:
     python3 scripts/screenshots.py                    # app paa http://127.0.0.1:8000
     python3 scripts/screenshots.py --base http://127.0.0.1:8099 --user demo --password 'xxx'
     python3 scripts/screenshots.py --only cockpit,alarms,notes
     python3 scripts/screenshots.py --viewport          # kun det synlige omraade
 
 Billederne skrives til docs/img/ som cc-login.png og cc-<fane>.png.
-
-Krav (kun for dette script - appen selv bruger det ikke):
+Kraever (kun for dette script - appen selv bruger det ikke):
     pip install playwright && python3 -m playwright install chromium
+Sidst aendret: 4. november 2026
 """
 from __future__ import annotations
 

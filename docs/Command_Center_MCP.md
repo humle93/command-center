@@ -127,6 +127,10 @@ Fase 1 kan leveres uden at røre dashboardets øvrige funktioner: alt er nye rut
   cc_…` → `find_api_client()` (sha256-opslag, `revoked_at IS NULL`). `Host` valideres mod
   `CC_PUBLIC_URL` (ellers `421`), `Origin` mod samme vært (ellers `403`); er `CC_PUBLIC_URL` tom,
   springes værtstjekket over, så lokal udvikling og `TestClient` virker.
+- **`421` på en installation, der ellers kører?** Det er næsten altid `CC_PUBLIC_URL`. Værdien skal
+  være `https://<vært>` uden anførselstegn — `"https://x"` giver ingen `hostname` i `urlparse`, og
+  `x` uden scheme giver det samme. Er feltet helt tomt, kommer der ingen `421`; så er tjekket slået
+  fra, og det er den fejl, man ikke ser. Se tabellen i bruger- og systemmanualen.
 - **Svar:** JSON-RPC 2.0 med `MCP-Protocol-Version: 2026-07-28` og `X-Accel-Buffering: no` i headeren.
   `initialize`, `ping`, `tools/list`, `tools/call`; notifikationer besvares med `202`; ukendt metode
   giver `-32601`, ukendt værktøj `-32602`, manglende `read`-scope `-32003`, ugyldig JSON `-32700`.

@@ -4,6 +4,7 @@ app/static/*
 !app/static/vendor/
 .env
 venv/
+.venv/
 
 # koerselstid (skrives af run.sh / scripts/restart.sh)
 nohup.out

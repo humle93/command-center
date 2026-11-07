@@ -1,6 +1,12 @@
-#!/bin/bash
-# Command Center smoke-test - koer efter install eller self-update.
-# Brug: bash scripts/smoke_test.sh   (CC_HOST/CC_PORT overstyrer adressen)
+#!/usr/bin/env bash
+# smoke_test.sh - tjekker at appen svarer efter install eller self-update.
+#
+# Brug:
+#   bash scripts/smoke_test.sh                           # 127.0.0.1:8000
+#   CC_HOST=0.0.0.0 CC_PORT=8000 bash scripts/smoke_test.sh
+#
+# Kraever: en koerende app. CC_PUBLIC_URL vises som den offentlige adresse, hvis den er sat.
+# Sidst aendret: 4. november 2026
 HOST="${CC_HOST:-127.0.0.1}"
 PORT="${CC_PORT:-8000}"
 PUBLIC="${CC_PUBLIC_URL:-}"

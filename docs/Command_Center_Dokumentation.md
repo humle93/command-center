@@ -29,10 +29,11 @@ install.sh                 # selvstændig installer (indeholder kopier af filern
 
 1. `load_dotenv()` læses **før** konfigurationsblokken (rigtige miljøvariabler vinder; inline-kommentarer fjernes)
 2. `init_db()` → `migrate_db()` → `create_indexes()` køres i `_safe()`, så en fejl ikke kan crashe importen (ét retry, derefter videre)
-3. Lifespan registrerer APScheduler-jobs og starter en selvtest i en worker-tråd (DB-skrivetest, nøgler, ruteantal → kritisk alarm ved fejl)
-4. Alt netværk går gennem én `requests.Session` med **BudgetAdapter**, der tæller kald til SerpAPI/aimlapi
+3. `seed_standard_user()` kaldes i lifespan **før** scheduler og selvtest: er `users` tom, og har `.env` både `CC_ADMIN_EMAIL` og `CC_ADMIN_PASSWORD`, oprettes standardbrugeren med `must_change_password`. Status skrives til opstartsloggen (`oprettet`, `findes`, `mangler`, `fejl: …`), og en afvist linje giver en advarsel i `alarms`. Derefter kaldes `warn_stale_env_password()`: passer `CC_ADMIN_PASSWORD` ikke til den gemte hash (fordi koden er skiftet i UI'et), skrives `[cc] advarsel: …` og en advarsel i `alarms`, og dashboardet viser en rød bjælke via `env_password_warning`
+4. Lifespan registrerer APScheduler-jobs og starter en selvtest i en worker-tråd (DB-skrivetest, nøgler, ruteantal → kritisk alarm ved fejl)
+5. Alt netværk går gennem én `requests.Session` med **BudgetAdapter**, der tæller kald til SerpAPI/aimlapi
 
-## 3. Auth-model (v7.15)
+## 3. Auth-model (v7.15–v7.18)
 
 | Emne | Implementering |
 | --- | --- |
@@ -42,7 +43,11 @@ install.sh                 # selvstændig installer (indeholder kopier af filern
 | Hash | `pbkdf2_sha256$240000$<salt>$<hash>` (salt pr. bruger, `hmac.compare_digest`) |
 | Sessioner | `sessions(id=sha256(cookie), user_id, created_at, last_seen, expires_at)`, 30 dage |
 | Cookie | `cc_session`, HttpOnly, SameSite=Lax, `Secure` når scheme er https |
-| Første bruger | `/setup` — kun åben når `users` er tom |
+| Standardbruger (v7.18) | `seed_standard_user()` i lifespan: `CC_ADMIN_EMAIL` + `CC_ADMIN_PASSWORD` fra `.env` opretter kontoen, når `users` er tom (`must_change_password=1`, alarm ved oprettelse og ved afvist linje). Der seedes aldrig oven på en eksisterende konto, og klartekst findes kun i `.env` |
+| Rydningen vises i dashboardet (v7.19.2) | `clear_env_admin_password()` gemmer `{at, by, account}` i `settings` under `env_password_cleared` (kun navn og tidspunkt, aldrig koden), og `env_password_notice()` læser rækken tilbage. Om linjen står der, afgøres af `env_admin_password_in_file()`, som læser `.env` — ikke miljøvariablen, der blev læst ved opstart og derfor ikke ser en rettelse undervejs — og svarer `sat`, `tom`, `ingen-fil` eller `fejl`; `danish_time()` laver tiden om til dansk. Er koden blevet forældet, returnerer funktionen tom, så den røde advarsel vinder, og uden en gemt rydning vises baren ikke |
+| `.env` ryddes ved kodeskift (v7.19.1) | `POST /users/password` kalder `clear_env_admin_password(email)`, men kun når den konto, der skiftede, er `CC_ADMIN_EMAIL`: den tømmer `CC_ADMIN_PASSWORD=` i `.env` (regex på nøglen, atomisk `os.replace`, oprindelig filmode bevaret), sætter miljøvariablen til tom og nulstiller cachet, så advarslen forsvinder. Fejler skrivningen, kommer der en advarsel i `alarms`, og kodeskiftet gennemføres alligevel |
+| Forældet `.env`-kode (v7.18.1) | `env_password_mismatch()` verificerer `CC_ADMIN_PASSWORD` mod den gemte hash og cacher svaret på `(email, sha256(kode), hash)`, så dashboardet ikke kører PBKDF2 ved hvert sidevisning. Advarslen ændrer intet ved kontoen; den forsvinder, når linjen rettes eller fjernes |
+| Første bruger (reserve) | `/setup` — kun åben når `users` er tom, altså når `.env` ikke har de to linjer |
 | Rate limit | 5 fejl pr. IP = 10 min lås (bounded dict) |
 | UI-adgang | Middleware sætter `request.state.user`; ikke-loggede sendes til `/setup` eller `/login` |
 | API-nøgler (v7.16) | `api_clients(id, name, key_hash UNIQUE, key_hint, scopes, created_at, last_used_at, last_used_ip, revoked_at)`. Nøglen er `cc_` + 32 tegn, vises **én gang** (klartekst ligger kun i `settings.api_key_once` til den er vist — rækken slettes i samme kald, med 15 min. TTL som sikkerhedsnet), gemmes som sha256 og kan tilbagekaldes pr. klient |
@@ -75,7 +80,8 @@ Alle queries er parameteriserede. `settings` bruges til små tilstande (JSON), s
 | Oprydning | 04:30 | — (lokale ISO-cutoffs) |
 | DB-backup | 04:40 | 14 kopier pr. tag |
 | GitHub-opdaterings-tjek | 05:00 | `GITHUB_TOKEN` |
-| Autopilot-bro (WordPress) | hvert 30. min | modul `autopilot` + WP-creds |
+| Autopilot-bro (WordPress) | hvert 30. min | modul `autopilot` + WP-creds · `sgap_sync()` henter `GET /snapshot` (reserve: `/stats` + `/drafts` ved 404), `sgap_from_snapshot()` oversætter, `sgap_store()` gemmer i `settings.sgap_snapshot` og alarmerer kun ved ændringer |
+| WP-Cron-ping | hvert 5. min | samme som Autopilot-bro · `job_wp_cron()` → `wp_cron_ping()` kalder `wp-cron.php?doing_wp_cron`; fejl er tavse (sitet nede fanges af broen og monitorerne) |
 | Alarmkø (`alert_outbox`) | hvert minut | — (leverer med dedupe, backoff og stille timer) |
 | Job-heartbeat | hvert 15. min. | — (alarmerer forsinkede og fejlede jobs, se §8b) |
 
@@ -153,6 +159,9 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 - **v7.22.0** — Offline dashboard: Tailwind, Alpine og Chart.js serveres fra `app/static/vendor/` i stedet for CDN
 - **v7.21.0** — CSRF-beskyttelse (Origin/Sec-Fetch-Site-kontrol på muterende kald) og ny session ved hvert login
 - **v7.20.0** — månedligt API-budget og job-heartbeat vises på Cockpit; jobs pakkes i `job_heartbeat()` og alarmeres ved forsinkelse eller fejl (én gang pr. tilstand)
+- **v7.19.2** — rydningen kan ses i dashboardet: en blå bjælke øverst viser hvornår og af hvem `CC_ADMIN_PASSWORD` blev fjernet fra `.env`. Rækken `env_password_cleared` i `settings` holder navn og tidspunkt (aldrig koden), og "står linjen der?" læses fra filen selv
+- **v7.19.1** — `.env` rydder sig selv: når standardbrugeren skifter kode under Brugere, tømmer `clear_env_admin_password()` `CC_ADMIN_PASSWORD`-linjen (kun den linje, atomisk skrivning, filmode bevaret) og nulstiller advarsels-cachet
+- **v7.18.1** — advarsel når `.env`-koden er forældet: `env_password_mismatch()` sammenligner `CC_ADMIN_PASSWORD` med den gemte hash, `warn_stale_env_password()` skriver den til opstartsloggen og `alarms`, og dashboardet viser en rød bjælke (`env_password_warning`)
 - **v7.18.0** — WordPress-broen er tovejs i *læsning*: `sgap_headers()` giver hvert kald `X-Command-Center` (pluginnet noterer tid, version, rute og bruger i `sgap_cc_seen`), `sgap_sync()` gemmer `status.command_center` fra `/snapshot` i `settings.sgap_snapshot`, og `cc_seen_view()` regner alderen ud ved visning (45 min. = misset runde, 2 t = tavs) til fanen Social; retningen CC → site er uændret
 - **v7.17.5** — login fra WordPress: `POST /autopilot/login-link` lægger et engangslink i pluginnet (`settings.cc_login_code` = sha256 + `exp`), og `GET /cc-login` logger ind med det én gang inden for 10 min. Knappen i WordPress viser linket; CC → site-retningen er uændret
 - **v7.17.4** — sletning svarer i fanen: `POST /users/delete` tager `id` som tekst (tomt/forkert id giver en forklaring i stedet for 422), afviser den sidste bruger og ukendte id'er med `del_kind` og redirecter til Brugere i stedet for Cockpit; en gennemført sletning giver `del=ok` og en info-alarm

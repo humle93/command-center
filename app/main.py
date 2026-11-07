@@ -119,9 +119,11 @@ NEWEST = [
     ("7.22.0", "Offline dashboard: Tailwind, Alpine og Chart.js ligger lokalt under /static/vendor - ingen CDN-afhaengighed"),
     ("7.21.0", "CSRF-beskyttelse: muterende kald fra andre sites afvises (403); ny session ved hvert login og gammel sid slettes"),
     ("7.20.0", "Cockpit viser API-budget og jobstatus; forsinkede eller fejlede jobs giver alarm (job-heartbeat)"),
-
-    ("7.19.0", "SSRF-beskyttelse: udgaaende kald afviser interne adresser, sky-metadata og viderestillinger ind i det lokale net"),
-    ("7.18.0", "Social viser hvornaar WordPress sidst hoerte fra Command Center - CC sender X-Command-Center"),
+    ("7.19.2", "Dashboardet viser, hvornaar og af hvem CC_ADMIN_PASSWORD blev fjernet fra .env"),
+    ("7.19.1", "CC_ADMIN_PASSWORD fjernes fra .env, naar standardbrugeren skifter kode - saa kan linjen ikke blive foraeldet"),
+    ("7.19.0", "SSRF-beskyttelse paa udgaaende kald; Autopilot-broen henter hele /snapshot og holder WP-Cron i gang hvert 5. min"),
+    ("7.18.1", "Advarsel paa skaermen og i dashboardet, naar CC_ADMIN_PASSWORD i .env ikke laengere passer til kontoen"),
+    ("7.18.0", "Standardbruger fra .env ved opstart, og Social viser hvornaar WordPress sidst hoerte fra Command Center"),
     ("7.17.5", "Knappen Log ind paa Command Center i WordPress bruger et engangslink fra CC"),
     ("7.17.4", "Sletning af brugere svarer i formularen - en afvist sletning forklares i stedet for kun at blive en alarm"),
     ("7.17.3", "Invitationen afviser pladsholder-adresser med en forklaring - i formularen og fra terminalen"),
@@ -139,7 +141,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "WordPress-knappen logger ind paa Command Center med et engangslink - uden adgangskode"
+NEWEST_LINE = "Backup og gendannelse i fanen Moduler - med skriftlig bekraeftelse og en kopi foerst"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -701,6 +703,250 @@ def create_user(email: str, password: str, must_change: bool = False, username: 
         return cur.lastrowid
 
 
+# --- Standardbruger fra .env (v7.18) ---
+# Et nyt deployment skal kunne logge ind med det samme: staar CC_ADMIN_EMAIL + CC_ADMIN_PASSWORD i
+# .env, oprettes kontoen ved opstart. Klartekst findes kun i .env - her gemmes PBKDF2-hashen.
+# Der seedes kun, naar der ingen brugere er, saa en rettet .env-kode ikke rorer en konto i brug.
+ADMIN_EMAIL_ENV = "CC_ADMIN_EMAIL"
+ADMIN_PASSWORD_ENV = "CC_ADMIN_PASSWORD"
+
+
+def standard_user_settings() -> tuple:
+    """(e-mail, adgangskode) fra .env - tomme strenge naar linjerne ikke er udfyldt."""
+    return (os.environ.get(ADMIN_EMAIL_ENV, "").strip(),
+            os.environ.get(ADMIN_PASSWORD_ENV, ""))
+
+
+def seed_standard_user() -> str:
+    """Opretter standardbrugeren fra .env. Returnerer en kort status til opstartsloggen.
+
+    "oprettet" = kontoen blev lavet nu, "findes" = der var allerede brugere (roeres ikke),
+    "mangler" = .env har ikke begge linjer (saa bruges /setup som foer), "fejl: ..." = afvist.
+    Kontoen oprettes med must_change_password, saa koden fra .env skal skiftes ved foerste login.
+    """
+    email, password = standard_user_settings()
+    if not email or not password:
+        return "mangler"
+    if user_count() > 0:
+        return "findes"
+    try:
+        create_user(email, password, must_change=True)
+    except ValueError as e:
+        with get_db() as db:
+            add_alarm(db, "brugere", f"Standardbrugeren i .env blev afvist: {str(e)[:160]}", "advarsel")
+        return f"fejl: {e}"
+    except sqlite3.IntegrityError:
+        return "findes"
+    with get_db() as db:
+        add_alarm(db, "brugere", f"Standardbrugeren '{email}' oprettet ved opstart fra .env", "info")
+    return "oprettet"
+
+
+# Sidste verificerede svar paa "passer .env-koden?" - PBKDF2 er 240k iterationer, saa dashboardet
+# maa ikke betale den pris ved hver sidevisning. Noeglen er (e-mail, sha256(kode), gemt hash).
+_ENV_PASSWORD_STATE = {"sig": None, "msg": ""}
+
+
+def env_password_mismatch() -> str:
+    """Advarsel naar CC_ADMIN_PASSWORD ikke laengere passer til standardbrugeren - ellers "".
+
+    Koden i .env bruges kun, naar kontoen seedes. Skiftes den i UI'et (eller med
+    scripts/user_create.py), bliver linjen i .env foraeldet: login bruger den nye kode, mens filen
+    lover den gamle. Advarslen findes, saa man retter .env i stedet for at saette koden tilbage.
+    """
+    email, password = standard_user_settings()
+    if not email or not password:
+        return ""
+    try:
+        row = find_user(email)
+    except Exception:
+        return ""
+    if not row:
+        return ""
+    sig = (row["email"], hashlib.sha256(password.encode()).hexdigest(), row["password_hash"])
+    if _ENV_PASSWORD_STATE["sig"] == sig:
+        return _ENV_PASSWORD_STATE["msg"]
+    msg = ""
+    if not verify_password(password, row["password_hash"]):
+        msg = (f"{ADMIN_PASSWORD_ENV} i .env passer ikke længere til '{row['email']}' - koden er "
+               f"skiftet i UI'et, så login bruger den nye kode. Ret eller fjern linjen i .env.")
+    _ENV_PASSWORD_STATE.update(sig=sig, msg=msg)
+    return msg
+
+
+def warn_stale_env_password() -> str:
+    """Lægger advarslen i Alarmer ved opstart (dedupe som de andre) og returnerer teksten."""
+    msg = env_password_mismatch()
+    if not msg:
+        return ""
+    try:
+        with get_db() as db:
+            add_alarm(db, "brugere", msg, "advarsel")
+    except Exception:
+        pass
+    return msg
+
+
+# .env ligger i projektroden ved siden af app/ - samme sti som load_dotenv() bruger.
+ENV_PATH = os.path.join(os.path.dirname(BASE_DIR), ".env")
+
+
+def clear_env_admin_password(email: str = "") -> str:
+    """Fjerner CC_ADMIN_PASSWORD fra .env, naar standardbrugeren selv har skiftet kode.
+
+    Koden i .env bruges kun ved seed; derefter er linjen kun et fristed for forvirring (og for
+    advarslen om en foraeldet kode). Kun den ene linje roeres - kommentarer og de andre noegler
+    staar urort. Returnerer "fjernet", "passer-endnu" (koden er den samme som foer),
+    "ikke-standardbruger", "ingen-linje", "ingen-fil" eller "fejl: ...". En fejl vaelter aldrig
+    selve adgangskode-skiftet - saa bliver advarslen i dashboardet staaende i stedet.
+    """
+    env_email, env_password = standard_user_settings()
+    if not env_email or not email or normalize_email(email) != normalize_email(env_email):
+        return "ikke-standardbruger"
+    if not env_password:
+        return "ingen-linje"
+    row = None
+    try:
+        row = find_user(env_email)
+        still_valid = bool(row) and verify_password(env_password, row["password_hash"])
+    except Exception:
+        still_valid = False
+    if still_valid:                      # koden er ikke skiftet vaek fra .env-linjen
+        return "passer-endnu"
+    path = ENV_PATH
+    if not os.path.exists(path):
+        return "ingen-fil"
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.readlines()
+        pattern = re.compile(r"^\s*(?:export\s+)?%s\s*=" % re.escape(ADMIN_PASSWORD_ENV))
+        out, changed = [], False
+        for line in lines:
+            if pattern.match(line):
+                out.append(ADMIN_PASSWORD_ENV + "=" + ("\r\n" if line.endswith("\r\n") else "\n"))
+                changed = True
+            else:
+                out.append(line)
+        if not changed:
+            return "ingen-linje"
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.writelines(out)
+        try:
+            os.chmod(tmp, os.stat(path).st_mode)
+        except Exception:
+            pass
+        os.replace(tmp, path)
+    except Exception as e:
+        try:
+            with get_db() as db:
+                add_alarm(db, "brugere", "CC_ADMIN_PASSWORD kunne ikke fjernes fra .env efter "
+                          "adgangskode-skift: %s - fjern linjen manuelt" % str(e)[:120], "advarsel")
+        except Exception:
+            pass
+        return "fejl: %s" % e
+    os.environ[ADMIN_PASSWORD_ENV] = ""
+    _ENV_PASSWORD_STATE.update(sig=None, msg="")
+    try:
+        with get_db() as db:
+            record_env_password_cleared(db, env_email)
+            add_alarm(db, "brugere", "CC_ADMIN_PASSWORD er fjernet fra .env, fordi '%s' skiftede "
+                      "adgangskode" % env_email, "info")
+    except Exception:
+        pass
+    print("[cc] .env: CC_ADMIN_PASSWORD fjernet (standardbrugeren skiftede kode)", flush=True)
+    return "fjernet"
+
+
+# Dashboardet maa ikke kraeve, at man aabner .env: rydningen gemmes derfor i settings sammen med
+# hvem og hvornaar, og "staar linjen der?" laeses fra filen selv. Miljoevariablen blev laest ved
+# opstart og ser derfor ikke en rettelse undervejs.
+ENV_CLEARED_KEY = "env_password_cleared"
+_DA_MONTHS = ("januar", "februar", "marts", "april", "maj", "juni", "juli", "august",
+              "september", "oktober", "november", "desember")
+
+
+def danish_time(iso: str) -> str:
+    """'2026-11-05T16:12:33' -> '5. november 2026 kl. 16:12' ('' naar vaerdien er skaev)."""
+    try:
+        dt = datetime.fromisoformat(str(iso))
+    except Exception:
+        return ""
+    if dt.tzinfo is not None:
+        try:
+            dt = dt.astimezone(ZoneInfo(CC_TZ_NAME))
+        except Exception:
+            pass
+    return "%d. %s %d kl. %02d:%02d" % (dt.day, _DA_MONTHS[dt.month - 1], dt.year, dt.hour, dt.minute)
+
+
+def record_env_password_cleared(db, account: str) -> None:
+    """Gemmer hvem/hvornaar .env-linjen blev ryddet. Fejler den, er rydningen stadig sket.
+
+    Kun navnet paa den, der skiftede koden, gemmes - aldrig koden selv.
+    """
+    name = ""
+    try:
+        row = db.execute("SELECT username FROM users WHERE email=?", (account,)).fetchone()
+        name = (row["username"] or "") if row else ""
+    except Exception:
+        name = ""
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)",
+               (ENV_CLEARED_KEY, jsonlib.dumps({"at": now_iso(), "by": (name or account),
+                                                "account": account}, ensure_ascii=False)))
+
+
+def env_password_cleared() -> dict:
+    """Den seneste rydning som {'at', 'by', 'account'} - {} naar der ikke er nogen."""
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT value FROM settings WHERE key=?", (ENV_CLEARED_KEY,)).fetchone()
+        data = jsonlib.loads(row["value"]) if row and row["value"] else {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def env_admin_password_in_file() -> str:
+    """'sat', 'tom', 'ingen-fil' eller 'fejl' - laeser .env, saa manuelle rettelser ogsaa ses."""
+    try:
+        with open(ENV_PATH, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return "ingen-fil"
+    except Exception:
+        return "fejl"
+    pattern = re.compile(r"^\s*(?:export\s+)?%s\s*=(.*)$" % re.escape(ADMIN_PASSWORD_ENV), re.M)
+    found = pattern.search(text)
+    return "sat" if found and found.group(1).strip() else "tom"
+
+
+def env_password_notice() -> dict:
+    """Tekst til dashboardet om .env-linjen: ryddet af hvem/hvornaar - eller sat tilbage.
+
+    Baren vises kun for rydninger, vi selv har lavet; en tom linje paa en ny installation skal ikke
+    give stoej. Er koden blevet foraeldet, vinder den roede advarsel i stedet. Koderne selv er
+    hverken i teksten eller i settings.
+    """
+    rec = env_password_cleared()
+    if not rec or env_password_mismatch():
+        return {}
+    who = rec.get("by") or rec.get("account") or "ukendt"
+    when = danish_time(rec.get("at", ""))
+    stamp = (" " + when) if when else ""
+    state = env_admin_password_in_file()
+    if state == "sat":
+        text = (f"CC_ADMIN_PASSWORD står i .env igen (fjernet{stamp} af {who}) - skiftes koden i "
+                f"UI'et, bliver linjen forældet igen.")
+    elif state in ("ingen-fil", "fejl"):
+        text = (f"CC_ADMIN_PASSWORD blev fjernet fra .env{stamp} af {who}, men filen kunne ikke "
+                f"læses ved denne kontrol.")
+    else:
+        text = (f"CC_ADMIN_PASSWORD blev fjernet fra .env{stamp} af {who} - filen kan ikke blive "
+                f"forældet. Linjen skal kun tilbage, hvis et nyt deployment skal seedes.")
+    return {"state": state, "text": text}
+
+
 def find_user(identifier: str):
     """Brugeren bag en e-mail - eller et brugernavn fra foer v7.15, saa gamle konti ikke laases ude."""
     ident = (identifier or "").strip()
@@ -1238,6 +1484,10 @@ async def users_password(request: Request, current: str = Form(...), new: str = 
         # Log de andre sessioner ud, behold denne.
         db.execute("DELETE FROM sessions WHERE user_id=? AND id<>?",
                    (me["id"], _session_key(request.cookies.get(SESSION_COOKIE) or "")))
+    try:  # standardbrugeren skiftede kode: saa skal .env-linjen ikke love den gamle
+        clear_env_admin_password(me["email"])
+    except Exception as e:
+        print("[cc] .env: kunne ikke rydde CC_ADMIN_PASSWORD:", repr(e), flush=True)
     return RedirectResponse("/", status_code=303)
 
 
@@ -3139,33 +3389,79 @@ def sgap_sync() -> dict:
     previous = sgap_snapshot()
     snap = {"checked_at": now_iso(), "ok": False, "error": "", "queue": {}, "channels": [], "pending_drafts": 0}
     try:
-        stats = sgap_api("GET", "/stats", params={"days": 30})
-        drafts = sgap_api("GET", "/drafts", params={"status": "pending", "limit": 100})
-        snap["ok"] = True
-        snap["queue"] = {r["status"]: int(r["count"]) for r in stats.get("queue", [])}
-        channels = {}
-        for r in stats.get("events", []):
-            c = channels.setdefault(r["channel"], {"channel": r["channel"], "publish": 0, "click": 0, "order": 0, "revenue": 0.0})
-            if r["event_type"] in ("publish", "click", "order"):
-                c[r["event_type"]] = int(r["count"])
-            if r["event_type"] == "order":
-                c["revenue"] = round(float(r["value"] or 0), 2)
-        snap["channels"] = sorted(channels.values(), key=lambda c: (-c["revenue"], -c["click"]))
-        snap["pending_drafts"] = len(drafts) if isinstance(drafts, list) else 0
-        # Kaldet her ER et CC-kald (headeren), saa svaret baade bekraefter at broen virker og
-        # hvornaar WordPress noterede det. Et aeldre plugin uden /snapshot maa ikke vaelte synken.
         try:
-            doc = sgap_api("GET", "/snapshot", params={"days": 7})
+            # Nyere plugins har /snapshot: alt i ét kald, inkl. selvtjek, cron-forsinkelse og pause-aarsag.
+            doc = sgap_api("GET", "/snapshot", params={"days": 30, "limit": 20})
+            snap.update(sgap_from_snapshot(doc))
+            # Samme svar fortæller, hvornaar WordPress sidst hørte fra CC (SGAP_CC::status()).
             cc_seen = ((doc or {}).get("status") or {}).get("command_center") or {}
             if isinstance(cc_seen, dict) and cc_seen.get("ts"):
                 snap["command_center"] = {k: cc_seen.get(k) for k in
                                           ("state", "ts", "age", "version", "last_route", "user", "last_seen")}
             else:
                 snap.pop("command_center", None)
-        except Exception:
+            snap["ok"] = True
+        except requests.HTTPError as e:
+            if getattr(e.response, "status_code", None) != 404:
+                raise
+            snap.update(sgap_from_stats())
             snap.pop("command_center", None)
+            snap["ok"] = True
     except Exception as e:
         snap["error"] = sgap_error_text(e)
+    sgap_store(snap, previous)
+    return snap
+
+
+def sgap_from_snapshot(data: dict) -> dict:
+    """Oversaet pluginnets /snapshot til det format dashboardet og alarmerne bruger."""
+    status = data.get("status") or {}
+    counts = data.get("counts") or {}
+    channels = []
+    for r in (data.get("results") or {}).get("by_channel") or []:
+        channels.append({
+            "channel": r.get("channel"),
+            "publish": int(r.get("published") or 0),
+            "click": int(r.get("clicks") or 0),
+            "order": int(r.get("orders") or 0),
+            "revenue": round(float(r.get("revenue") or 0), 2),
+        })
+    check = status.get("last_self_check") or {}
+    return {
+        "source": "snapshot",
+        "version": data.get("version") or "",
+        "queue": {k: int(v) for k, v in (counts.get("queue") or {}).items()},
+        "pending_drafts": int((counts.get("drafts") or {}).get("pending", 0)),
+        "channels": sorted(channels, key=lambda c: (-c["revenue"], -c["click"])),
+        "autopilot": bool(status.get("autopilot")),
+        "full_auto": bool(status.get("full_auto")),
+        "paused_because": status.get("sending_paused_because") or "",
+        "cron_lag_minutes": int(status.get("cron_lag_minutes") or 0),
+        "problems": [str(p) for p in (check.get("problems") or [])][:10],
+        "self_check_at": check.get("at") or "",
+        "missing_tables": list(data.get("missing_tables") or []),
+    }
+
+
+def sgap_from_stats() -> dict:
+    """Reserve for plugins uden /snapshot (aeldre end 7.5)."""
+    stats = sgap_api("GET", "/stats", params={"days": 30})
+    drafts = sgap_api("GET", "/drafts", params={"status": "pending", "limit": 100})
+    snap = {"source": "stats"}
+    snap["queue"] = {r["status"]: int(r["count"]) for r in stats.get("queue", [])}
+    channels = {}
+    for r in stats.get("events", []):
+        c = channels.setdefault(r["channel"], {"channel": r["channel"], "publish": 0, "click": 0, "order": 0, "revenue": 0.0})
+        if r["event_type"] in ("publish", "click", "order"):
+            c[r["event_type"]] = int(r["count"])
+        if r["event_type"] == "order":
+            c["revenue"] = round(float(r["value"] or 0), 2)
+    snap["channels"] = sorted(channels.values(), key=lambda c: (-c["revenue"], -c["click"]))
+    snap["pending_drafts"] = len(drafts) if isinstance(drafts, list) else 0
+    return snap
+
+
+def sgap_store(snap: dict, previous: dict) -> None:
     with get_db() as db:
         db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('sgap_snapshot', ?)", (jsonlib.dumps(snap),))
         # Kun alarm naar noget AENDRER sig, saa Telegram ikke spammes hver halve time.
@@ -3178,7 +3474,28 @@ def sgap_sync() -> dict:
             drafts_now, drafts_before = snap["pending_drafts"], previous.get("pending_drafts", 0)
             if drafts_now > drafts_before:
                 add_alarm(db, "autopilot", f"{drafts_now} AI-kladde(r) venter paa godkendelse i WordPress", "info")
-    return snap
+            # Pluginnets eget selvtjek: alarm kun for NYE problemer, saa samme tekst ikke sendes hver halve time.
+            for problem in snap.get("problems", []):
+                if problem not in previous.get("problems", []):
+                    add_alarm(db, "autopilot", f"Autopilot-selvtjek: {problem}", "advarsel")
+            if snap.get("missing_tables") and snap["missing_tables"] != previous.get("missing_tables"):
+                add_alarm(db, "autopilot", "Autopilot mangler tabeller: " + ", ".join(snap["missing_tables"]) + " - genaktiver pluginnet", "kritisk")
+
+
+def wp_cron_ping() -> int:
+    """Kald wp-cron.php, saa pluginnets job koerer til tiden selvom sitet har faa besoeg. Returnerer HTTP-status."""
+    resp = HTTP.get(f"{WP_URL.rstrip('/')}/wp-cron.php", params={"doing_wp_cron": f"{time.time():.4f}"},
+                    headers={"X-Command-Center": APP_VERSION}, timeout=15)
+    return resp.status_code
+
+
+async def job_wp_cron():
+    if not sgap_ready():
+        return
+    try:
+        await asyncio.get_running_loop().run_in_executor(executor, wp_cron_ping)
+    except Exception:
+        pass  # sitet nede fanges af sgap_sync og monitorerne; et tabt ping skal ikke give alarm
 
 
 async def job_sgap_sync():
@@ -4486,6 +4803,8 @@ async def dashboard(request: Request):
         "alert_outbox": alert_outbox,
         "alert_problems": alert_problems,
         "current_user": getattr(request.state, "user", None),
+        "env_password_warning": env_password_mismatch(),
+        "env_password_notice": env_password_notice(),
         "update_state": update_state,
         "update_token": bool(GITHUB_TOKEN),
         "update_repo": GITHUB_REPO,
@@ -5019,12 +5338,13 @@ async def api_keys_revoke(client_id: int = Form(...)):
 # alarmerer, hvis et job er forsinket for meget, eller hvis det fejlede. Hver tilstand alarmeres kun én gang.
 JOB_MAX_AGE_HOURS = {
     "domain_checks": 7, "keyword_checks": 26, "growth_autopilot": 26, "cleanup": 26,
-    "db_backup": 26, "update_check": 26, "sgap_sync": 1.5, "alert_outbox": 0.1,
+    "db_backup": 26, "update_check": 26, "sgap_sync": 1.5, "wp_cron": 0.5,
+    "alert_outbox": 0.1,
 }
 JOB_LABELS = {
     "domain_checks": "Domæne-tjek", "keyword_checks": "Keyword-tjek", "growth_autopilot": "Vækst-autopilot",
     "cleanup": "Oprydning", "db_backup": "DB-backup", "update_check": "Opdateringstjek",
-    "sgap_sync": "WordPress-synk", "alert_outbox": "Alarm-udsendelse",
+    "sgap_sync": "WordPress-synk", "wp_cron": "WP-Cron-ping", "alert_outbox": "Alarm-udsendelse",
 }
 
 
@@ -5147,6 +5467,18 @@ async def lifespan(app_: FastAPI):
     except Exception:
         pass
     try:
+        seed_status = seed_standard_user()
+        if seed_status not in ("findes", "mangler"):
+            print(f"[cc] standardbruger ({ADMIN_EMAIL_ENV}): {seed_status}", flush=True)
+    except Exception as e:
+        print("[cc] standardbruger kunne ikke oprettes:", repr(e), flush=True)
+    try:
+        stale = warn_stale_env_password()
+        if stale:
+            print(f"[cc] advarsel: {stale}", flush=True)
+    except Exception as e:
+        print("[cc] .env-koden kunne ikke tjekkes:", repr(e), flush=True)
+    try:
         scheduler.add_job(job_heartbeat("domain_checks", job_check_domains), IntervalTrigger(hours=6), id="domain_checks", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat("keyword_checks", job_check_keywords), CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat("growth_autopilot", job_growth_autopilot), CronTrigger(hour=5, minute=15), id="growth_autopilot", replace_existing=True, max_instances=1, coalesce=True)
@@ -5154,6 +5486,7 @@ async def lifespan(app_: FastAPI):
         scheduler.add_job(job_heartbeat("db_backup", job_backup_db), CronTrigger(hour=4, minute=40), id="db_backup", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat("update_check", job_update_check), CronTrigger(hour=5, minute=0), id="update_check", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat("sgap_sync", job_sgap_sync), IntervalTrigger(minutes=30), id="sgap_sync", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("wp_cron", job_wp_cron), IntervalTrigger(minutes=5), id="wp_cron", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat("alert_outbox", job_drain_alerts), IntervalTrigger(minutes=1), id="alert_outbox", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat_check, IntervalTrigger(minutes=15), id="job_heartbeat", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.start()

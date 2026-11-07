@@ -2,13 +2,13 @@
 set -e
 PROJECT_DIR="$HOME/command-center"
 
-echo "⚡ Command Center v7.23.0 - installerer i $PROJECT_DIR..."
+# Versionsnummeret laeses fra den app/main.py der ligger indlejret nedenfor (EOF_MAIN), saa
+# installatoeren ikke kan paastaa en anden version end den den skriver. Ret APP_VERSION i
+# app/main.py - ikke her. Linjen staar i spalte 0 i den indlejrede fil.
+VERSION="$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' "${BASH_SOURCE[0]:-$0}" | head -1)"
+
+echo "⚡ Command Center v${VERSION:-?} - installerer i $PROJECT_DIR..."
 mkdir -p "$PROJECT_DIR/app/templates" "$PROJECT_DIR/app/data" "$PROJECT_DIR/app/static" "$PROJECT_DIR/deploy" "$PROJECT_DIR/scripts"
-echo "📦 Offline-scripts (Tailwind, Alpine, Chart.js)..."
-mkdir -p "$PROJECT_DIR/app/static/vendor"
-curl -sSfL -o "$PROJECT_DIR/app/static/vendor/tailwind.js" https://cdn.tailwindcss.com
-curl -sSfL -o "$PROJECT_DIR/app/static/vendor/alpine.min.js" https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js
-curl -sSfL -o "$PROJECT_DIR/app/static/vendor/chart.umd.min.js" https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js
 echo "📄 requirements.txt..."
 cat << 'EOF_REQ' > "$PROJECT_DIR/requirements.txt"
 fastapi==0.115.6
@@ -23,10 +23,11 @@ EOF_REQ
 
 echo "📄 .env.example..."
 cat << 'EOF_ENVDOT' > "$PROJECT_DIR/.env.example"
-# Command Center v7.15 - kopier til .env og udfyld
-# Login: der er ingen token. Foerste besoeg i browseren opretter din bruger (/setup) med e-mail,
-# derefter logger du ind med e-mail + adgangskode. Nye brugere inviteres paa mail under fanen
-# "Brugere" og kraever SMTP_HOST + SMTP_FROM nedenfor.
+# Command Center - kopier til .env og udfyld (hele listen staar i README og i manualen)
+# Login: der er ingen token. Udfyld CC_ADMIN_EMAIL + CC_ADMIN_PASSWORD nedenfor, saa oprettes
+# standardbrugeren ved opstart (efter deployment), og du logger ind med den med det samme.
+# Er de to linjer tomme, opretter foerste besoeg brugeren via /setup som reserve. Nye brugere
+# inviteres paa mail under fanen "Brugere" og kraever SMTP_HOST + SMTP_FROM nedenfor.
 # Hvor run.sh lytter. 127.0.0.1 = kun denne maskine; 0.0.0.0 = ogsaa fra netvaerket (kraever TLS/proxy).
 CC_HOST=127.0.0.1
 CC_PORT=8000
@@ -36,7 +37,30 @@ CC_SSRF_ALLOW=
 # Adressen du aabner i browseren bag nginx (bruges kun til at printe den rigtige adresse).
 # Ultra.cc: fx https://<bruger>.<server>.ultra.cc - tom = ingen nginx. Bruges ogsaa som adresse
 # i invitationsmailen.
+# Den adresse DU aabner i browseren - den offentlige adresse bag nginx, ikke 127.0.0.1.
+# Styrer tre ting: login-linket i scripts/update.sh og scripts/user_create.py, adressen i
+# invitationsmailen, og Host-tjekket paa /mcp (MCP-noegler afvises med 421, hvis vaerten ikke
+# matcher noejagtigt).
+# Format: med https://, kun vaerten, uden anfoerselstegn og uden kommentar paa samme linje:
+#     CC_PUBLIC_URL=https://humle91.ultra.cc
+# Ultra.cc: brug praecis den adresse du selv skriver i browseren (den staar typisk i panelet
+# under fanen Network/Domains). Sti som /apps/cc virker ikke - brug subdomaene eller egen port.
+# Tom betyder "kun lokal": login-linket bliver http://127.0.0.1:8000/login, og Host-tjekket paa
+# /mcp slaaes HELT fra - det er kun OK paa en maskine, ingen andre kan naa.
 CC_PUBLIC_URL=
+# Standardbruger oprettet ved opstart (kun naar der ikke findes brugere i databasen).
+# Kontoen faar must_change_password, saa koden her kun bruges til det foerste login - derefter
+# skifter du den under fanen Brugere. Klartekst staar kun i .env (.env committes aldrig).
+# Tomme linjer = ingen standardbruger; foerste besoeg opretter brugeren via /setup i stedet.
+# Bemaerk: en senere aendring af linjerne rorer ikke en konto, der allerede findes - og naar du
+# skifter koden under Brugere, passer CC_ADMIN_PASSWORD ikke laengere: opstartsloggen skriver en
+# advarsel, den ligger under Alarmer, og dashboardet viser en roed bjaelke, indtil linjen rettes
+# eller fjernes. Login bruger hele tiden den nye kode. Skifter standardbrugeren selv koden i UI'et,
+# toemmes CC_ADMIN_PASSWORD her automatisk (kun den linje) - saa bliver filen aldrig foraeldet.
+# Siden v7.19.2 staar rydningen i dashboardet med tidspunkt og navn, og saettes linjen tilbage,
+# siger bjaelken det i stedet - filens tilstand kan altsaa ses uden at aabne den.
+CC_ADMIN_EMAIL=
+CC_ADMIN_PASSWORD=
 # Stoler paa X-Forwarded-* fra disse IP'er (nginx paa samme maskine = 127.0.0.1).
 CC_FORWARDED_ALLOW_IPS=127.0.0.1
 # Tidszone for planlagte opslag. Tiden gemmes som lokal tid OG UTC; ukendt zone -> Europe/Copenhagen.
@@ -215,9 +239,11 @@ NEWEST = [
     ("7.22.0", "Offline dashboard: Tailwind, Alpine og Chart.js ligger lokalt under /static/vendor - ingen CDN-afhaengighed"),
     ("7.21.0", "CSRF-beskyttelse: muterende kald fra andre sites afvises (403); ny session ved hvert login og gammel sid slettes"),
     ("7.20.0", "Cockpit viser API-budget og jobstatus; forsinkede eller fejlede jobs giver alarm (job-heartbeat)"),
-
-    ("7.19.0", "SSRF-beskyttelse: udgaaende kald afviser interne adresser, sky-metadata og viderestillinger ind i det lokale net"),
-    ("7.18.0", "Social viser hvornaar WordPress sidst hoerte fra Command Center - CC sender X-Command-Center"),
+    ("7.19.2", "Dashboardet viser, hvornaar og af hvem CC_ADMIN_PASSWORD blev fjernet fra .env"),
+    ("7.19.1", "CC_ADMIN_PASSWORD fjernes fra .env, naar standardbrugeren skifter kode - saa kan linjen ikke blive foraeldet"),
+    ("7.19.0", "SSRF-beskyttelse paa udgaaende kald; Autopilot-broen henter hele /snapshot og holder WP-Cron i gang hvert 5. min"),
+    ("7.18.1", "Advarsel paa skaermen og i dashboardet, naar CC_ADMIN_PASSWORD i .env ikke laengere passer til kontoen"),
+    ("7.18.0", "Standardbruger fra .env ved opstart, og Social viser hvornaar WordPress sidst hoerte fra Command Center"),
     ("7.17.5", "Knappen Log ind paa Command Center i WordPress bruger et engangslink fra CC"),
     ("7.17.4", "Sletning af brugere svarer i formularen - en afvist sletning forklares i stedet for kun at blive en alarm"),
     ("7.17.3", "Invitationen afviser pladsholder-adresser med en forklaring - i formularen og fra terminalen"),
@@ -235,7 +261,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "WordPress-knappen logger ind paa Command Center med et engangslink - uden adgangskode"
+NEWEST_LINE = "Backup og gendannelse i fanen Moduler - med skriftlig bekraeftelse og en kopi foerst"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -797,6 +823,250 @@ def create_user(email: str, password: str, must_change: bool = False, username: 
         return cur.lastrowid
 
 
+# --- Standardbruger fra .env (v7.18) ---
+# Et nyt deployment skal kunne logge ind med det samme: staar CC_ADMIN_EMAIL + CC_ADMIN_PASSWORD i
+# .env, oprettes kontoen ved opstart. Klartekst findes kun i .env - her gemmes PBKDF2-hashen.
+# Der seedes kun, naar der ingen brugere er, saa en rettet .env-kode ikke rorer en konto i brug.
+ADMIN_EMAIL_ENV = "CC_ADMIN_EMAIL"
+ADMIN_PASSWORD_ENV = "CC_ADMIN_PASSWORD"
+
+
+def standard_user_settings() -> tuple:
+    """(e-mail, adgangskode) fra .env - tomme strenge naar linjerne ikke er udfyldt."""
+    return (os.environ.get(ADMIN_EMAIL_ENV, "").strip(),
+            os.environ.get(ADMIN_PASSWORD_ENV, ""))
+
+
+def seed_standard_user() -> str:
+    """Opretter standardbrugeren fra .env. Returnerer en kort status til opstartsloggen.
+
+    "oprettet" = kontoen blev lavet nu, "findes" = der var allerede brugere (roeres ikke),
+    "mangler" = .env har ikke begge linjer (saa bruges /setup som foer), "fejl: ..." = afvist.
+    Kontoen oprettes med must_change_password, saa koden fra .env skal skiftes ved foerste login.
+    """
+    email, password = standard_user_settings()
+    if not email or not password:
+        return "mangler"
+    if user_count() > 0:
+        return "findes"
+    try:
+        create_user(email, password, must_change=True)
+    except ValueError as e:
+        with get_db() as db:
+            add_alarm(db, "brugere", f"Standardbrugeren i .env blev afvist: {str(e)[:160]}", "advarsel")
+        return f"fejl: {e}"
+    except sqlite3.IntegrityError:
+        return "findes"
+    with get_db() as db:
+        add_alarm(db, "brugere", f"Standardbrugeren '{email}' oprettet ved opstart fra .env", "info")
+    return "oprettet"
+
+
+# Sidste verificerede svar paa "passer .env-koden?" - PBKDF2 er 240k iterationer, saa dashboardet
+# maa ikke betale den pris ved hver sidevisning. Noeglen er (e-mail, sha256(kode), gemt hash).
+_ENV_PASSWORD_STATE = {"sig": None, "msg": ""}
+
+
+def env_password_mismatch() -> str:
+    """Advarsel naar CC_ADMIN_PASSWORD ikke laengere passer til standardbrugeren - ellers "".
+
+    Koden i .env bruges kun, naar kontoen seedes. Skiftes den i UI'et (eller med
+    scripts/user_create.py), bliver linjen i .env foraeldet: login bruger den nye kode, mens filen
+    lover den gamle. Advarslen findes, saa man retter .env i stedet for at saette koden tilbage.
+    """
+    email, password = standard_user_settings()
+    if not email or not password:
+        return ""
+    try:
+        row = find_user(email)
+    except Exception:
+        return ""
+    if not row:
+        return ""
+    sig = (row["email"], hashlib.sha256(password.encode()).hexdigest(), row["password_hash"])
+    if _ENV_PASSWORD_STATE["sig"] == sig:
+        return _ENV_PASSWORD_STATE["msg"]
+    msg = ""
+    if not verify_password(password, row["password_hash"]):
+        msg = (f"{ADMIN_PASSWORD_ENV} i .env passer ikke længere til '{row['email']}' - koden er "
+               f"skiftet i UI'et, så login bruger den nye kode. Ret eller fjern linjen i .env.")
+    _ENV_PASSWORD_STATE.update(sig=sig, msg=msg)
+    return msg
+
+
+def warn_stale_env_password() -> str:
+    """Lægger advarslen i Alarmer ved opstart (dedupe som de andre) og returnerer teksten."""
+    msg = env_password_mismatch()
+    if not msg:
+        return ""
+    try:
+        with get_db() as db:
+            add_alarm(db, "brugere", msg, "advarsel")
+    except Exception:
+        pass
+    return msg
+
+
+# .env ligger i projektroden ved siden af app/ - samme sti som load_dotenv() bruger.
+ENV_PATH = os.path.join(os.path.dirname(BASE_DIR), ".env")
+
+
+def clear_env_admin_password(email: str = "") -> str:
+    """Fjerner CC_ADMIN_PASSWORD fra .env, naar standardbrugeren selv har skiftet kode.
+
+    Koden i .env bruges kun ved seed; derefter er linjen kun et fristed for forvirring (og for
+    advarslen om en foraeldet kode). Kun den ene linje roeres - kommentarer og de andre noegler
+    staar urort. Returnerer "fjernet", "passer-endnu" (koden er den samme som foer),
+    "ikke-standardbruger", "ingen-linje", "ingen-fil" eller "fejl: ...". En fejl vaelter aldrig
+    selve adgangskode-skiftet - saa bliver advarslen i dashboardet staaende i stedet.
+    """
+    env_email, env_password = standard_user_settings()
+    if not env_email or not email or normalize_email(email) != normalize_email(env_email):
+        return "ikke-standardbruger"
+    if not env_password:
+        return "ingen-linje"
+    row = None
+    try:
+        row = find_user(env_email)
+        still_valid = bool(row) and verify_password(env_password, row["password_hash"])
+    except Exception:
+        still_valid = False
+    if still_valid:                      # koden er ikke skiftet vaek fra .env-linjen
+        return "passer-endnu"
+    path = ENV_PATH
+    if not os.path.exists(path):
+        return "ingen-fil"
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.readlines()
+        pattern = re.compile(r"^\s*(?:export\s+)?%s\s*=" % re.escape(ADMIN_PASSWORD_ENV))
+        out, changed = [], False
+        for line in lines:
+            if pattern.match(line):
+                out.append(ADMIN_PASSWORD_ENV + "=" + ("\r\n" if line.endswith("\r\n") else "\n"))
+                changed = True
+            else:
+                out.append(line)
+        if not changed:
+            return "ingen-linje"
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.writelines(out)
+        try:
+            os.chmod(tmp, os.stat(path).st_mode)
+        except Exception:
+            pass
+        os.replace(tmp, path)
+    except Exception as e:
+        try:
+            with get_db() as db:
+                add_alarm(db, "brugere", "CC_ADMIN_PASSWORD kunne ikke fjernes fra .env efter "
+                          "adgangskode-skift: %s - fjern linjen manuelt" % str(e)[:120], "advarsel")
+        except Exception:
+            pass
+        return "fejl: %s" % e
+    os.environ[ADMIN_PASSWORD_ENV] = ""
+    _ENV_PASSWORD_STATE.update(sig=None, msg="")
+    try:
+        with get_db() as db:
+            record_env_password_cleared(db, env_email)
+            add_alarm(db, "brugere", "CC_ADMIN_PASSWORD er fjernet fra .env, fordi '%s' skiftede "
+                      "adgangskode" % env_email, "info")
+    except Exception:
+        pass
+    print("[cc] .env: CC_ADMIN_PASSWORD fjernet (standardbrugeren skiftede kode)", flush=True)
+    return "fjernet"
+
+
+# Dashboardet maa ikke kraeve, at man aabner .env: rydningen gemmes derfor i settings sammen med
+# hvem og hvornaar, og "staar linjen der?" laeses fra filen selv. Miljoevariablen blev laest ved
+# opstart og ser derfor ikke en rettelse undervejs.
+ENV_CLEARED_KEY = "env_password_cleared"
+_DA_MONTHS = ("januar", "februar", "marts", "april", "maj", "juni", "juli", "august",
+              "september", "oktober", "november", "desember")
+
+
+def danish_time(iso: str) -> str:
+    """'2026-11-05T16:12:33' -> '5. november 2026 kl. 16:12' ('' naar vaerdien er skaev)."""
+    try:
+        dt = datetime.fromisoformat(str(iso))
+    except Exception:
+        return ""
+    if dt.tzinfo is not None:
+        try:
+            dt = dt.astimezone(ZoneInfo(CC_TZ_NAME))
+        except Exception:
+            pass
+    return "%d. %s %d kl. %02d:%02d" % (dt.day, _DA_MONTHS[dt.month - 1], dt.year, dt.hour, dt.minute)
+
+
+def record_env_password_cleared(db, account: str) -> None:
+    """Gemmer hvem/hvornaar .env-linjen blev ryddet. Fejler den, er rydningen stadig sket.
+
+    Kun navnet paa den, der skiftede koden, gemmes - aldrig koden selv.
+    """
+    name = ""
+    try:
+        row = db.execute("SELECT username FROM users WHERE email=?", (account,)).fetchone()
+        name = (row["username"] or "") if row else ""
+    except Exception:
+        name = ""
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)",
+               (ENV_CLEARED_KEY, jsonlib.dumps({"at": now_iso(), "by": (name or account),
+                                                "account": account}, ensure_ascii=False)))
+
+
+def env_password_cleared() -> dict:
+    """Den seneste rydning som {'at', 'by', 'account'} - {} naar der ikke er nogen."""
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT value FROM settings WHERE key=?", (ENV_CLEARED_KEY,)).fetchone()
+        data = jsonlib.loads(row["value"]) if row and row["value"] else {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def env_admin_password_in_file() -> str:
+    """'sat', 'tom', 'ingen-fil' eller 'fejl' - laeser .env, saa manuelle rettelser ogsaa ses."""
+    try:
+        with open(ENV_PATH, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return "ingen-fil"
+    except Exception:
+        return "fejl"
+    pattern = re.compile(r"^\s*(?:export\s+)?%s\s*=(.*)$" % re.escape(ADMIN_PASSWORD_ENV), re.M)
+    found = pattern.search(text)
+    return "sat" if found and found.group(1).strip() else "tom"
+
+
+def env_password_notice() -> dict:
+    """Tekst til dashboardet om .env-linjen: ryddet af hvem/hvornaar - eller sat tilbage.
+
+    Baren vises kun for rydninger, vi selv har lavet; en tom linje paa en ny installation skal ikke
+    give stoej. Er koden blevet foraeldet, vinder den roede advarsel i stedet. Koderne selv er
+    hverken i teksten eller i settings.
+    """
+    rec = env_password_cleared()
+    if not rec or env_password_mismatch():
+        return {}
+    who = rec.get("by") or rec.get("account") or "ukendt"
+    when = danish_time(rec.get("at", ""))
+    stamp = (" " + when) if when else ""
+    state = env_admin_password_in_file()
+    if state == "sat":
+        text = (f"CC_ADMIN_PASSWORD står i .env igen (fjernet{stamp} af {who}) - skiftes koden i "
+                f"UI'et, bliver linjen forældet igen.")
+    elif state in ("ingen-fil", "fejl"):
+        text = (f"CC_ADMIN_PASSWORD blev fjernet fra .env{stamp} af {who}, men filen kunne ikke "
+                f"læses ved denne kontrol.")
+    else:
+        text = (f"CC_ADMIN_PASSWORD blev fjernet fra .env{stamp} af {who} - filen kan ikke blive "
+                f"forældet. Linjen skal kun tilbage, hvis et nyt deployment skal seedes.")
+    return {"state": state, "text": text}
+
+
 def find_user(identifier: str):
     """Brugeren bag en e-mail - eller et brugernavn fra foer v7.15, saa gamle konti ikke laases ude."""
     ident = (identifier or "").strip()
@@ -1334,6 +1604,10 @@ async def users_password(request: Request, current: str = Form(...), new: str = 
         # Log de andre sessioner ud, behold denne.
         db.execute("DELETE FROM sessions WHERE user_id=? AND id<>?",
                    (me["id"], _session_key(request.cookies.get(SESSION_COOKIE) or "")))
+    try:  # standardbrugeren skiftede kode: saa skal .env-linjen ikke love den gamle
+        clear_env_admin_password(me["email"])
+    except Exception as e:
+        print("[cc] .env: kunne ikke rydde CC_ADMIN_PASSWORD:", repr(e), flush=True)
     return RedirectResponse("/", status_code=303)
 
 
@@ -3235,33 +3509,79 @@ def sgap_sync() -> dict:
     previous = sgap_snapshot()
     snap = {"checked_at": now_iso(), "ok": False, "error": "", "queue": {}, "channels": [], "pending_drafts": 0}
     try:
-        stats = sgap_api("GET", "/stats", params={"days": 30})
-        drafts = sgap_api("GET", "/drafts", params={"status": "pending", "limit": 100})
-        snap["ok"] = True
-        snap["queue"] = {r["status"]: int(r["count"]) for r in stats.get("queue", [])}
-        channels = {}
-        for r in stats.get("events", []):
-            c = channels.setdefault(r["channel"], {"channel": r["channel"], "publish": 0, "click": 0, "order": 0, "revenue": 0.0})
-            if r["event_type"] in ("publish", "click", "order"):
-                c[r["event_type"]] = int(r["count"])
-            if r["event_type"] == "order":
-                c["revenue"] = round(float(r["value"] or 0), 2)
-        snap["channels"] = sorted(channels.values(), key=lambda c: (-c["revenue"], -c["click"]))
-        snap["pending_drafts"] = len(drafts) if isinstance(drafts, list) else 0
-        # Kaldet her ER et CC-kald (headeren), saa svaret baade bekraefter at broen virker og
-        # hvornaar WordPress noterede det. Et aeldre plugin uden /snapshot maa ikke vaelte synken.
         try:
-            doc = sgap_api("GET", "/snapshot", params={"days": 7})
+            # Nyere plugins har /snapshot: alt i ét kald, inkl. selvtjek, cron-forsinkelse og pause-aarsag.
+            doc = sgap_api("GET", "/snapshot", params={"days": 30, "limit": 20})
+            snap.update(sgap_from_snapshot(doc))
+            # Samme svar fortæller, hvornaar WordPress sidst hørte fra CC (SGAP_CC::status()).
             cc_seen = ((doc or {}).get("status") or {}).get("command_center") or {}
             if isinstance(cc_seen, dict) and cc_seen.get("ts"):
                 snap["command_center"] = {k: cc_seen.get(k) for k in
                                           ("state", "ts", "age", "version", "last_route", "user", "last_seen")}
             else:
                 snap.pop("command_center", None)
-        except Exception:
+            snap["ok"] = True
+        except requests.HTTPError as e:
+            if getattr(e.response, "status_code", None) != 404:
+                raise
+            snap.update(sgap_from_stats())
             snap.pop("command_center", None)
+            snap["ok"] = True
     except Exception as e:
         snap["error"] = sgap_error_text(e)
+    sgap_store(snap, previous)
+    return snap
+
+
+def sgap_from_snapshot(data: dict) -> dict:
+    """Oversaet pluginnets /snapshot til det format dashboardet og alarmerne bruger."""
+    status = data.get("status") or {}
+    counts = data.get("counts") or {}
+    channels = []
+    for r in (data.get("results") or {}).get("by_channel") or []:
+        channels.append({
+            "channel": r.get("channel"),
+            "publish": int(r.get("published") or 0),
+            "click": int(r.get("clicks") or 0),
+            "order": int(r.get("orders") or 0),
+            "revenue": round(float(r.get("revenue") or 0), 2),
+        })
+    check = status.get("last_self_check") or {}
+    return {
+        "source": "snapshot",
+        "version": data.get("version") or "",
+        "queue": {k: int(v) for k, v in (counts.get("queue") or {}).items()},
+        "pending_drafts": int((counts.get("drafts") or {}).get("pending", 0)),
+        "channels": sorted(channels, key=lambda c: (-c["revenue"], -c["click"])),
+        "autopilot": bool(status.get("autopilot")),
+        "full_auto": bool(status.get("full_auto")),
+        "paused_because": status.get("sending_paused_because") or "",
+        "cron_lag_minutes": int(status.get("cron_lag_minutes") or 0),
+        "problems": [str(p) for p in (check.get("problems") or [])][:10],
+        "self_check_at": check.get("at") or "",
+        "missing_tables": list(data.get("missing_tables") or []),
+    }
+
+
+def sgap_from_stats() -> dict:
+    """Reserve for plugins uden /snapshot (aeldre end 7.5)."""
+    stats = sgap_api("GET", "/stats", params={"days": 30})
+    drafts = sgap_api("GET", "/drafts", params={"status": "pending", "limit": 100})
+    snap = {"source": "stats"}
+    snap["queue"] = {r["status"]: int(r["count"]) for r in stats.get("queue", [])}
+    channels = {}
+    for r in stats.get("events", []):
+        c = channels.setdefault(r["channel"], {"channel": r["channel"], "publish": 0, "click": 0, "order": 0, "revenue": 0.0})
+        if r["event_type"] in ("publish", "click", "order"):
+            c[r["event_type"]] = int(r["count"])
+        if r["event_type"] == "order":
+            c["revenue"] = round(float(r["value"] or 0), 2)
+    snap["channels"] = sorted(channels.values(), key=lambda c: (-c["revenue"], -c["click"]))
+    snap["pending_drafts"] = len(drafts) if isinstance(drafts, list) else 0
+    return snap
+
+
+def sgap_store(snap: dict, previous: dict) -> None:
     with get_db() as db:
         db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('sgap_snapshot', ?)", (jsonlib.dumps(snap),))
         # Kun alarm naar noget AENDRER sig, saa Telegram ikke spammes hver halve time.
@@ -3274,7 +3594,28 @@ def sgap_sync() -> dict:
             drafts_now, drafts_before = snap["pending_drafts"], previous.get("pending_drafts", 0)
             if drafts_now > drafts_before:
                 add_alarm(db, "autopilot", f"{drafts_now} AI-kladde(r) venter paa godkendelse i WordPress", "info")
-    return snap
+            # Pluginnets eget selvtjek: alarm kun for NYE problemer, saa samme tekst ikke sendes hver halve time.
+            for problem in snap.get("problems", []):
+                if problem not in previous.get("problems", []):
+                    add_alarm(db, "autopilot", f"Autopilot-selvtjek: {problem}", "advarsel")
+            if snap.get("missing_tables") and snap["missing_tables"] != previous.get("missing_tables"):
+                add_alarm(db, "autopilot", "Autopilot mangler tabeller: " + ", ".join(snap["missing_tables"]) + " - genaktiver pluginnet", "kritisk")
+
+
+def wp_cron_ping() -> int:
+    """Kald wp-cron.php, saa pluginnets job koerer til tiden selvom sitet har faa besoeg. Returnerer HTTP-status."""
+    resp = HTTP.get(f"{WP_URL.rstrip('/')}/wp-cron.php", params={"doing_wp_cron": f"{time.time():.4f}"},
+                    headers={"X-Command-Center": APP_VERSION}, timeout=15)
+    return resp.status_code
+
+
+async def job_wp_cron():
+    if not sgap_ready():
+        return
+    try:
+        await asyncio.get_running_loop().run_in_executor(executor, wp_cron_ping)
+    except Exception:
+        pass  # sitet nede fanges af sgap_sync og monitorerne; et tabt ping skal ikke give alarm
 
 
 async def job_sgap_sync():
@@ -4582,6 +4923,8 @@ async def dashboard(request: Request):
         "alert_outbox": alert_outbox,
         "alert_problems": alert_problems,
         "current_user": getattr(request.state, "user", None),
+        "env_password_warning": env_password_mismatch(),
+        "env_password_notice": env_password_notice(),
         "update_state": update_state,
         "update_token": bool(GITHUB_TOKEN),
         "update_repo": GITHUB_REPO,
@@ -5115,12 +5458,13 @@ async def api_keys_revoke(client_id: int = Form(...)):
 # alarmerer, hvis et job er forsinket for meget, eller hvis det fejlede. Hver tilstand alarmeres kun én gang.
 JOB_MAX_AGE_HOURS = {
     "domain_checks": 7, "keyword_checks": 26, "growth_autopilot": 26, "cleanup": 26,
-    "db_backup": 26, "update_check": 26, "sgap_sync": 1.5, "alert_outbox": 0.1,
+    "db_backup": 26, "update_check": 26, "sgap_sync": 1.5, "wp_cron": 0.5,
+    "alert_outbox": 0.1,
 }
 JOB_LABELS = {
     "domain_checks": "Domæne-tjek", "keyword_checks": "Keyword-tjek", "growth_autopilot": "Vækst-autopilot",
     "cleanup": "Oprydning", "db_backup": "DB-backup", "update_check": "Opdateringstjek",
-    "sgap_sync": "WordPress-synk", "alert_outbox": "Alarm-udsendelse",
+    "sgap_sync": "WordPress-synk", "wp_cron": "WP-Cron-ping", "alert_outbox": "Alarm-udsendelse",
 }
 
 
@@ -5243,6 +5587,18 @@ async def lifespan(app_: FastAPI):
     except Exception:
         pass
     try:
+        seed_status = seed_standard_user()
+        if seed_status not in ("findes", "mangler"):
+            print(f"[cc] standardbruger ({ADMIN_EMAIL_ENV}): {seed_status}", flush=True)
+    except Exception as e:
+        print("[cc] standardbruger kunne ikke oprettes:", repr(e), flush=True)
+    try:
+        stale = warn_stale_env_password()
+        if stale:
+            print(f"[cc] advarsel: {stale}", flush=True)
+    except Exception as e:
+        print("[cc] .env-koden kunne ikke tjekkes:", repr(e), flush=True)
+    try:
         scheduler.add_job(job_heartbeat("domain_checks", job_check_domains), IntervalTrigger(hours=6), id="domain_checks", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat("keyword_checks", job_check_keywords), CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat("growth_autopilot", job_growth_autopilot), CronTrigger(hour=5, minute=15), id="growth_autopilot", replace_existing=True, max_instances=1, coalesce=True)
@@ -5250,6 +5606,7 @@ async def lifespan(app_: FastAPI):
         scheduler.add_job(job_heartbeat("db_backup", job_backup_db), CronTrigger(hour=4, minute=40), id="db_backup", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat("update_check", job_update_check), CronTrigger(hour=5, minute=0), id="update_check", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat("sgap_sync", job_sgap_sync), IntervalTrigger(minutes=30), id="sgap_sync", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("wp_cron", job_wp_cron), IntervalTrigger(minutes=5), id="wp_cron", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat("alert_outbox", job_drain_alerts), IntervalTrigger(minutes=1), id="alert_outbox", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat_check, IntervalTrigger(minutes=15), id="job_heartbeat", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.start()
@@ -5303,8 +5660,14 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 </head>
 {% if insecure %}<div class="bg-yellow-600 text-black text-xs text-center py-1.5 px-4 font-semibold">&Uacute;t&uacute;n HTTPS &mdash; login og adgangskoder sendes ukrypteret. S&aelig;t nginx + TLS op foran CC (se Install-dokumentationen).</div>{% endif %}
 <body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: '{{ initial_tab }}', seoResult: null, seoLoading: false, crawl: null, histChart: null, histOpen: false, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
+{% if env_password_warning %}
+<div class="bg-red-500/10 border-b border-red-500/40 text-red-300 text-xs text-center py-2 px-4">⚠️ {{ env_password_warning }}</div>
+{% endif %}
 {% if current_user and current_user.must_change_password %}
-<div class="bg-amber-500/10 border-b border-amber-500/40 text-amber-300 text-xs text-center py-2 px-4">Du er logget ind med en midlertidig adgangskode fra invitationsmailen &mdash; skift den under fanen <b>Brugere</b>.</div>
+<div class="bg-amber-500/10 border-b border-amber-500/40 text-amber-300 text-xs text-center py-2 px-4">Du er logget ind med en midlertidig adgangskode (fra invitationsmailen eller CC_ADMIN_PASSWORD i .env) &mdash; skift den under fanen <b>Brugere</b>.</div>
+{% endif %}
+{% if env_password_notice %}
+<div class="bg-sky-500/10 border-b border-sky-500/40 text-sky-300 text-xs text-center py-2 px-4">🧹 {{ env_password_notice.text }}</div>
 {% endif %}
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
@@ -5889,7 +6252,23 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                 {% endfor %}
                 </tbody>
             </table>
-            <p class="text-[10px] text-zinc-500 mt-2">Tjekket {{ sgap.checked_at }} · Godkend kladder i WordPress: Steamgears → AI Drafts</p>
+            {% if sgap.paused_because %}
+            <p class="text-xs text-amber-400 mt-2">⏸ Afsendelse sat paa pause: {{ sgap.paused_because }}</p>
+            {% endif %}
+            {% if sgap.cron_lag_minutes and sgap.cron_lag_minutes >= 30 %}
+            <p class="text-xs text-amber-400 mt-2">⏱ WP-Cron er {{ sgap.cron_lag_minutes }} min bagud - Command Center kalder wp-cron.php hvert 5. min for at hjaelpe</p>
+            {% endif %}
+            {% if sgap.problems %}
+            <div class="mt-2">
+                <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">Pluginnets selvtjek{% if sgap.self_check_at %} ({{ sgap.self_check_at }}){% endif %}</div>
+                <ul class="text-xs text-amber-300 list-disc pl-4 space-y-0.5">
+                    {% for p in sgap.problems %}<li>{{ p }}</li>{% endfor %}
+                </ul>
+            </div>
+            {% elif sgap.source == 'snapshot' %}
+            <p class="text-xs text-emerald-400 mt-2">✓ Pluginnets selvtjek: ingen problemer</p>
+            {% endif %}
+            <p class="text-[10px] text-zinc-500 mt-2">Tjekket {{ sgap.checked_at }}{% if sgap.version %} · Autopilot {{ sgap.version }}{% endif %}{% if sgap.source == 'stats' %} · aeldre plugin uden /snapshot{% endif %} · Godkend kladder i WordPress: Steamgears → AI Drafts</p>
             {% endif %}
             {% if sgap_ready and modules['autopilot'] %}
             <div class="mt-3 pt-3 border-t border-zinc-800">
@@ -6597,7 +6976,7 @@ cat << 'EOF_LOGIN' > "$PROJECT_DIR/app/templates/login.html"
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Command Center — {{ 'Opret bruger' if mode == 'setup' else 'Log ind' }}</title>
+    <title>Command Center — {{ 'Opret foerste bruger' if mode == 'setup' else 'Log ind' }}</title>
     <style>
       /* Ingen CDN'er: login-siden skal virke og se ens ud uden internetadgang. */
       :root { color-scheme: dark; }
@@ -6621,6 +7000,8 @@ cat << 'EOF_LOGIN' > "$PROJECT_DIR/app/templates/login.html"
       button:focus-visible { outline: 2px solid #34d399; outline-offset: 2px; }
       .error { margin: 0 0 6px; padding: 9px 11px; font-size: 12px; color: #fda4af;
                background: rgba(244,63,94,.09); border: 1px solid rgba(244,63,94,.35); border-radius: 10px; }
+      .setup { margin: 0 0 14px; padding: 9px 11px; font-size: 12px; color: #fbbf24;
+               background: rgba(251,191,36,.08); border: 1px solid rgba(251,191,36,.3); border-radius: 10px; }
       .foot { margin: 16px 0 0; font-size: 11px; color: #71717a; text-align: center; }
       .report { margin: 20px 0 0; padding: 12px 14px; background: #09090b; border: 1px solid #27272a; border-radius: 12px; }
       .report .row { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; padding: 3px 0; color: #a1a1aa; }
@@ -6632,7 +7013,10 @@ cat << 'EOF_LOGIN' > "$PROJECT_DIR/app/templates/login.html"
 <div class="card">
     <h1>⚡ COMMAND CENTER</h1>
     {% if mode == 'setup' %}
-    <p class="sub">Foerste start: opret din bruger med din e-mail og en adgangskode.</p>
+    <p class="sub">Der findes ingen brugere endnu - opret den foerste nedenfor.</p>
+    <p class="setup">Vil du hellere have standardbrugeren automatisk? Skriv CC_ADMIN_EMAIL og
+      CC_ADMIN_PASSWORD i <code>.env</code> og genstart appen - saa oprettes kontoen ved opstart,
+      og denne side bruges ikke.</p>
     {% else %}
     <p class="sub">Log ind med din e-mail og adgangskode.</p>
     {% endif %}
@@ -6654,7 +7038,7 @@ cat << 'EOF_LOGIN' > "$PROJECT_DIR/app/templates/login.html"
     <div class="report">
       <div class="row"><span>Version</span><b>v{{ report.version }}{% if report.commit %} · {{ report.commit[:7] }}{% endif %}</b></div>
       <div class="row"><span>Seneste opstart</span><b>{{ (report.last_start or '—')[0:16] }}</b></div>
-      <div class="row"><span>Åbne alarmer</span><b{% if report.alarms_open %} class="warn"{% endif %}>{{ report.alarms_open }}{% if report.alarms_critical %} ({{ report.alarms_critical }} kritiske){% endif %}</b></div>
+      <div class="row"><span>Aabne alarmer</span><b{% if report.alarms_open %} class="warn"{% endif %}>{{ report.alarms_open }}{% if report.alarms_critical %} ({{ report.alarms_critical }} kritiske){% endif %}</b></div>
       <div class="row"><span>Domæner / keywords / monitors</span><b>{{ report.domains }} / {{ report.keywords }} / {{ report.monitors }}</b></div>
       <div class="row"><span>Seneste domænetjek</span><b>{{ (report.last_domain_check or '—')[0:16] }}</b></div>
       <div class="row"><span>Seneste crawl</span><b>{{ (report.last_crawl or '—')[0:16] }}</b></div>
@@ -6664,7 +7048,7 @@ cat << 'EOF_LOGIN' > "$PROJECT_DIR/app/templates/login.html"
     </div>
     {% endif %}
     <p class="foot">Adgangskoder gemmes som PBKDF2-SHA256-hash. Sessionen varer 30 dage.<br>
-      Nye brugere inviteres af en administrator — invitationen kommer paa mail.</p>
+      Standardbrugeren oprettes ved opstart fra CC_ADMIN_EMAIL + CC_ADMIN_PASSWORD i <code>.env</code>.</p>
 </div>
 </body>
 </html>
@@ -6844,7 +7228,7 @@ EOF_USERSVC
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.17 PRO
+# Command Center v7.18 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
@@ -6864,8 +7248,18 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 
 - **Budget og jobstatus på Cockpit (v7.20.0)** — kortet "API-budget denne måned" viser forbrug og loft for SerpAPI og AI, og "Planlagte jobs (heartbeat)" viser hvornår hvert job sidst kørte. Et job der holder op med at køre, eller fejler, giver én alarm.
 
+## Nyheder i v7.19
+
+- **Standardbruger fra `.env` (v7.18.0)** — er `users` tom, oprettes kontoen ved opstart fra `CC_ADMIN_EMAIL` + `CC_ADMIN_PASSWORD`, så et nyt deployment kan logge ind med det samme; `/setup` er reserve. Koden skal skiftes ved første login, og en rettet `.env` rører ikke en konto i brug.
+- **`.env` rydder sig selv (v7.19.1–v7.19.2)** — skifter standardbrugeren koden under Brugere, fjernes `CC_ADMIN_PASSWORD` fra `.env`, og dashboardet viser hvem og hvornår. En advarsel vises, hvis linjen alligevel er forældet.
+- **Autopilot-broen læser hele `/snapshot` (v7.19.0)** — selvtjek, cron-forsinkelse og pause-årsag i ét kald, reserve til `/stats` for ældre plugins, og CC holder WP-Cron i gang hvert 5. minut.
+
 ## Nyheder i v7.17
 
+- **Standardbruger ved deployment (v7.18)** — skriv `CC_ADMIN_EMAIL` + `CC_ADMIN_PASSWORD` i `.env`, så oprettes kontoen ved opstart, og du kan logge ind med det samme; opsætningssiden er ikke længere en del af et normalt deployment. Koden gemmes kun som PBKDF2-hash, kontoen oprettes med `must_change_password` (gul bjælke indtil du skifter den under fanen **Brugere**), og der seedes kun, når `users` er tom — en senere ændring af `.env` rører ikke en konto i brug. Er linjerne tomme, er `/setup` stadig reserven. Adgangskoden står kun i `.env` (gitignored), aldrig i repoet eller i loggen
+- **Dashboardet viser rydningen (v7.19.2)** — øverst står en blå bjælke med tidspunkt og navn, fx "CC_ADMIN_PASSWORD blev fjernet fra .env 5. november 2026 kl. 23:19 af henning", så du kan se filens tilstand uden at åbne den. Sætter du linjen tilbage i `.env`, skifter bjælken tekst og siger det, så den ikke påstår noget forkert; bliver koden samtidig forældet, vinder den røde advarsel. Kun navn og tidspunkt gemmes (i `settings` under `env_password_cleared`) — aldrig en kode — så rydningen også ses efter en genstart
+- **Linjen rydder sig selv (v7.19.1)** — skifter **du** koden under **Brugere**, tømmes `CC_ADMIN_PASSWORD` i `.env` automatisk (kun den linje; kommentarer og de andre nøgler står urørt). Så kan filen ikke komme til at love en kode, login afviser. Kan filen ikke skrives, ændres intet ved kontoen — så bliver advarslen fra v7.18.1 stående i stedet
+- **Advarsel når `.env`-koden er forældet (v7.18.1)** — skifter du koden under **Brugere**, passer `CC_ADMIN_PASSWORD` ikke længere. Så skriver opstartsloggen `[cc] advarsel: …`, advarslen ligger under **Alarmer**, og dashboardet viser en rød bjælke, indtil du retter eller fjerner linjen i `.env`. Kontoen røres ikke — login bruger den nye kode
 - **MCP-hærdning (v7.17.1)** — nøglen ligger ikke længere i klartekst i databasen: rækken i `settings` slettes i samme kald som dashboardet viser den (højst 15 min. hvis siden aldrig åbnes, og oprydningen fjerner resten). "Jeg har gemt nøglen"-knappen er derfor væk. Ukendte værktøjsnavne på `/mcp` havner nu også i auditten, så en nøgle der famler kan ses.
 - **MCP skriver nu også (fase 2)** — med `read,write` på nøglen kan en agent starte et site-crawl, oprette en monitor, løse en alarm og skrive en note (`start_crawl`, `add_monitor`, `resolve_alarm`, `add_note`). Hvert kald — også afviste — havner i en **audit pr. nøgle** (`api_audit`) med værktøj, varighed og fejl, som du ser i fanen **Brugere** og med `python3 scripts/api_key.py audit`. Værktøjerne har `readOnlyHint`/`destructiveHint`, så klienten kan advare før et kald.
 - **MCP-adgang (fase 1)** — agenter og editorer kan læse Command Center direkte. Under fanen **Brugere** opretter du en nøgle pr. klient (ingen fælles token); den vises én gang, gemmes kun som sha256 og kan tilbagekaldes enkeltvis. `POST /mcp` tilbyder syv læse-værktøjer: `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes` og `history`. Endpointet validerer `Origin`/`Host` (DNS-rebinding) og svarer `401` med `WWW-Authenticate` uden nøgle — se [docs/Command_Center_MCP.md](docs/Command_Center_MCP.md).
@@ -6905,10 +7299,10 @@ Cockpit med opdaterings-panel og alarmer. Login-siden og alle 14 faner ligger i 
 
 ## Login & opsætning
 
-1. `cp .env.example .env` og udfyld nøgler
+1. `cp .env.example .env` og udfyld nøgler — bl.a. `CC_ADMIN_EMAIL` + `CC_ADMIN_PASSWORD` til standardbrugeren, så den findes efter deployment
 2. `./run.sh` — scriptet udskriver den adresse appen lytter på (samt LAN-IP når `CC_HOST=0.0.0.0`)
-3. Åbn adressen: **første besøg opretter din bruger** (`/setup`) — derefter log ind med e-mail + adgangskode. Der er ingen token i `.env`.
-4. Nye brugere inviteres på mail, og sletning/adgangskode-skift klares under fanen **Brugere** (kræver `SMTP_HOST` + `SMTP_FROM`); fra serveren kan samme invitation sendes med `python3 scripts/invite.py bruger@ditfirma.dk` — og med `--print` udskrives mailen i stedet, så den kan sendes fra en anden mailkonto når SMTP ikke er sat op. Scriptet tager én adresse ad gangen og afviser eksempel-adresser som `navn@domaene.dk`, så en tastefejl ikke bliver en bruger
+3. Åbn adressen: **standardbrugeren oprettes ved opstart**, så du logger ind med e-mail + adgangskode med det samme (koden fra `.env` skal skiftes under fanen **Brugere** ved første login). Er de to linjer tomme, opretter første besøg brugeren via `/setup` i stedet — det er reserven. Der er ingen token i `.env`.
+4. Nye brugere inviteres på mail, og sletning/adgangskode-skift klares under fanen **Brugere** (kræver `SMTP_HOST` + `SMTP_FROM`); fra serveren kan samme invitation sendes med `python3 scripts/invite.py navn@domaene.dk` — og med `--print` udskrives mailen i stedet, så den kan sendes fra en anden mailkonto når SMTP ikke er sat op. Scriptet tager én adresse ad gangen og afviser eksempel-adresser som `navn@domaene.dk`, så en tastefejl ikke bliver en bruger. Helt uden mail kan brugeren oprettes direkte med `python3 scripts/user_create.py navn@domaene.dk --username humle91` (koden skrives skjult og skal være min. 8 tegn)
 5. (VPS) kør bag reverse proxy med TLS, eller brug `deploy/command-center.service` + SSH-tunnel
 6. Vil du have en agent på? Opret en nøgle under **Brugere → MCP-adgang** og peg klienten på `https://<din-adresse>/mcp` (se nedenfor)
 
@@ -6937,10 +7331,12 @@ curl -s https://<din-adresse>/mcp -H "Authorization: Bearer cc_..." \
 
 ## Ultra.cc / nginx (reverse proxy)
 
-1. `.env`: udfyld nøgler, sæt `CC_PUBLIC_URL=https://<din-adresse>`, lad `CC_HOST=127.0.0.1` og `CC_FORWARDED_ALLOW_IPS=127.0.0.1`
+1. `.env`: `cp .env.example .env` og udfyld nøglerne. Sæt `CC_PUBLIC_URL` til **præcis** den adresse du åbner i browseren — med `https://`, uden anførselstegn og uden sti (`CC_PUBLIC_URL=https://humle91.ultra.cc`). Lad `CC_HOST=127.0.0.1` og `CC_FORWARDED_ALLOW_IPS=127.0.0.1` stå. `install.sh` skriver kun `.env.example`, og opdateringer rører aldrig `.env` — så linjen forbliver tom, indtil du selv udfylder den
 2. Start appen: `./run.sh`, eller `deploy/command-center.user.service` med `systemctl --user enable --now command-center`
 3. Læg `deploy/nginx-command-center.conf` ind i den `server { }` du bruger (Ultra.cc: `~/.apps/nginx/proxy.d/`), og genindlæs nginx
-4. Åbn `CC_PUBLIC_URL` — første besøg opretter din bruger
+4. Åbn `CC_PUBLIC_URL` — standardbrugeren fra `.env` kan logge ind med det samme (er linjerne tomme, opretter første besøg din bruger via `/setup`)
+
+`CC_PUBLIC_URL` styrer login-linket i `scripts/update.sh` og `scripts/user_create.py`, adressen i invitationsmailen og Host-tjekket på `/mcp`. Tjek med `bash scripts/update.sh --check`: står der `127.0.0.1` som login-adresse, er linjen tom eller skrevet forkert. Er `/mcp` utilgængelig med `421`, er det samme linje — værten skal matche ord for ord, og et sæt anførselstegn omkring værdien er nok til at ødelægge den.
 
 Det skal med i proxy-blokken:
 
@@ -6956,7 +7352,7 @@ Panelet i Cockpit sammenligner installeret commit med seneste commit på `main`:
 - **Tjek for nye commits** (`POST /update/check`) — viser SHA, dato og commit-besked, eller den præcise fejl (manglende token, 401/403, 404). Kører også automatisk kl. 05:00.
 - **Opdater** (`POST /update/apply`) — tager en `pre-update`-backup af databasen, henter commit-tarballen og skriver **kun** projektets filer (`app/`, `scripts/`, `deploy/`, requirements, start-scripts, `install.sh`, Dockerfile, compose, `.env.example`). `.env`, databasen og `..`-stier røres ikke.
 - **Alt i ét hug**: er `requirements.txt` ændret, køres `pip install -r` automatisk, og appen **genstarter sig selv** ~1,5 s efter svaret (systemd-unit, ellers `scripts/restart.sh` med pidfile + `run.sh`). Fjern fluebenet "genstart" i panelet, eller sæt `UPDATE_AUTO_RESTART=0`, for at genstarte manuelt. `UPDATE_RESTART_CMD` overstyrer kommandoen (fx din egen supervisor).
-- **Fra terminalen**: `bash scripts/update.sh` gør hele kæden (tjek → filer → requirements → genstart) og venter til `/health` svarer igen; `--check` tjekker kun, `--no-restart` springer genstarten over. `bash scripts/restart.sh` genstarter uden at opdatere.
+- **Fra terminalen**: `bash scripts/update.sh` gør hele kæden (tjek → filer → requirements → genstart) og venter til `/health` svarer igen; `--check` tjekker kun, `--no-restart` springer genstarten over. Øverst viser scriptet **tre** versioner ved siden af hinanden: den der **kører nu** (fra `/health`), den **filerne** indeholder (`app/main.py`), og den **installatøren** vil skrive (`install.sh`s indlejrede `app/main.py`) — plus login-adressen fra `CC_PUBLIC_URL`. `bash scripts/update.sh --version` er den samme kontrol som rent svar: kode 0 kun når alle tre stemmer, ellers kode 1 med en linje om hvad der er galt. Opdateringen bruger kontrollen selv: er `install.sh` på disken ældre end koden, skriver den **ingen** filer — den stopper med kode 7 og siger, at installatøren skal hentes fra git først (`git checkout -- install.sh`). `bash scripts/restart.sh` genstarter uden at opdatere.
 - Status som JSON: `GET /api/update` (inkl. `restart_mode` og `auto_restart`). Kræver `GITHUB_TOKEN` (privat repo). `/self-update` findes stadig som alias for `/update/apply`.
 
 ## Steamgears Autopilot-bro (WordPress-plugin 7.5+)
@@ -6965,8 +7361,10 @@ Command Center og WordPress-pluginnet **Steamgears Autopilot** snakker sammen vi
 (`/wp-json/sgap/v1`) med de samme `WP_URL` / `WP_USER` / `WP_APP_PASSWORD` som WordPress-push
 (`WP_USER` skal være administrator).
 
-- **Status hver 30. min** (fanen Social → "Steamgears Autopilot"): kø, kladder der venter på godkendelse, og udgivet/klik/ordrer/omsætning pr. kanal de sidste 30 dage
-- **Alarmer** når noget ændrer sig: nye fejlede opslag, nye kladder, eller pluginnet svarer ikke
+- **Status hver 30. min** (fanen Social → "Steamgears Autopilot"): kø, kladder der venter på godkendelse, og udgivet/klik/ordrer/omsætning pr. kanal de sidste 30 dage. Hentes fra pluginnets `GET /snapshot` (ét kald) med pluginversion, pause-årsag, WP-Cron-forsinkelse og pluginnets eget selvtjek; ældre plugins uden `/snapshot` læses via `/stats` + `/drafts` som før
+- **Alarmer** når noget ændrer sig: nye fejlede opslag, nye kladder, nye problemer i pluginnets selvtjek, manglende tabeller, eller pluginnet svarer ikke
+- **WP-Cron holdes i gang**: CC kalder `wp-cron.php` hvert 5. min, så pluginnets job (udgivelse, selvtjek) kører til tiden, selvom sitet har få besøg
+- **Pluginnet ser CC**: hvert kald sender `X-Command-Center: <version>`; Steamgears Autopilot 7.33+ viser "Command Center connected" i sit selvtjek og melder et problem, hvis CC har været tavs i over 2 timer
 - **"→ Autopilot"** sender et opslag som kladde til pluginnet (godkendes i WordPress under Steamgears → AI Drafts). Opslaget sendes **kun én gang**: rækken låses før kaldet, så et dobbeltklik eller et genforsøg ikke giver to kladder. Svarer WordPress ikke (timeout), bliver status "sendt? (svar udeblev)" — tjek AI Drafts, før du sender igen
 - **Log ind på Command Center fra WordPress** — knappen **🔑 Log ind på Command Center** i fanen Social lægger et engangslink i pluginnet (`POST /login-link` på `sgap/v1`, gemt som option), og knappen i WordPress åbner det. Linket logger dig ind på CC uden adgangskode: koden gemmes kun som sha256, virker **én gang** og udløber efter 10 minutter. Er den brugt eller udløbet, forklarer login-siden det — så en gammel knap ikke ser ud som et brudt login. Retningen er stadig CC → site
 - Slå til/fra under Moduler ("Autopilot-bro"). Retningen er altid CC → site, så CC kan blive på 127.0.0.1
@@ -6984,12 +7382,13 @@ skriver alle filer (inkl. `deploy/nginx-command-center.conf` og `deploy/command-
 
 ## Drift & test
 
-- **Cron**: domæne-tjek hver 6. time, keyword-tjek 06:00, autopilot 05:15, oprydning 04:30, DB-backup 04:40, GitHub-tjek 05:00, Autopilot-bro hver 30. min
+- **Cron**: domæne-tjek hver 6. time, keyword-tjek 06:00, autopilot 05:15, oprydning 04:30, DB-backup 04:40, GitHub-tjek 05:00, Autopilot-bro hver 30. min, WP-Cron-ping hvert 5. min
 - **Backup**: `app/backups/cc-daglig-*.db` (14 gemmes) + `cc-pre-update-*.db` før hver opdatering. Gendan fra Moduler-fanen (skriv `GENDAN`)
 - **Health**: `/health` (200, eller 503 ved kritisk DB/disk-tilstand) viser også månedens API-forbrug
 - **Tests**: `python3 tests/test_v8_features.py` (enhedstests), `bash tests/ci_check.sh` (boot + alle sider + auth + WordPress-bro + link-audit)
 - **Screenshots**: `python3 scripts/screenshots.py` tager login-siden og alle 14 faner ind i `docs/img/` (kræver `pip install playwright` + `python3 -m playwright install chromium`; kør mod en kørende app med `--base/--user/--password`). CI advarer, hvis billederne er ældre end dashboard-skabelonen
 - **Fælles agentregler i alle repoer**: `bash scripts/agents_md_rollout.sh --dry-run` viser planen, og uden `--dry-run` lægger den `AGENTS.md` ind i alle dine repoer som branch + PR (kræver `gh` logget ind). En eksisterende fil overskrives kun med `--overwrite`, og `main` røres aldrig
+- **Scripts i `scripts/`**: alle otte har samme header — `navn - formål`, `Brug:`, `Kraever:` og `Sidst aendret` — og er eksekverbare. `bash scripts/update.sh -h` (og `--help` på de øvrige med flag) læser headeren, så hjælpen ikke kan drive fra scriptet. Versionsnumre står ikke i headere: de læses fra `APP_VERSION` i `app/main.py`
 
 ## Alarmer (v7.12)
 
@@ -7009,7 +7408,12 @@ testalarmer og GitHub-opdatering.
 Ved hver opstart skriver appen version og de nyeste aendringer til skaermen, til
 `app/data/startup.log` og til `settings.last_start` - og de samme nyheder er med i `GET /health`.
 `run.sh`, `run.bat`, `scripts/restart.sh`, `scripts/update.sh` og `install.sh` viser version + nyheder,
-saa man ikke skal huske hvilken version der kører.
+saa man ikke skal huske hvilken version der kører. `scripts/update.sh` går to skridt videre: den viser
+versionen på disken, den version processen svarer med i `/health` **og** den version `install.sh` vil
+skrive, advarer hvis de er forskellige, og skriver login-adressen (`CC_PUBLIC_URL` + `/login`, dvs. den
+adresse nginx videresender). `bash scripts/update.sh --version` giver samme kontrol som rent svar:
+kode 0 kun når alle tre stemmer, ellers kode 1 med en linje om hvad der er galt — så en gammel
+`install.sh`, der ville overskrive koden med en ældre version, bliver opdaget før man kører den.
 
 Login logger nu IP: `users.last_login_ip`/`last_login_at`, `sessions.ip` og tabellen `login_attempts`
 (ok/fejl, 30 dage) - vist under fanen **Brugere** sammen med de seneste forsoeg. IP'en hentes fra
@@ -7063,9 +7467,10 @@ EOF_README
 
 echo "📄 scripts/smoke_test.sh..."
 cat << 'EOF_RESTART' > scripts/restart.sh
-#!/bin/bash
-# Genstarter Command Center. Bruges af opdateringen (POST /update/apply) og kan koeres manuelt.
+#!/usr/bin/env bash
+# restart.sh - genstarter Command Center. Bruges af opdateringen (POST /update/apply) og manuelt.
 #
+# Brug:
 #   bash scripts/restart.sh              # genstart med det samme
 #   bash scripts/restart.sh --delay 2    # vent 2 s (saa HTTP-svaret kan naa frem)
 #
@@ -7074,6 +7479,8 @@ cat << 'EOF_RESTART' > scripts/restart.sh
 #   2. systemd --user unit "command-center"  (Ultra.cc)
 #   3. systemd system unit "command-center"
 #   4. pidfile app/data/cc.pid + ./run.sh    (naar appen er startet med ./run.sh)
+# Kraever: intet ud over bash - det foerste trin der findes, bliver brugt.
+# Sidst aendret: 4. november 2026
 set -u
 cd "$(dirname "$0")/.."
 
@@ -7147,13 +7554,23 @@ banner
 exit 0
 EOF_RESTART
 cat << 'EOF_UPDATE' > scripts/update.sh
-#!/bin/bash
-# Opdaterer Command Center fra GitHub: tjek -> filer (med DB-backup) -> requirements -> genstart.
-# Koerer appens opdateringsfunktioner direkte i venv'en, saa der kraves hverken token eller login.
+#!/usr/bin/env bash
+# update.sh - opdaterer Command Center fra GitHub: tjek -> filer (med DB-backup) -> requirements ->
+# genstart.
 #
+# Brug:
 #   bash scripts/update.sh              # opdater + genstart, vent til /health svarer
 #   bash scripts/update.sh --no-restart # opdater, men genstart selv bagefter
 #   bash scripts/update.sh --check      # kun tjek, skriv intet
+#   bash scripts/update.sh --version    # sammenlign de tre versioner og stop med kode 1 ved uenighed
+#
+# Viser foerst hvilken version der koerer (/health) ved siden af filernes og installatoerens, og hvor
+# man logger ind (CC_PUBLIC_URL via nginx). --version er den strenge kontrol: den stopper med kode 1,
+# hvis en gammel install.sh eller en manglende genstart kan snige sig ind. Opdateringen selv skriver
+# intet, hvis install.sh paa disken er aeldre end koden (kode 7) - hent den fra git foerst.
+# Koerer appens funktioner direkte i venv'en - ingen token eller login.
+# Kraever: venv (./venv) og GITHUB_TOKEN i .env til opdateringen; --version kraever ingen af dem.
+# Sidst aendret: 4. november 2026
 set -u
 cd "$(dirname "$0")/.."
 
@@ -7161,20 +7578,18 @@ if [ -f .env ]; then
     set -a; source .env; set +a
 fi
 
+# Hjaelpen er header-kommentarerne efter shebang: retter man dem, retter man hjaelpen.
+usage() { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; }
+
 MODE="apply"
 case "${1:-}" in
     --no-restart) MODE="apply-no-restart" ;;
     --check) MODE="check" ;;
-    -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --version) MODE="version" ;;
+    -h|--help) usage; exit 0 ;;
     "") ;;
-    *) echo "Ukendt argument: $1 (brug --check, --no-restart eller -h)" >&2; exit 64 ;;
+    *) echo "Ukendt argument: $1 (brug --version, --check, --no-restart eller -h)" >&2; exit 64 ;;
 esac
-
-PY="./venv/bin/python"
-if [ ! -x "$PY" ]; then
-    echo "❌ venv mangler ($PY) - start appen en gang med ./run.sh foerst." >&2
-    exit 2
-fi
 
 HOST="${CC_HOST:-127.0.0.1}"
 PORT="${CC_PORT:-8000}"
@@ -7183,6 +7598,125 @@ case "$HOST" in
     *) PROBE="$HOST" ;;
 esac
 BASE="http://$PROBE:$PORT"
+
+# ---------- Version: filer, proces og installatoer ----------
+# Tre kilder kan vaere uenige, og alle tre kan snige sig ind: app/main.py (det der ligger paa disken),
+# /health (den proces der svarer lige nu) og install.sh (installatoeren nogen maaske koerer bagefter og
+# overskriver det hele med). --version tjekker alle tre og stopper med kode 1 ved uenighed.
+RUN=""; FILE=""; INST=""
+login_url() { local b="${CC_PUBLIC_URL:-$BASE}"; echo "${b%/}/login"; }
+file_version() { sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' app/main.py 2>/dev/null | head -1; }
+# Versionen af den proces der svarer - laeses ud af JSON uden python, saa --version ogsaa virker uden venv.
+running_version() {
+    curl -sf --max-time 3 "$BASE/health" 2>/dev/null \
+        | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+}
+# Versionen installatoeren vil skrive: APP_VERSION i install.sh's indlejrede app/main.py. Linjen staar
+# i spalte 0 i den indlejrede fil, saa den findes uden at parse heredocs (og uden at skrive
+# heredoc-markoeren her - den streng leder paritetstjekket i CI efter).
+installer_version() {
+    [ -f install.sh ] || return 0
+    sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' install.sh 2>/dev/null | head -1
+}
+read_versions() { RUN="$(running_version)"; FILE="$(file_version)"; INST="$(installer_version)"; }
+# 0 hvis $1 er nyere end $2 - sammenlignet tal for tal, saa 7.9 er aeldre end 7.17.
+ver_gt() {
+    awk -v a="$1" -v b="$2" 'BEGIN{n=split(a,x,".");m=split(b,y,".");k=(n>m?n:m)
+        for(i=1;i<=k;i++){if(x[i]+0>y[i]+0)exit 0; if(x[i]+0<y[i]+0)exit 1} exit 1}'
+}
+# Etiketterne har selv deres polstring (13 tegn): printf '%-13s' taelier bytes, ikke tegn, saa de
+# danske bogstaver skubbede kolonnen ud af flugt.
+ver_row() { if [ -n "$2" ]; then echo "   $1v$2   ($3)"; else echo "   $1ukendt   ($3)"; fi; }
+version_rows() {
+    ver_row "kører nu:    " "$RUN" "processen, fra $BASE/health"
+    ver_row "filer:       " "$FILE" "app/main.py på disken"
+    if [ -f install.sh ]; then
+        ver_row "installatør: " "$INST" "install.sh, indlejret app/main.py"
+    else
+        echo "   installatør:  ingen install.sh i denne mappe"
+    fi
+}
+# Forklarer uenigheden i klartekst; ingen linjer betyder at alt stemmer. Kode 1 = der er en forskel.
+version_diff() {
+    local bad=0
+    if [ -z "$RUN" ]; then
+        echo "   forskel:     processen svarer ikke på $BASE/health - kan ikke sammenlignes"
+        bad=1
+    elif [ -n "$FILE" ] && [ "$RUN" != "$FILE" ]; then
+        if ver_gt "$FILE" "$RUN"; then
+            echo "   forskel:     filerne er nyere end processen - genstart mangler (bash scripts/restart.sh)"
+        else
+            echo "   forskel:     processen kører nyere kode end filerne - filerne er rullet tilbage, kør opdateringen igen"
+        fi
+        bad=1
+    fi
+    if [ -n "$INST" ] && [ -n "$FILE" ] && [ "$INST" != "$FILE" ]; then
+        if ver_gt "$INST" "$FILE"; then
+            echo "   forskel:     install.sh er nyere end koden - kør den for at skrive de nye filer"
+        else
+            echo "   forskel:     install.sh er ældre (v$INST) end koden (v$FILE) - kør den IKKE; den overskriver app/main.py med den gamle version. Hent den fra git (git checkout -- install.sh eller git pull); opdateringen nægter selv at skrive, indtil den er rettet."
+        fi
+        bad=1
+    fi
+    return $bad
+}
+show_versions() {
+    read_versions
+    echo "Command Center"
+    version_rows
+    version_diff || true
+    if [ -n "${CC_PUBLIC_URL:-}" ]; then
+        echo "   login:       $(login_url)   (via nginx)"
+    else
+        echo "   login:       $(login_url)   (lokal adresse - sæt CC_PUBLIC_URL i .env for den offentlige)"
+    fi
+    echo
+}
+# Den strenge kontrol: kode 0 kun naar alle tre kilder svarer med samme version.
+version_check() {
+    read_versions
+    echo "Command Center - versionskontrol"
+    version_rows
+    if version_diff; then
+        [ -n "$FILE" ] || { echo "❌ Kan ikke læse APP_VERSION fra app/main.py."; exit 1; }
+        echo "✅ Alle kilder stemmer: v$FILE."
+        exit 0
+    fi
+    echo
+    echo "❌ Versionskontrol fejlede - se 'forskel' ovenfor."
+    exit 1
+}
+
+if [ "$MODE" = "version" ]; then
+    version_check
+fi
+
+# ---------- Guard foer skrivning: en installatoer der ruller koden tilbage ----------
+# install.sh skriver app/main.py med den version der ligger indlejret i den selv. Er den aeldre end
+# koden paa disken, rulles koden tilbage hvis nogen koerer den. Derfor skrives der ikke filer oven paa
+# en saadan installation: stop foerst, ret installatoren, koer igen. Kode 7 = naegtet, intet er roert.
+installer_guard() {
+    local inst file
+    inst="$(installer_version)"; file="$(file_version)"
+    [ -n "$inst" ] && [ -n "$file" ] || return 0
+    ver_gt "$file" "$inst" || return 0
+    echo "❌ Stopper før der bliver skrevet filer: install.sh på disken er ældre (v$inst) end koden (v$file)."
+    echo "   Den installatør ville overskrive app/main.py med v$inst, hvis nogen kørte den nu."
+    echo "   Hent den rette version først:   git checkout -- install.sh   (eller git pull)"
+    echo "   Intet er ændret - kør scriptet igen bagefter. (--check og --version skriver intet og virker stadig.)"
+    exit 7
+}
+case "$MODE" in
+    apply|apply-no-restart) installer_guard ;;
+esac
+
+PY="./venv/bin/python"
+if [ ! -x "$PY" ]; then
+    echo "❌ venv mangler ($PY) - start appen en gang med ./run.sh foerst." >&2
+    exit 2
+fi
+
+show_versions
 
 # Et felt ud af JSON paa stdin ("None" -> tom)
 field() { "$PY" -c 'import json,sys;d=json.load(sys.stdin);v=d.get(sys.argv[1]);print("" if v is None else v)' "$1"; }
@@ -7223,7 +7757,7 @@ if [ "$(printf '%s' "$RESULT" | field ok)" != "True" ]; then
 fi
 
 if [ "$MODE" = "apply-no-restart" ]; then
-    echo "✅ Filer opdateret. Genstart selv: bash scripts/restart.sh"
+    echo "✅ Filer opdateret til v$(file_version) (processen kører stadig den gamle). Genstart selv: bash scripts/restart.sh"
     exit 0
 fi
 
@@ -7234,21 +7768,24 @@ for _ in $(seq 1 60); do
     sleep 1
     if curl -sf -o /dev/null --max-time 3 "$BASE/health"; then
         echo "✅ Opdateret og genstartet - $BASE svarer igen."
+        echo "   kører nu:    v$(running_version)"
+        echo "   login:       $(login_url)"
         exit 0
     fi
 done
 echo "⚠️  Appen svarede ikke inden 60 s. Se logs: journalctl --user -u command-center (eller nohup.out)" >&2
 exit 6
-
-# CC_BANNER: version + nyheder efter en gennemfoert opdatering
-V="$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' app/main.py 2>/dev/null | head -1)"
-N="$(sed -n 's/^NEWEST_LINE = "\(.*\)"/\1/p' app/main.py 2>/dev/null | head -1)"
-echo "   Version:     v${V:-?} - ${N:-se app/data/startup.log}"
 EOF_UPDATE
 cat << 'EOF_SMOKE' > "$PROJECT_DIR/scripts/smoke_test.sh"
-#!/bin/bash
-# Command Center smoke-test - koer efter install eller self-update.
-# Brug: bash scripts/smoke_test.sh   (CC_HOST/CC_PORT overstyrer adressen)
+#!/usr/bin/env bash
+# smoke_test.sh - tjekker at appen svarer efter install eller self-update.
+#
+# Brug:
+#   bash scripts/smoke_test.sh                           # 127.0.0.1:8000
+#   CC_HOST=0.0.0.0 CC_PORT=8000 bash scripts/smoke_test.sh
+#
+# Kraever: en koerende app. CC_PUBLIC_URL vises som den offentlige adresse, hvis den er sat.
+# Sidst aendret: 4. november 2026
 HOST="${CC_HOST:-127.0.0.1}"
 PORT="${CC_PORT:-8000}"
 PUBLIC="${CC_PUBLIC_URL:-}"

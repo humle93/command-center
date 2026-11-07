@@ -19,6 +19,7 @@ dashboard (Alpine.js), APScheduler-jobs og integrationer til SerpAPI, aimlapi, W
 python3 tests/test_v8_features.py    # in-process enhedstests
 bash tests/ci_check.sh              # boot + alle sider + auth + WordPress-bro + link-audit
 bash scripts/update.sh --check      # GitHub-opdatering (kraever GITHUB_TOKEN i .env)
+bash scripts/update.sh --version    # filer vs. koerende proces vs. install.sh (kode 1 ved uenighed)
 ```
 
 Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/workflows/ci.yml`)
@@ -64,6 +65,153 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
   ikke kan vise hver sin sandhed.
 - Tests: 7 nye checks i `tests/test_v8_features.py` og 2 i `tests/ci_check.sh`; fake-WP har fået
   `/snapshot` og gemmer `X-Command-Center` i `<state>.cc`, så CI ser headeren.
+### Rydningen vises i dashboardet (5. november, v7.19.2)
+- **Baggrund:** efter v7.19.1 var linjen væk — men der var ingen steder at se, at det var sket med vilje, eller hvem der skiftede koden.
+- **Nyt:** `clear_env_admin_password()` gemmer `{at, by, account}` i `settings` under `env_password_cleared` (kun navn og tidspunkt, aldrig koden), og `env_password_notice()` læser den tilbage til en blå bjælke øverst i dashboardet: “CC_ADMIN_PASSWORD blev fjernet fra .env 5. november 2026 kl. 23:19 af henning — filen kan ikke blive forældet”.
+- **Ærlig tilstand:** `env_admin_password_in_file()` læser `.env` selv (ikke miljøvariablen, der blev læst ved opstart), så en linje, der er sat tilbage, bliver sagt højt: baren skifter til “står i .env igen”. Forældet kode overlader baren til den røde advarsel, og uden en gemt rydning (fx ny installation) vises den ikke.
+- **Verifikation:** `tests/test_v8_features.py` har ni “visning:”-tjek (navn/tidspunkt, ingen koder i teksten, blå bjælke i HTML, dansk tidsformat, tilbageført linje, ingen rydning, i stykker skrevet række).
+- **Bemaerk:** tidsformatet er `danish_time()` (“5. november 2026 kl. 23:19”), som kan bruges andre steder i UI'et.
+
+### `.env` rydder sig selv ved kodeskift (5. november, v7.19.1)
+- **Baggrund:** advarslen i v7.18.1 fortalte, at linjen var forældet — men den blev stående, til nogen
+  rettede den. Nu fjerner appen årsagen selv.
+- **Nyt:** `POST /users/password` kalder `clear_env_admin_password(me["email"])`. Den gør kun noget, når
+  kontoen er `CC_ADMIN_EMAIL`, og når den gemte hash **ikke** længere matcher `.env`-koden (så et skift
+  til samme kode lader filen være). Den tømmer `CC_ADMIN_PASSWORD=` med regex på nøglen, skriver via
+  `ENV_PATH + ".tmp"` og `os.replace` (filmode bevaret, `\r\n` bevaret), sætter miljøvariablen til tom og
+  nulstiller `_ENV_PASSWORD_STATE`. Status: `fjernet`, `passer-endnu`, `ikke-standardbruger`,
+  `ingen-linje`, `ingen-fil`, `fejl: …`.
+- **Sikkerhed:** kun den ene linje ændres — kommentarer og de andre nøgler er urørte, og hverken den
+  gamle eller den nye kode ender i filen, loggen eller alarmen. Fejler skrivningen (fx skrivebeskyttet
+  `.env` i en container), kommer der en advarsel i `alarms`, og kodeskiftet gennemføres alligevel — så
+  bliver v7.18.1-bjælken stående som fallback.
+- **Test:** ni checks i `tests/test_v8_features.py` (tomning, urørte nøgler/kommentarer, ingen kode i
+  filen, advarsel + bjælke væk, andre brugere, uændret kode, skrivefejl → alarm).
+
+### Autopilot-broen: hele `/snapshot`, WP-Cron-ping og `X-Command-Center` (5. november, v7.19.0)
+- **Beslutning:** koblingen til Steamgears Autopilot forbliver **envejs** (CC → site, roadmappens punkt
+  #5 i steamgears-site): CC læser `GET /snapshot` og sender kladder med `POST /drafts`. Ingen pairing-kode
+  og intet kald fra sitet til CC, som stadig kun lytter på 127.0.0.1.
+- **Nyt i `sgap_sync()`:** prøver `/snapshot` først (`sgap_from_snapshot()` oversætter til det gamle
+  format + `version`, `paused_because`, `cron_lag_minutes`, `problems`, `self_check_at`,
+  `missing_tables`, `source`). Ved 404 bruges `sgap_from_stats()` (det gamle `/stats` + `/drafts`).
+  Lagring og alarmer ligger i `sgap_store()`; nye selvtjek-problemer og manglende tabeller alarmerer kun
+  ved ændring i forhold til forrige snapshot.
+- **`sgap_api()`** sender altid `X-Command-Center: APP_VERSION`. Pluginnet 7.33+ noterer det
+  (`sgap_cc_seen`) og melder i sit selvtjek, når CC har været tavs i over 2 timer.
+- **`job_wp_cron()`** kalder `wp-cron.php?doing_wp_cron` hvert 5. min (samme betingelse som broen),
+  så pluginnets job ikke venter på besøgende. Fejl er tavse med vilje.
+- **Dashboardet** viser pluginversion, pause-årsag, cron-forsinkelse (≥ 30 min) og selvtjek-listen.
+- **Tests:** `tests/test_v8_features.py` (oversættelse, sortering, tomt svar, ping-sti og header) og
+  `tests/ci_check.sh` (snapshot-kilde, version, header, dashboard, alarm én gang, reserve til `/stats`).
+  `tests/fake_wp.py` har fået `/snapshot`, `wp-cron.php`, tilstanden `old` og logger headeren.
+
+### Advarsel når `.env`-koden er forældet (5. november, v7.18.1)
+- **Baggrund:** `CC_ADMIN_PASSWORD` bruges kun ved seed. Skiftes koden under **Brugere**, lover `.env`
+  stadig den gamle — og man kunne fristes til at "rette" kontoen tilbage til den.
+- **Nyt:** `env_password_mismatch()` verificerer koden mod den gemte PBKDF2-hash og returnerer en
+  advarselstekst med e-mailen (aldrig koden). Svaret caches på `(email, sha256(kode), hash)`, så
+  dashboardet ikke betaler 240k iterationer ved hvert sidevisning. `warn_stale_env_password()` kaldes i
+  lifespan og lægger advarslen i `alarms` (dedupe som de andre) + `[cc] advarsel: …` i opstartsloggen.
+- **Dashboardet:** `env_password_warning` i konteksten giver en **rød** bjælke over den gule
+  `must_change_password`-bjælke. Advarslen ændrer intet ved kontoen.
+- **Tests:** `tests/test_v8_features.py` (seks checks: advarsel, e-mail i teksten, ingen kode i teksten,
+  baren, alarmen, og at begge forsvinder når koden passer) + `tests/ci_check.sh` (ingen falsk advarsel
+  uden `CC_ADMIN_PASSWORD`).
+
+### Standardbruger ved deployment (5. november, v7.18)
+- **Baggrund:** et nyt deployment startede på `/setup` og krævede, at nogen oprettede den første
+  bruger i browseren. Ønsket var en standardkonto, der findes efter deployment, så login er det
+  eneste, man møder.
+- **Nyt:** `seed_standard_user()` kaldes i `lifespan` (før scheduler og selvtest). Er `users` tom, og
+  har `.env` både `CC_ADMIN_EMAIL` og `CC_ADMIN_PASSWORD`, oprettes kontoen med
+  `must_change_password=1`, så koden fra `.env` skal skiftes ved første login. Status skrives til
+  opstartsloggen (`oprettet` / `findes` / `mangler` / `fejl: …`); en afvist linje giver en advarsel i
+  `alarms` i stedet for en tavs opstart.
+- **Ingen secrets i repoet:** koden læses kun fra miljøet/`.env`, gemmes som PBKDF2-hash og skrives
+  aldrig til log. `install.sh` skriver fortsat kun `.env.example`.
+- **Seed kun ved tom tabel:** en rettet `.env`-linje rører ikke en konto i brug (den skal skiftes i
+  UI'et eller med `scripts/user_create.py`), så en gammel kode i `.env` ikke kan låse nogen ude.
+- **`/setup` er reserve:** uden de to linjer opretter første besøg brugeren som før, og siden lukker
+  sig selv, så snart der findes en bruger. `login.html` er skrevet om til ét login-formular med en
+  kort note om `.env`-linjerne i stedet for en separat opsætningsmode.
+- **Baren i dashboardet:** den gule bjælke ved `must_change_password` siger nu både "fra
+  invitationsmailen" og "eller CC_ADMIN_PASSWORD i .env", så en seedet konto ikke får at vide, at
+  koden kom med posten.
+- **Tests:** `tests/test_v8_features.py` dækker seed, login uden `/setup`, hash (ingen klartekst),
+  `must_change_password`, at en rettet `.env` ikke overskriver, og at en ugyldig linje giver alarm;
+  `tests/ci_check.sh` tjekker at `/setup` svarer 303, når brugeren findes.
+
+### Migreringsplan for serveren `laser` (4. november)
+- **Nyt dokument:** [`docs/Command_Center_Migrering.md`](docs/Command_Center_Migrering.md) er arbejdsinstruksen
+  for at flytte `laser`s `~/command-center` fra `Steamgears-site` (v8.3) over på dette repo: fase 0-6,
+  stop-punkter, rollback, tjekliste og tidsestimat. Kun dokumentation — ingen kodeændring.
+- **Fastsat i planen:** frisk database (v8.3-skemaet er ikke garanteret kompatibelt), fast domæne i
+  stedet for `trycloudflare` (URL'en skifter ved hver genstart og `CC_PUBLIC_URL` styrer `/mcp`s
+  Host-tjek), og at `install.sh` altid skriver til `$HOME/command-center` — derfor skal den gamle mappe
+  flyttes asides før den nye flyttes ind.
+- **Efterprøvet:** guard-testen i dokumentets fase 4 er kørt i en isoleret kopi — `--version` gav kode 1,
+  `--no-restart` kode 7, og `app/main.py` havde samme `cksum` før og efter.
+- **Versioner:** planen er skrevet mod v7.17.2, men er efter rebase på main rettet til v7.19.1, og
+  første-login-trinnet nævner nu standardbrugeren fra `CC_ADMIN_EMAIL` + `CC_ADMIN_PASSWORD` (v7.18+).
+
+### Versionskontrol: filer, proces og installatør (4. november)
+- **Baggrund:** på en server lå en gammel `install.sh` (v7.9) i projektmappen, mens processen kørte
+  v8.3. At køre den installatør overskrev koden på disken med den gamle version — usynligt indtil
+  næste genstart. Paritetstjekket i CI fanger en installatør der ikke matcher repoet, men intet
+  sammenlignede *versionerne* i en kørende installation.
+- **Nyt:** `bash scripts/update.sh --version` sammenligner tre kilder — `app/main.py` på disken,
+  `/health` fra den kørende proces, og `APP_VERSION` i `install.sh`s indlejrede `app/main.py` — og
+  stopper med kode 1 ved uenighed med en `forskel`-linje der siger hvad der er galt (genstart
+  mangler / installatøren er ældre / filerne er rullet tilbage). Virker uden venv, token og netværk:
+  versionen læses med `sed` ud af `/health`, ikke med python.
+- `install.sh` henter nu sit versionsnummer fra sin egen indlejrede `app/main.py` i stedet for den
+  faste tekst på linje 5, så den ikke kan påstå en anden version end den skriver.
+- `tests/ci_check.sh` kører `--version` mod CI-serveren, så tjekket selv er dækket.
+- **Guarden i opdateringen:** `installer_guard()` kører i skrive-stierne (`apply` og `--no-restart`)
+  *før* venv-, token- og netværkstrinnet. Er `install.sh` ældre end `app/main.py`, skriver
+  opdateringen intet og stopper med **kode 7** (2 = venv, 3-6 = tjek/filer/genstart). `--check` og
+  `--version` skriver intet og går uden om guarden, så de kan bruges til at diagnosticere. Ingen
+  `--force`: vejen ud er `git checkout -- install.sh` (eller `git pull`), som beskeden siger.
+  `ci_check` tester både at opdateringen nægter (kode 7) og at den ikke rører `app/main.py`.
+- `scripts/update.sh` viser stadig de tre versioner øverst ved en rigtig opdatering, men fejler ikke
+  der: under en opdatering *skal* processen være ældre end filerne indtil genstarten.
+
+### `CC_PUBLIC_URL`: hvorfor den kan være tom (4. november)
+- **Årsag 1 (den hyppige):** `install.sh` skriver kun `.env.example` — den kopierer aldrig til
+  `.env` og spørger ikke om adressen — og self-update rører bevidst aldrig `.env`. En kopieret
+  skabelon har derfor `CC_PUBLIC_URL=` fra dag ét, uden at noget siger til.
+- **Årsag 2-4 (udfyldt, men virkningsløs), målt med `urlparse`:** `"https://x"` og `x` (uden scheme)
+  giver begge `hostname = None` → `/mcp` svarer `421` på alle ikke-lokale værter; en sti
+  (`https://x/app`) virker for `/mcp`, men login-linket bliver `…/app/login`.
+- **Tom betyder ikke usynlig:** `_mcp_host_allowed()` returnerer `True`, når `CC_PUBLIC_URL` er tom,
+  så Host-tjekket (DNS-rebinding) på `/mcp` slås helt fra. Det var ikke dokumenteret som en
+  konsekvens, kun som "lokal udvikling virker".
+- Retttet i dokumentationen: `.env.example` (format + hvad tom betyder), `README.md`,
+  `docs/Command_Center_Bruger_og_Systemmanual.md` (nyt afsnit + tabel pr. skrivefejl) og
+  `docs/Command_Center_MCP.md` (hvad man gør ved `421`). Ingen kodeændring — adfærden er den samme.
+
+### Scripts-mappen ryddet op (4. november)
+- Alle otte filer i `scripts/` har nu samme header: `navn - formål`, `Brug:`, `Kraever:` og
+  `Sidst aendret: 4. november 2026`. Fire bash-scripts skiftede `#!/bin/bash` til
+  `#!/usr/bin/env bash`, og `user_create.py` fik eksekverbar-bit (den var 644).
+- `bash scripts/update.sh -h` læser nu header-kommentarerne med `awk` i stedet for `sed -n '2,8p'`:
+  det faste interval printede `set -u` med og blev forkert, så snart headeren fik en linje mere.
+- Bevidst valg: **ingen versionsnumre i headere**. `APP_VERSION` læses dynamisk i `run.sh`,
+  `run.bat`, `restart.sh` og `update.sh`; en hardkodet version ville drive som roadmap-punkterne.
+  Datoen er et snapshot — `git log -1 -- scripts/<fil>` er sandheden.
+- `install.sh` er regenereret for `EOF_UPDATE`, `EOF_RESTART` og `EOF_SMOKE` (17/17 par matcher).
+
+### Drift: version, login-adresse og brugere fra terminalen (4. november)
+- `scripts/update.sh` viser nu øverst **hvilken version der kører** (fra `/health`, altså processen) ved
+  siden af versionen i filerne, advarer hvis de er forskellige ("genstart mangler"), og skriver
+  **login-adressen** (`CC_PUBLIC_URL` + `/login`, dvs. den adresse nginx videresender). Fejlen var, at
+  version-blokken nederst i scriptet lå **efter** alle `exit`-kald og derfor aldrig kørte; den er nu en
+  funktion (`show_versions`), der kaldes før tjekket og igen efter en genstart.
+- `scripts/user_create.py` (nyt): opretter en bruger direkte i DB'en med e-mail, `--username`,
+  `--password` (ellers skjult prompt to gange) og `--must-change`. Bruger `create_user()`, så reglen om
+  min. 8 tegn og PBKDF2-hashing er den samme som i UI'et. Ikke en del af `install.sh` (som `invite.py`
+  og `api_key.py`); filen kommer med ved første self-update.
 
 ### Adgang og brugere (v7.15)
 - Token-login (`APP_TOKEN`) er fjernet. Første besøg opretter bruger via `/setup` med **e-mail**;
@@ -182,7 +330,11 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
   `scripts/restart.sh` (systemd-unit → pidfile + `run.sh`). Slås fra med `UPDATE_AUTO_RESTART=0`;
   `UPDATE_RESTART_CMD` overstyrer kommandoen.
 - `scripts/update.sh` kører tjek → filer → requirements → genstart og venter på `/health`.
-  Den kalder funktionerne direkte i venv'en, så der kræves hverken token eller login.
+  Den kalder funktionerne direkte i venv'en, så der kræves hverken token eller login. Øverst viser den
+  kørende version (fra `/health`) + filernes version + login-adressen, så man ikke fejrer en opdatering
+  der aldrig blev genstartet.
+- `scripts/user_create.py <email> [--username x] [--password y] [--must-change]` opretter en bruger
+  uden invitation/SMTP; koden skal være min. 8 tegn.
 - Den gamle "hent `install.sh` og kør `bash`"-vej er fjernet.
 
 ### UI-audit og fremdrift

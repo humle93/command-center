@@ -26,7 +26,13 @@ check "auth: /setup created the first user" "$(q "SELECT email FROM users")" "ci
 check "auth: anonymous dashboard redirects to login" "$(curl -s -o /dev/null -w '%{http_code}' $U/)" "303"
 check "auth: anonymous API is rejected" "$(curl -s -o /dev/null -w '%{http_code}' $U/api/visibility)" "401"
 check "auth: wrong password is rejected" "$(curl -s -o /dev/null -w '%{http_code}' -X POST $U/login -d email=ciadmin@example.dk -d password=wrong)" "401"
+# Standardbrugeren seedes fra .env ved opstart; her er linjerne tomme, saa /setup er reserven -
+# og den lukker sig selv, saa snart der findes en bruger.
+check "auth: /setup lukker sig selv naar brugeren findes" "$(curl -s -o /dev/null -w '%{http_code}' $U/setup)" "303"
 check "auth: session cookie opens the dashboard" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" $U/)" "200"
+# Uden CC_ADMIN_PASSWORD i .env maa advarslen om en foraeldet kode ikke dukke op.
+check "advarsel: ingen falsk advarsel uden CC_ADMIN_PASSWORD" \
+    "$(curl -s -b "$JAR" $U/ | grep -c 'passer ikke l')" "0"
 # Uden SMTP kan invitationen ikke sendes - saa oprettes brugeren ikke, og fejlen bliver en alarm.
 curl -s -o /dev/null -b "$JAR" -X POST $U/users/invite -d email=ci2@example.dk
 check "invite: no user without SMTP" "$(q "SELECT COUNT(*) FROM users")" "1"
@@ -124,6 +130,22 @@ check "mcp3: noeglen er slettet fra DB efter visning" "$(q "SELECT COUNT(*) FROM
 check "mcp3: dismiss-ruten er væk" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -X POST $U/api-keys/dismiss)" "404"
 check "update: /api/update is available" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" $U/api/update)" "200"
 check "update: /api/update reports the repo" "$(curl -s -b "$JAR" $U/api/update | python3 -c 'import json,sys;print(bool(json.load(sys.stdin).get("repo")))')" "True"
+# Versionskontrollen: filer, koerende proces og installatoer skal sige det samme. Koeres mod
+# CI-serveren paa 8765, saa den ogsaa daekker /health-linjen - ikke kun de to filer.
+CC_PORT=8765 bash scripts/update.sh --version > "$TMP/version.log" 2>&1; VRC=$?
+check "version: filer, proces og installatoer stemmer" "$VRC" "0"
+[ "$VRC" = 0 ] || cat "$TMP/version.log"
+# Guarden foer skrivning: en aeldre install.sh skal stoppe en rigtig opdatering, foer den roerer
+# filer - og uden venv, token eller netvaerk, saa den kan testes her. Kode 7 = naegtet.
+VT="$(mktemp -d)"; mkdir -p "$VT/scripts" "$VT/app"
+cp scripts/update.sh "$VT/scripts/"; cp app/main.py "$VT/app/"; cp install.sh "$VT/"
+awk 'BEGIN{d=0} /^APP_VERSION = /{if(!d){print "APP_VERSION = \"0.0.1\""; d=1; next}} {print}' "$VT/install.sh" > "$VT/i" && mv "$VT/i" "$VT/install.sh"
+SUM_BEFORE="$(cksum "$VT/app/main.py")"
+(cd "$VT" && bash scripts/update.sh --no-restart > "$TMP/guard.log" 2>&1); GRC=$?
+check "version: opdateringen naegter naar install.sh er aeldre" "$GRC" "7"
+[ "$GRC" = 7 ] || cat "$TMP/guard.log"
+check "version: naegtelsen skriver intet" "$(cksum "$VT/app/main.py")" "$SUM_BEFORE"
+rm -rf "$VT"
 
 CC_PORT=8765 bash scripts/smoke_test.sh > /dev/null && echo "PASS smoke test" || { echo "FAIL smoke test"; FAIL=1; }
 for r in $(grep -oE '@app\.get\("[^"\{]+"\)' app/main.py | sed 's/@app.get("//;s/")$//' | sort -u); do
@@ -136,6 +158,20 @@ echo "PASS GET routes swept"
 curl -s -o /dev/null -b "$JAR" -X POST $U/autopilot/sync
 check "bridge: snapshot ok" "$(q "SELECT json_extract(value,'\$.ok') FROM settings WHERE key='sgap_snapshot'")" "1"
 check "bridge: dashboard shows panel" "$(curl -s -b "$JAR" $U/ | grep -c 'Kladder venter')" "1"
+check "bridge: reads the full /snapshot" "$(q "SELECT json_extract(value,'\$.source') FROM settings WHERE key='sgap_snapshot'")" "snapshot"
+check "bridge: plugin version from the snapshot" "$(q "SELECT json_extract(value,'\$.version') FROM settings WHERE key='sgap_snapshot'")" "7.33.0"
+check "bridge: sends X-Command-Center with its version" "$(cat "$TMP/state.header")" "$(grep -oP '^APP_VERSION = "\K[^"]+' app/main.py)"
+check "bridge: dashboard shows the plugin version and cron lag" "$(curl -s -b "$JAR" $U/ | grep -c 'Autopilot 7.33.0\|WP-Cron er 45 min bagud')" "2"
+echo failed2 > "$TMP/state"
+curl -s -o /dev/null -b "$JAR" -X POST $U/autopilot/sync
+check "bridge: a new self-check problem raises an alarm" "$(q "SELECT COUNT(*) FROM alarms WHERE message LIKE 'Autopilot-selvtjek: The autopilot is off.%'")" "1"
+curl -s -o /dev/null -b "$JAR" -X POST $U/autopilot/sync
+check "bridge: the same problem does not alarm twice" "$(q "SELECT COUNT(*) FROM alarms WHERE message LIKE 'Autopilot-selvtjek:%'")" "1"
+echo old > "$TMP/state"
+curl -s -o /dev/null -b "$JAR" -X POST $U/autopilot/sync
+check "bridge: older plugin without /snapshot falls back to /stats" "$(q "SELECT json_extract(value,'\$.source') || '/' || json_extract(value,'\$.ok') FROM settings WHERE key='sgap_snapshot'")" "stats/1"
+echo ok > "$TMP/state"
+curl -s -o /dev/null -b "$JAR" -X POST $U/autopilot/sync
 # v7.18.0: CC markerer sig som Command Center, og fanen Social viser WordPress' eget svar.
 check "bridge: CC markerer sig med X-Command-Center" \
     "$(cat "$TMP/state.cc" 2>/dev/null)" "$(grep -oP 'APP_VERSION = "\K[^"]+' app/main.py)"

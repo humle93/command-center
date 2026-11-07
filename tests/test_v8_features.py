@@ -881,6 +881,45 @@ with main.get_db() as db:
     dbl = db.execute("SELECT status FROM socialqueue WHERE id=?", (double_id,)).fetchone()
 check("autopilot: status peger paa den ene kladde",
       bool(dbl) and dbl["status"] == "sendt til autopilot (kladde #1)", dbl["status"] if dbl else None)
+
+# --- /snapshot-oversaettelse og WP-Cron-ping (v7.19) ---
+_m = main.sgap_from_snapshot({
+    "version": "7.33.0", "missing_tables": ["events"],
+    "status": {"autopilot": True, "full_auto": True, "sending_paused_because": "Quiet hours", "cron_lag_minutes": "40",
+               "last_self_check": {"at": "2026-11-05 06:00", "problems": ["The autopilot is off.", 7]}},
+    "counts": {"queue": {"queued": "2", "failed": 1}, "drafts": {"pending": "4", "used": 9}},
+    "results": {"by_channel": [{"channel": "facebook", "published": "1", "clicks": "5", "orders": "0", "revenue": "0"},
+                               {"channel": "pinterest", "published": "0", "clicks": "1", "orders": "1", "revenue": "19.5"}]}})
+check("snapshot: koe og kladder som tal", _m["queue"] == {"queued": 2, "failed": 1} and _m["pending_drafts"] == 4, _m)
+check("snapshot: kanaler sorteret efter omsaetning", [c["channel"] for c in _m["channels"]] == ["pinterest", "facebook"]
+      and _m["channels"][0] == {"channel": "pinterest", "publish": 0, "click": 1, "order": 1, "revenue": 19.5}, _m["channels"])
+check("snapshot: selvtjek, pause, cron og manglende tabeller",
+      _m["problems"] == ["The autopilot is off.", "7"] and _m["paused_because"] == "Quiet hours"
+      and _m["cron_lag_minutes"] == 40 and _m["missing_tables"] == ["events"] and _m["version"] == "7.33.0", _m)
+check("snapshot: tomt svar giver ingen fejl", main.sgap_from_snapshot({})["queue"] == {} and main.sgap_from_snapshot({})["problems"] == [])
+
+
+class _CronSite(BaseHTTPRequestHandler):
+    hits = []
+    def log_message(self, *a):
+        pass
+    def do_GET(self):
+        _CronSite.hits.append((self.path, self.headers.get("X-Command-Center")))
+        self.send_response(200)
+        self.send_header("content-length", "0")
+        self.end_headers()
+
+
+_cron_srv = HTTPServer(("127.0.0.1", 0), _CronSite)
+threading.Thread(target=_cron_srv.serve_forever, daemon=True).start()
+_keep_url = main.WP_URL
+main.WP_URL = f"http://127.0.0.1:{_cron_srv.server_address[1]}/"
+_code = main.wp_cron_ping()
+main.WP_URL = _keep_url
+check("wp-cron: ping rammer wp-cron.php med doing_wp_cron", _code == 200 and len(_CronSite.hits) == 1
+      and _CronSite.hits[0][0].startswith("/wp-cron.php?doing_wp_cron="), _CronSite.hits)
+check("wp-cron: ping sender X-Command-Center", _CronSite.hits[0][1] == main.APP_VERSION if _CronSite.hits else False)
+check("wp-cron: job koerer hvert 5. min", 'id="wp_cron"' in open(os.path.join(os.path.dirname(main.__file__), "main.py")).read())
 with main.get_db() as db:
     db.execute("INSERT INTO socialqueue (platform, message, status, created_at) VALUES (?,?,?,?)",
                ("Mastodon", "laas", "Klar i ko", "2026-01-01T12:00:00"))
@@ -1014,6 +1053,136 @@ _cs2 = TestClient(main.app)
 _cs2.post("/login", data={"email": "iptest@example.dk", "password": "iptest-pass"}, follow_redirects=False)
 _dash = _cs2.get("/?tab=moduler&bk=ok&bk_msg=test").text
 check("backup: dashboard viser backup-kort og feedback", "Database-backup" in _dash and "skriv GENDAN" in _dash and "Tag backup nu" in _dash, "")
+
+# --- v7.18: standardbrugeren oprettes ved opstart fra .env (rydder brugere, derfor sidst) ---
+with main.get_db() as db:
+    db.execute("DELETE FROM sessions"); db.execute("DELETE FROM login_attempts"); db.execute("DELETE FROM users")
+os.environ.update(CC_ADMIN_EMAIL="standard@example.dk", CC_ADMIN_PASSWORD="standard-pass")
+check("standardbruger: oprettes fra .env naar der ingen brugere er",
+      main.seed_standard_user() == "oprettet" and main.user_count() == 1, main.user_count())
+std = main.find_user("standard@example.dk")
+check("standardbruger: koden fra .env virker",
+      bool(std) and main.verify_password("standard-pass", std["password_hash"]), std and dict(std))
+check("standardbruger: koden er hashet, ikke gemt i klartekst",
+      bool(std) and std["password_hash"].startswith("pbkdf2_sha256$") and "standard-pass" not in std["password_hash"])
+check("standardbruger: skal skiftes ved foerste login",
+      bool(std) and std["must_change_password"] == 1, std and dict(std))
+sd = TestClient(main.app)
+check("standardbruger: login virker med det samme (uden /setup)",
+      sd.post("/login", data={"email": "standard@example.dk", "password": "standard-pass"},
+              follow_redirects=False).status_code == 303)
+check("standardbruger: /setup er lukket for anonyme, naar brugeren findes",
+      TestClient(main.app).get("/setup", follow_redirects=False).status_code == 303)
+# --- v7.18.1: .env-koden og kontoen kan loebe fra hinanden ---
+os.environ["CC_ADMIN_PASSWORD"] = "gammel-kode-1"
+stale = main.env_password_mismatch()
+check("advarsel: foraeldet .env-kode giver en advarsel", stale.startswith("CC_ADMIN_PASSWORD"), stale)
+check("advarsel: teksten naevner kontoen, ikke koderne",
+      "standard@example.dk" in stale and "gammel-kode-1" not in stale and "standard-pass" not in stale)
+# Baren har sin egen klasse - alarmteksten paa samme side indeholder de samme ord.
+check("advarsel: dashboardet viser baren", "border-red-500/40" in sd.get("/").text)
+main.warn_stale_env_password()
+with main.get_db() as db:
+    env_warned = db.execute("SELECT COUNT(*) FROM alarms WHERE message LIKE '%CC_ADMIN_PASSWORD i .env%'"
+                            ).fetchone()[0]
+check("advarsel: opstarten laegger den i Alarmer", env_warned >= 1, env_warned)
+os.environ["CC_ADMIN_PASSWORD"] = "standard-pass"
+check("advarsel: ingen advarsel naar .env-koden passer", main.env_password_mismatch() == "",
+      main.env_password_mismatch())
+check("advarsel: baren forsvinder naar koden passer", "border-red-500/40" not in sd.get("/").text)
+# --- v7.18.2: .env-linjen ryddes, naar standardbrugeren selv skifter kode ---
+_envdir = tempfile.mkdtemp()
+_envfile = os.path.join(_envdir, ".env")
+with io.open(_envfile, "w", encoding="utf-8") as f:
+    f.write("# test\nCC_HOST=127.0.0.1\nCC_ADMIN_EMAIL=standard@example.dk\n"
+            "CC_ADMIN_PASSWORD=standard-pass\nCC_PORT=8000\n")
+_real_env_path = main.ENV_PATH
+main.ENV_PATH = _envfile
+
+
+def _env_text():
+    return io.open(_envfile, encoding="utf-8").read()
+
+
+check("ryd .env: en anden brugers kodeskift roerer ikke filen",
+      main.clear_env_admin_password("fremmed@example.dk") == "ikke-standardbruger"
+      and "CC_ADMIN_PASSWORD=standard-pass" in _env_text())
+check("ryd .env: en kode der stadig passer lades i fred",
+      main.clear_env_admin_password("standard@example.dk") == "passer-endnu"
+      and "CC_ADMIN_PASSWORD=standard-pass" in _env_text())
+sd.post("/users/password", data={"current": "standard-pass", "new": "nyt-pass-2", "confirm": "nyt-pass-2"})
+_after = _env_text()
+check("ryd .env: kodeskiftet toemmer linjen", "CC_ADMIN_PASSWORD=\n" in _after, _after)
+check("ryd .env: kommentarer og andre noegler staar urort",
+      "# test" in _after and "CC_HOST=127.0.0.1" in _after and "CC_PORT=8000" in _after)
+check("ryd .env: hverken den gamle eller den nye kode staar i filen",
+      "standard-pass" not in _after and "nyt-pass-2" not in _after)
+check("ryd .env: advarslen forsvinder med linjen", main.env_password_mismatch() == "",
+      main.env_password_mismatch())
+check("ryd .env: baren er væk efter kodeskiftet", "border-red-500/40" not in sd.get("/").text)
+# --- v7.19.2: dashboardet viser, hvornaar og af hvem linjen blev ryddet ---
+_notice = main.env_password_notice()
+_when = main.danish_time(main.env_password_cleared().get("at", ""))
+check("visning: dashboardet ved hvem der ryddede og hvornaar",
+      _notice.get("state") == "tom" and "blev fjernet fra .env" in _notice.get("text", "")
+      and "standard@example.dk" in _notice["text"] and bool(_when) and _when in _notice["text"],
+      _notice)
+check("visning: teksten naevner ingen koder",
+      "standard-pass" not in _notice["text"] and "nyt-pass-2" not in _notice["text"], _notice["text"])
+check("visning: baren staar i dashboardet", "border-sky-500/40" in sd.get("/").text)
+check("visning: dansk tidsformat",
+      main.danish_time("2026-11-05T16:12:33") == "5. november 2026 kl. 16:12",
+      main.danish_time("2026-11-05T16:12:33"))
+check("visning: skaev tidsvaerdi giver ingen tekst",
+      main.danish_time("i gaar") == "" and main.danish_time("") == "")
+# Linjen sat tilbage: baren maa ikke paastaa, at den stadig er væk.
+os.environ["CC_ADMIN_PASSWORD"] = "nyt-pass-2"
+with io.open(_envfile, "w", encoding="utf-8") as f:
+    f.write("# test\nCC_HOST=127.0.0.1\nCC_ADMIN_EMAIL=standard@example.dk\n"
+            "CC_ADMIN_PASSWORD=nyt-pass-2\nCC_PORT=8000\n")
+_back = main.env_password_notice()
+check("visning: en linje der er sat tilbage bliver sagt hoejt",
+      _back.get("state") == "sat" and "står i .env igen" in _back.get("text", "")
+      and "standard@example.dk" in _back["text"], _back)
+check("visning: baren bliver ved med at vaere synlig", "border-sky-500/40" in sd.get("/").text)
+# Ingen rydning gemt (fx en ny installation) = ingen bar.
+with main.get_db() as db:
+    db.execute("DELETE FROM settings WHERE key=?", (main.ENV_CLEARED_KEY,))
+check("visning: uden en gemt rydning er der ingen bar",
+      main.env_password_notice() == {} and "border-sky-500/40" not in sd.get("/").text)
+with main.get_db() as db:      # en i stykker skrevet raekke maa ikke vaelte dashboardet
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)",
+               (main.ENV_CLEARED_KEY, "{ikke-json"))
+check("visning: en i stykker skrevet raekke giver ingen bar", main.env_password_notice() == {})
+# En fejl under skrivningen maa ikke vaelte skiftet: en mappe paa .env-stien giver en alarm i stedet.
+os.environ["CC_ADMIN_PASSWORD"] = "gammel-kode-2"
+main.ENV_PATH = _envdir
+check("ryd .env: fejl giver status i stedet for en exception",
+      main.clear_env_admin_password("standard@example.dk").startswith("fejl:"))
+with main.get_db() as db:
+    _env_failed = db.execute("SELECT COUNT(*) FROM alarms WHERE message LIKE "
+                             "'%kunne ikke fjernes fra .env%'").fetchone()[0]
+check("ryd .env: fejlen bliver en advarsel i Alarmer", _env_failed >= 1, _env_failed)
+main.ENV_PATH = _real_env_path
+shutil.rmtree(_envdir, ignore_errors=True)
+os.environ["CC_ADMIN_PASSWORD"] = "andet-pass-1"
+check("standardbruger: en rettet .env-kode roerer ikke en konto i brug",
+      main.seed_standard_user() == "findes"
+      and main.verify_password("nyt-pass-2", main.find_user("standard@example.dk")["password_hash"])
+      and not main.verify_password("andet-pass-1", main.find_user("standard@example.dk")["password_hash"])
+      and main.user_count() == 1)
+os.environ.update(CC_ADMIN_EMAIL="", CC_ADMIN_PASSWORD="")
+check("standardbruger: uden linjer i .env sker der intet (setup bruges)",
+      main.seed_standard_user() == "mangler" and main.user_count() == 1)
+with main.get_db() as db:
+    db.execute("DELETE FROM users")
+os.environ.update(CC_ADMIN_EMAIL="ikke-en-mail", CC_ADMIN_PASSWORD="kort-kode")
+broken = main.seed_standard_user()
+with main.get_db() as db:
+    warned = db.execute("SELECT COUNT(*) FROM alarms WHERE message LIKE '%Standardbrugeren i .env blev afvist%'").fetchone()[0]
+check("standardbruger: ugyldig .env-linje giver ingen konto, men en alarm",
+      broken.startswith("fejl:") and main.user_count() == 0 and warned >= 1, (broken, warned))
+os.environ.update(CC_ADMIN_EMAIL="", CC_ADMIN_PASSWORD="")
 
 srv.shutdown()
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)

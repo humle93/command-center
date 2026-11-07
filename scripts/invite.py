@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inviterer en bruger - samme vej som fanen Brugere, men fra terminalen.
+"""invite.py - inviterer en bruger paa mail. Samme vej som fanen Brugere, men fra terminalen.
 
 Brug: python3 scripts/invite.py <e-mail> [--base-url <adresse-i-mailen>] [--print] [--force]
 
@@ -13,6 +13,8 @@ Uden --print kraever scriptet SMTP_HOST + SMTP_FROM i .env, og brugeren oprettes
 mailen er sendt. Med --print oprettes brugeren med det samme, og den faerdige mail (med den
 midlertidige adgangskode) skrives til skaermen, saa den kan sendes fra en anden mailkonto.
 Brugeren skal skifte koden ved foerste login.
+Kraever: venv (./venv) og SMTP_HOST + SMTP_FROM i .env - eller --print, saa intet sendes.
+Sidst aendret: 4. november 2026
 """
 import os
 import sys

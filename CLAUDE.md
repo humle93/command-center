@@ -479,6 +479,14 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
   intet `/etc/fonts`, saa Skia aborterer med `FATAL: SkFontMgr_FontConfigInterface.cpp:163 Not
   implemented` (SIGTRAP). Loesning: lav en `fonts.conf` med `<dir>` (DejaVu/Noto) + `<cachedir>` og
   saet `FONTCONFIG_FILE`/`FONTCONFIG_PATH`. Derefter kan alle 15 faner fotograferes headless.
+- Containeren kan mangle baade `/etc/fonts` **og** de delte biblioteker (libfontconfig, libnspr4,
+  libnss3, libatk*, libxkbcommon m.fl.), og der er hverken root eller apt-lister. Uden root: hent
+  `.deb`-filerne via Packages-indexet (`archive.ubuntu.com/ubuntu/dists/noble/{main,universe}/
+  binary-amd64/Packages.gz`), udpak med `dpkg -x` i en lokal mappe og saet `LD_LIBRARY_PATH` samt
+  `FONTCONFIG_PATH`/`FONTCONFIG_FILE` til den udpakkede `fontconfig-config`. Bruger man kun en egen
+  `fonts.conf` uden `conf.d` fra `fontconfig-config`, bliver al braedtekst tofu, mens fed tekst tegnes
+  korrekt - det ser ud som en app-fejl, men er font-matching. `fonts-dejavu-core` + `fonts-liberation`
+  + `fonts-noto-color-emoji` giver baade dansk tekst og farve-emoji paa billederne.
 - Mangler der en emoji-font i det saet, bliver emoji i UI'et tomme kasser paa billederne. Det er kun
   kosmetisk - layout og tekst er korrekt.
 

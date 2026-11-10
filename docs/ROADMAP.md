@@ -94,8 +94,6 @@ findes.
   GitHub-opdateringen til første install)
 - **Ekstern overvågning**: valgfri heartbeat til Uptime Kuma/healthchecks.io
 - **SERP-udgiftsprognose**: vis estimeret forbrug for resten af måneden baseret på kørende keywords
-- **Screenshot-opdatering** af `docs/img/` — kør `scripts/screenshots.py` efter større UI-ændringer
-  (senest gjort mod v7.13.x-UI'et)
 
 ## Kendte begrænsninger (bevidste valg)
 
@@ -107,8 +105,9 @@ findes.
 - **Login-låsen ligger i hukommelsen** (`_LOGIN_FAILS` pr. IP): en genstart nulstiller den. Selve
   forsøgene logges i `login_attempts` i 30 dage.
 - **AI-kvalitet afhænger af ekstern model**: kvalitetsgaten fanger længde/keyword/H2, ikke faktuelle fejl.
-- **Screenshots** holdes opdaterede med `scripts/screenshots.py`, og CI advarer når de er ældre end
-  dashboard-skabelonen; enkelte docs-afsnit kan stadig være ældre end koden.
+- **Screenshots** holdes opdaterede med `scripts/screenshots.py`, og CI **fejler** når de er ældre end
+  dashboard-skabelonen (`[skip screenshots]` i commit-beskeden springer tjekket over); enkelte
+  docs-afsnit kan stadig være ældre end koden.
 - **Headless screenshots kræver fontconfig**: uden en `fonts.conf` (via `FONTCONFIG_FILE`) aborterer
   Chromium med `SkFontMgr_FontConfigInterface ... Not implemented`. Det rammer kun optagelsen, ikke appen.
 

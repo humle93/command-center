@@ -4,7 +4,7 @@ Selv-hostet SEO- og drifts-center til steamgears.eu (FastAPI + SQLite). Alt kør
 
 ![Cockpit](img/cc-cockpit.png)
 
-> Screenshots i `docs/img/` er taget med `scripts/screenshots.py` mod den kørende version (v7.13.x-UI'et). Kør scriptet igen, når UI'et ændrer sig (se "Opdater screenshots" nedenfor).
+> Screenshots i `docs/img/` er taget med `scripts/screenshots.py` mod den kørende version (v7.24-UI'et). Kør scriptet igen, når UI'et ændrer sig — CI fejler, hvis billederne er ældre end dashboard-skabelonen (se "Opdater screenshots" nedenfor).
 
 ---
 
@@ -249,6 +249,9 @@ Scriptet logger ind, tager `cc-login.png` og skifter derefter gennem alle 15 fan
 `cc-cockpit.png` … `cc-notes.png`. Vil du kun opdatere enkelte faner, så brug `--only alarms,notes`,
 og vil du kun have det synlige omraade i stedet for hele siden, så tilføj `--viewport`.
 Brug `--base`, `--user` og `--password` (eller `CC_BASE`, `CC_USER`, `CC_PASSWORD`).
+
+CI fejler, hvis `app/templates/dashboard.html` er committet efter `docs/img/`. Påvirker ændringen ikke
+udseendet, kan tjekket springes over med `[skip screenshots]` i commit-beskeden.
 
 ## Opdatering fra GitHub
 

@@ -500,9 +500,10 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
   i manual/README, fane 9-12 (Alarmer, Brugere, Noter, Moduler) i manualen, fuld tabel- og jobliste
   (`alert_outbox`, `login_attempts`, `notes`, `_selftest`, alarmkø hvert minut), de 11 moduler og en
   samlet ruteoversigt i `Command_Center_Dokumentation.md` (§16).
-- CI advarer (men fejler ikke) når `docs/img/` er ældre end `app/templates/dashboard.html`. Trinnet
-  "Screenshots are not older than the dashboard" sammenligner commit-tidspunkter (ikke fil-mtimes,
-  som checkout nulstiller) og henviser til `scripts/screenshots.py`.
+- CI **fejler** når `docs/img/` er ældre end `app/templates/dashboard.html` (siden 10. november 2026 - foer var det
+  kun en advarsel). Trinnet "Screenshots are not older than the dashboard" sammenligner
+  commit-tidspunkter (ikke fil-mtimes, som checkout nulstiller), henviser til `scripts/screenshots.py`
+  og springes over med `[skip screenshots]` i commit-beskeden - samme moenster som `[skip docs]`.
 
 ### Commits
 `d48854e` (v7.11: brugere, opdatering, nginx, rettelser) · `d47a920` (Juno fjernet) ·
@@ -553,7 +554,7 @@ springer tjekket over til rene undtagelser.
 - Dashboardet henter Tailwind/Alpine/Chart.js fra CDN; login-siden er selvstændig.
 - Crawleren bruger `requests` (ingen JS-rendering) og ca. 20 kontroller — ikke Sitebulb-niveau.
 - Vækst-fanen måler tekst og de sider, brugeren selv peger på; der er ingen søgevolumen, placeringer eller backlink-data (det kræver et eksternt indeks). Konkurrentsammenligning henter højst tre sider pr. kald.
-- `docs/img/` er ikke fotograferet efter v7.24-UI'et; kør `scripts/screenshots.py` mod en kørende app for at opdatere billederne.
+- `docs/img/` er fotograferet mod v7.24-UI'et (login + alle 15 faner), og CI fejler nu, hvis et UI-commit går forbi uden nye billeder.
 - Efter Juno-fjernelsen: ingen GSC-data, og `drift`/`gsc_*`-tabeller kan stadig ligge tomme i en
   eksisterende `center.db` (intet læser eller skriver dem).
 - Systemd-genstartsstien er ikke testet i denne VM (ingen systemd); pidfile-stien er verificeret.

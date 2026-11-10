@@ -1054,6 +1054,131 @@ _cs2.post("/login", data={"email": "iptest@example.dk", "password": "iptest-pass
 _dash = _cs2.get("/?tab=moduler&bk=ok&bk_msg=test").text
 check("backup: dashboard viser backup-kort og feedback", "Database-backup" in _dash and "skriv GENDAN" in _dash and "Tag backup nu" in _dash, "")
 
+# --- v7.24: Vækst - lokal indholdsoptimering uden API-nøgle ---
+_kw = "steampunk goggles"
+_filler = "Messing og læder giver en holdbar ramme med justerbar pasform til cosplay."
+_para = "Steampunk goggles i messing og læder. " + " ".join([_filler] * 10)
+_plain = " ".join([_filler] * 10)
+_good_html = (
+    "<html><head><title>Steampunk goggles - guide til køb og pasform</title>"
+    "<meta name=\"description\" content=\"Guide til steampunk goggles i messing og læder: pasform, "
+    "størrelser, priser og hvad du skal se efter.\"></head><body>"
+    "<h1>Steampunk goggles</h1>"
+    + "".join(f"<h2>Steampunk goggles: {x}</h2><p>{_para}</p>" for x in ("pasform", "pris", "vedligehold"))
+    + f"<h2>Ofte stillede spørgsmål</h2><p>{_plain}</p>"
+    + '<a href="/shop">shop</a><a href="/guide">guide</a></body></html>'
+)
+_terms = ["messing", "læder", "pasform"]
+_good = main.local_content_optimizer(_good_html, _kw, _terms, 500)
+check("vækst: komplet side scorer højt", _good["score"] >= 90, (_good["score"], [c["name"] for c in _good["checks"] if not c["ok"]]))
+check("vækst: scoren bygger på vægtede kontroller", len(_good["checks"]) >= 10
+      and all(c["weight"] > 0 for c in _good["checks"]) and _good["words"] > 400, _good["words"])
+check("vækst: termdækning tælles for alle termer",
+      len(_good["terms"]) == 4 and all(t["present"] for t in _good["terms"]), _good["terms"])
+_thin = main.local_content_optimizer("<h2>Kort</h2><p>lidt tekst</p>", _kw, [], 800)
+check("vækst: tynd tekst scorer lavt og får forbedringer",
+      _thin["score"] < 40 and _thin["fixes"] and any("Ordantal" in f["text"] for f in _thin["fixes"]), _thin["score"])
+_thin_no_kw = main.local_content_optimizer("<p>noget indhold</p>", "", [], 0)
+check("vækst: uden fokus-keyword siges det højt",
+      _thin_no_kw["fixes"] and any("Fokus-keyword" in f["text"] for f in _thin_no_kw["fixes"]))
+check("vækst: hele ord tælles, ikke delstrenge",
+      main.term_stats("goggles gogglesx goggles", "goggles")["count"] == 2, main.term_stats("goggles gogglesx goggles", "goggles"))
+check("vækst: termlister renses og afdubles",
+      main.parse_term_list("Messing, læder;  messing \n pasform") == ["messing", "læder", "pasform"],
+      main.parse_term_list("Messing, læder;  messing \n pasform"))
+check("vækst: toptermer ignorerer funktionsord og korte ord",
+      all(t["term"] not in ("og", "er", "i") and len(t["term"]) >= 3 for t in main.content_top_terms(_plain)), main.content_top_terms(_plain)[:3])
+
+_gw = TestClient(main.app)
+check("vækst: login til rutetest", _gw.post("/login", data={"email": "iptest@example.dk", "password": "iptest-pass"},
+                                           follow_redirects=False).status_code == 303)
+_serp_before, _ai_before = main.SERPAPI_KEY, main.AIMLAPI_KEY
+main.SERPAPI_KEY, main.AIMLAPI_KEY = "", ""      # vækst må ikke kræve nogen af dem
+_opt = _gw.post("/growth/optimize", data={"content": _good_html, "keyword": _kw, "terms": ", ".join(_terms),
+                                         "target_words": "500"})
+check("vækst: /growth/optimize svarer med score uden API-nøgler",
+      _opt.status_code == 200 and _opt.json().get("ok") and _opt.json()["score"] >= 90, _opt.status_code)
+with main.get_db() as db:
+    _audits = db.execute("SELECT COUNT(*) FROM content_audits").fetchone()[0]
+check("vækst: hver optimering gemmes i historikken", _audits >= 1, _audits)
+_empty = _gw.post("/growth/optimize", data={"content": "", "url": "", "keyword": "x"})
+check("vækst: tomt input forklares i stedet for at give 200", _empty.status_code == 400 and _empty.json().get("error"))
+
+# Konkurrent-sammenligning mod den lokale testserver (ingen SERP-API)
+_page_a = f"http://127.0.0.1:{port}/a"
+_cmp = _gw.post("/growth/compare", data={"content": "<p>kort tekst om noget andet</p>", "competitors": _page_a,
+                                        "keyword": "brass goggles"})
+_cmp_json = _cmp.json() if _cmp.status_code == 200 else {}
+check("vækst: sammenligningen henter konkurrentsiden",
+      _cmp.status_code == 200 and _cmp_json.get("averages", {}).get("pages") == 1
+      and _cmp_json["competitors"][0]["words"] > 0, _cmp_json.get("averages"))
+check("vækst: konkurrentens emner vi ikke dækker vises som muligheder",
+      bool(_cmp_json.get("single_terms")) and all(t["in_competitors"] >= 1 for t in _cmp_json["single_terms"]),
+      _cmp_json.get("single_terms"))
+check("vækst: sammenligningen giver råd om længde eller H2",
+      bool(_cmp_json.get("advice")) and any("ord" in a or "H2" in a for a in _cmp_json["advice"]), _cmp_json.get("advice"))
+check("vækst: en side der ikke kan hentes rapporteres pr. URL",
+      _gw.post("/growth/compare", data={"url": _page_a, "competitors": "http://127.0.0.1:1/nej"}).json()
+      ["competitors"][0]["ok"] is False)
+main.SERPAPI_KEY, main.AIMLAPI_KEY = _serp_before, _ai_before
+
+# Indholdsplan: brief bygges lokalt, kan skiftes og slettes
+_br = _gw.post("/growth/brief", data={"keyword": "steampunk goggles", "intent": "transaktionel",
+                                      "terms": "messing, læder", "planned_for": "2026-12-01"},
+               follow_redirects=False)
+with main.get_db() as db:
+    _brief = db.execute("SELECT * FROM content_briefs ORDER BY id DESC LIMIT 1").fetchone()
+check("vækst: briefen gemmes med mål og overskrifter",
+      _br.status_code == 303 and _brief and _brief["words"] >= 800 and "Hvad er" in _brief["headings"]
+      and "messing" in (_brief["terms"] or ""), _brief and dict(_brief))
+check("vækst: briefen husker planlagt dato og status",
+      _brief["planned_for"] == "2026-12-01" and _brief["status"] == "Planlagt", _brief["status"])
+_gw.post("/growth/brief/status", data={"id": _brief["id"], "status": "Skrevet"})
+with main.get_db() as db:
+    check("vækst: status kan flyttes i planen",
+          db.execute("SELECT status FROM content_briefs WHERE id=?", (_brief["id"],)).fetchone()["status"] == "Skrevet")
+_gw.post("/growth/brief/status", data={"id": _brief["id"], "status": "Ukendt"})
+with main.get_db() as db:
+    check("vækst: ukendt status afvises",
+          db.execute("SELECT status FROM content_briefs WHERE id=?", (_brief["id"],)).fetchone()["status"] == "Skrevet")
+_gw.post("/growth/brief/delete", data={"id": _brief["id"]})
+with main.get_db() as db:
+    check("vækst: briefen kan slettes",
+          db.execute("SELECT COUNT(*) FROM content_briefs WHERE id=?", (_brief["id"],)).fetchone()[0] == 0)
+
+# Linkmuligheder: manuel liste, samme URL kun én gang, ugyldig URL forklares
+_gw.post("/links/target/add", data={"url": "https://partner.example.dk/ressourcer", "type_": "Ressourceside",
+                                    "contact": "redaktionen@partner.example.dk", "reason": "Relevant guide"})
+_gw.post("/links/target/add", data={"url": "https://partner.example.dk/ressourcer", "type_": "Forum"})
+with main.get_db() as db:
+    _links = db.execute("SELECT * FROM link_targets").fetchall()
+check("vækst: linkmuligheden gemmes med type og status",
+      len(_links) == 1 and _links[0]["type"] == "Ressourceside" and _links[0]["status"] == "Ny",
+      [dict(l) for l in _links])
+_bad_link = _gw.post("/links/target/add", data={"url": "ikke en url"}, follow_redirects=False)
+with main.get_db() as db:
+    _still = db.execute("SELECT COUNT(*) FROM link_targets").fetchone()[0]
+check("vækst: ugyldig URL afvises med en forklaring",
+      _bad_link.status_code == 303 and "link=fejl" in _bad_link.headers.get("location", "") and _still == 1,
+      _bad_link.headers.get("location"))
+_gw.post("/links/target/status", data={"id": _links[0]["id"], "status": "Link live"})
+with main.get_db() as db:
+    check("vækst: linkets status kan følges",
+          db.execute("SELECT status FROM link_targets WHERE id=?", (_links[0]["id"],)).fetchone()["status"] == "Link live")
+_gw.post("/links/target/delete", data={"id": _links[0]["id"]})
+with main.get_db() as db:
+    check("vækst: linket kan fjernes", db.execute("SELECT COUNT(*) FROM link_targets").fetchone()[0] == 0)
+
+# Fanen selv: plan, linkliste og optimeringskortet skal være i dashboardet
+_dash_growth = _gw.get("/?tab=vaekst")
+check("vækst: fanen vises med alle fire værktøjer",
+      _dash_growth.status_code == 200
+      and all(t in _dash_growth.text for t in ("Indholdsoptimerer", "Sammenlign med konkurrenter",
+                                               "Indholdsplan", "Linkmuligheder")), _dash_growth.status_code)
+check("vækst: fanen er en del af navigationen og fanelisten",
+      "vaekst" in main.DASHBOARD_TABS and "tab='vaekst'" in _dash_growth.text)
+check("vækst: dashboardet har ingen eksterne scripts", "https://cdn" not in _dash_growth.text)
+
 # --- v7.18: standardbrugeren oprettes ved opstart fra .env (rydder brugere, derfor sidst) ---
 with main.get_db() as db:
     db.execute("DELETE FROM sessions"); db.execute("DELETE FROM login_attempts"); db.execute("DELETE FROM users")

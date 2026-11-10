@@ -98,7 +98,7 @@ Hvert login giver en ny session, og den gamle session slettes. Ændringer, der s
 
 ## Guidet fanerækkefølge
 
-Fanerne er nummereret i den rækkefølge, et normalt arbejdsflow bruger dem.
+Navigationen er delt i grupper — **overblik**, **analyse** (SEO, Keywords, Vækst), **produktion** (Indhold, Links, Spy), **drift** (Social, Monitors, Alarmer) og **system** (AI, Pro, Moduler, Brugere, Noter) — og hver fane har en kort beskrivelse øverst. Afsnittene nedenfor følger samme rækkefølge som et normalt arbejdsflow.
 
 ### 1. Cockpit — dit daglige overblik
 
@@ -144,6 +144,17 @@ Artikel-forhåndsvisningen i dashboardet vises med saniteret HTML: kun formateri
 ![Indhold](img/cc-articles.png)
 
 - **Backlink-prospector** (nederst): keyword → top 10 Google-resultater klassificeret (blog/liste/artikel/shop) + kontakt-e-mails + AI-outreach-draft
+
+### Vækst — indhold der er målt (v7.24)
+
+Fanen **🚀 Vækst** er Command Centers egen udgave af det, Surfer, Ahrefs, Semrush og BabyLoveGrowth gør — men **uden API-nøgle**. Alt regnes lokalt ud fra den tekst, du giver den, og de sider du selv peger på.
+
+- **Indholdsoptimerer** — indsæt artikeltekst/HTML eller en URL, og få en vægtet score 0-100 med termdækning og en prioriteret liste af forbedringer. Kontrollerne er: fokus-keyword i titel, H1, første 10 % og mindst to H2, keyword-tæthed 0,5-3 %, mindst tre H2, ordantal mod dit mål, korte sætninger og afsnit, mindst to interne links, meta description 70-160 tegn og dækning af dine relaterede termer. Hver manglende kontrol kommer med et konkret forslag, og de sidste fem målinger gemmes
+- **Sammenlign med konkurrenter** — skriv din egen URL og op til tre konkurrent-URL'er. Du får ordantal og H2 pr. side, deres snit, og hvilke emner de dækker, som du ikke gør. Der er ingen SERP-opslag: *du* vælger, hvad der skal måles imod
+- **Indholdsplan** — en brief pr. emne med mål for ord og H2, termer, overskrifter og de vinkler konkurrenterne bruger. Er der konkurrent-URL'er med, kommer målene fra deres gennemsnit; ellers bruges standardmålene (1200 ord, 5 H2). Briefen kan flyttes mellem *Planlagt → Skrevet → Publiceret* (eller *Fravalgt*) og planlægges med en dato
+- **Linkmuligheder** — din egen liste over sider, du vil have et link fra, med type, kontakt, begrundelse og status (*Ny → Kontaktet → Link aftalt → Link live / Afvist*). Intet sendes automatisk
+
+**Det kan den ikke:** Ahrefs og Semrush bygger på egne webindekser og søgedata, og BabyLoveGrowth på et partnernetværk. Vækst-fanen måler derfor hverken søgevolumen, sværhedsgrad, placeringer eller backlink-profiler — den måler tekst. Tallene er talt fra indholdet, ikke hentet udefra.
 
 ### 5. Links
 
@@ -234,7 +245,7 @@ pip install playwright && python3 -m playwright install chromium   # kun foerste
 python3 scripts/screenshots.py --base http://127.0.0.1:8000 --user din@mail.dk --password 'din-adgangskode'
 ```
 
-Scriptet logger ind, tager `cc-login.png` og skifter derefter gennem alle 14 faner og gemmer
+Scriptet logger ind, tager `cc-login.png` og skifter derefter gennem alle 15 faner og gemmer
 `cc-cockpit.png` … `cc-notes.png`. Vil du kun opdatere enkelte faner, så brug `--only alarms,notes`,
 og vil du kun have det synlige omraade i stedet for hele siden, så tilføj `--viewport`.
 Brug `--base`, `--user` og `--password` (eller `CC_BASE`, `CC_USER`, `CC_PASSWORD`).

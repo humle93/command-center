@@ -1,7 +1,7 @@
 # Command Center — Roadmap
 
-Status pr. **6. november 2026 (v7.23.0)**. Koden er 5.501 linjer i `app/main.py`, 73 ruter, 29 tabeller,
-8 jobs, 11 moduler og 14 faner. Rækkefølgen i "Næste" er den anbefalede prioritering: sikkerhed og
+Status pr. **10. november 2026 (v7.24.0)**. Koden er 5.972 linjer i `app/main.py`, 86 ruter, 31 tabeller,
+8 jobs, 11 moduler og 15 faner. Rækkefølgen i "Næste" er den anbefalede prioritering: sikkerhed og
 driftsstabilitet før nye features.
 
 **Genoptrænet 3. november 2026.** Listen er gennemgået mod koden — ikke mod tidligere noter. Tre punkter
@@ -30,6 +30,7 @@ findes.
 
 | Version | Indhold |
 | --- | --- |
+| **v7.24.0** | **Vækst uden API-nøgle** — fanen 🚀 Vækst samler fire lokale værktøjer inspireret af Surfer, Ahrefs, Semrush og BabyLoveGrowth: indholdsoptimerer med vægtet 0-100-score, termdækning og prioriteret fix-liste (`local_content_optimizer`) · sammenligning mod op til tre konkurrent-URL'er, som brugeren selv angiver (`compare_with_competitors`) · indholdsplan med briefs, mål for ord/H2 og overskrifter (`content_briefs`) · manuel linkliste med kontakt og status (`link_targets`) · **UI moderniseret**: grupperet navigation, fanebeskrivelser, fælles kort-, felt- og knapstil · begge testsuiter dækker score, termtælling, konkurrent-gab, briefs, linkliste og at intet kræver `SERPAPI_KEY` eller `AIMLAPI_KEY` |
 | **v7.23.0** | **Backup/restore i UI** (roadmap 2): fanen Moduler viser alle gyldige `backups/`-filer, knapperne "Tag backup nu" og "Gendan" · gendannelse kræver at skrive `GENDAN` · kun filer på formatet `cc-<tag>-YYYYMMDD-HHMM.db` accepteres, med integritetstjek og tjek af tabellen `users` · en `pre-restore`-backup laves først, og fejler den, sker der intet · enhedstests dækker navnevalidering, bekræftelse, ugyldig fil og en rigtig gendannelse |
 | **v7.22.0** | **Offline dashboard** (roadmap 3): de tre CDN-scripts er vendoret i `app/static/vendor/` og dashboardet henter ingenting eksternt · enhedstest fejler, hvis en ekstern URL dukker op igen |
 | **v7.21.0** | **CSRF-beskyttelse og session-rotation** (roadmap 2): muterende kald med `Sec-Fetch-Site` eller `Origin` fra et andet site afvises med 403 i `auth_middleware`; kald uden browser-headers (scripts, API-nøgler) roeres ikke · nyt login giver ny sid og den gamle sid slettes · enhedstests dækker begge dele |
@@ -72,8 +73,11 @@ findes.
 - **Planlagt crawl** (ugentligt) med alarm ved score-fald, og crawl pr. domæne i stedet for én global
 - **Rank-tracking i dybden**: device, geo, SERP-features (inkl. AI Overviews), konkurrent-positioner,
   alarm ved fald og "quick wins" (position 8–20). I dag gemmes position pr. keyword uden disse dimensioner
-- **Content optimizer**: term-map fra top 10 → 0–100 score → rangeret fix-liste; re-score publicerede
-  artikler for decay (kvalitetsgaten findes, scoringsmodellen gør ikke)
+- **Content optimizer, resten**: v7.24 scorer indhold og finder emnegab mod *brugerangivne* konkurrenter.
+  Tilbage: trække top 10 automatisk fra en SERP-kilde, re-score publicerede artikler på en tidsplan og
+  give alarm ved decay (kvalitetsgaten og scoringsmodellen findes nu)
+- **Søgevolumen og placeringer**: stadig et eksternt databehov — hører til GSC-punktet og en eventuel
+  DataForSEO/Ads-kilde, ikke til den lokale vækst-motor
 - **Keyword-volumen, intent og clustering** (Google Ads API eller DataForSEO)
 - **Backlink-monitorering** via GSC/CSV: referring domains, nye/tabte, anchors, disavow-eksport
 - **Content-gap-historik** pr. keyword med udvikling over tid (i dag kun seneste række)

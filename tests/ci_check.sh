@@ -202,6 +202,25 @@ check "auth: logout ends the session" "$(curl -s -o /dev/null -w '%{http_code}' 
 
 check "ui: task progress card is rendered" "$(curl -s -b "$JAR" $U/ | grep -c 'id="cc-task"')" "1"
 check "ui: crawl status exposes percent and ETA" "$(curl -s -b "$JAR" $U/api/crawl/status | python3 -c 'import json,sys;d=json.load(sys.stdin);print("percent" in d and "eta_seconds" in d and "elapsed_seconds" in d)')" "True"
+# --- v7.24: Vaekst - lokal indholdsoptimering uden API-noegle ---
+check "vaekst: fanen vises" "$(curl -s -b "$JAR" "$U/?tab=vaekst" | grep -c 'Indholdsoptimerer')" "1"
+OPT=$(curl -s -b "$JAR" -X POST $U/growth/optimize --data-urlencode 'content=<h1>Steampunk goggles</h1><p>Steampunk goggles i messing og læder.</p>' -d keyword=steampunk -d terms=messing --data-urlencode 'target_words=50')
+check "vaekst: optimereren svarer med score og kontroller" "$(printf '%s' "$OPT" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(bool(d.get("ok")) and isinstance(d.get("score"),int) and len(d.get("checks") or [])>=5)')" "True"
+check "vaekst: maalingen gemmes i historikken" "$(q "SELECT COUNT(*) FROM content_audits")" "1"
+check "vaekst: tomt input giver 400 med forklaring" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -X POST $U/growth/optimize -d keyword=x)" "400"
+curl -s -o /dev/null -b "$JAR" -X POST $U/growth/brief -d keyword='steampunk goggles' -d terms=messing -d planned_for=2026-12-01
+check "vaekst: briefen gemmes med standardmaal" "$(q "SELECT words FROM content_briefs ORDER BY id DESC LIMIT 1")" "1200"
+check "vaekst: briefen har overskrifter" "$(q "SELECT CASE WHEN headings LIKE '%Hvad er%' THEN 'ja' ELSE 'nej' END FROM content_briefs ORDER BY id DESC LIMIT 1")" "ja"
+curl -s -o /dev/null -b "$JAR" -X POST $U/growth/brief/status -d id=1 -d status=Skrevet
+check "vaekst: planen kan flyttes videre" "$(q "SELECT status FROM content_briefs WHERE id=1")" "Skrevet"
+curl -s -o /dev/null -b "$JAR" -X POST $U/links/target/add -d url=https://partner.example.dk/ressourcer -d type_=Ressourceside -d contact=redaktionen
+curl -s -o /dev/null -b "$JAR" -X POST $U/links/target/add -d url=https://partner.example.dk/ressourcer
+check "vaekst: samme linkmulighed gemmes kun én gang" "$(q "SELECT COUNT(*) FROM link_targets")" "1"
+check "vaekst: linkmuligheden staar som Ny" "$(q "SELECT status FROM link_targets")" "Ny"
+check "vaekst: ugyldig URL forklares i fanen" "$(curl -s -o /dev/null -b "$JAR" -X POST $U/links/target/add -d url='ikke en url' -w '%{redirect_url}' | grep -c 'link=fejl')" "1"
+check "vaekst: linket kan slettes" "$(curl -s -o /dev/null -b "$JAR" -X POST $U/links/target/delete -d id=1 -w '%{http_code}')" "303"
+check "vaekst: linkformularen er med i den samlede side" "$(curl -s -b "$JAR" "$U/?tab=vaekst" | grep -c 'Tilføj mulighed')" "1"
+
 check "no Python tracebacks" "$(grep -c Traceback "$TMP/cc.log")" "0"
 [ "$FAIL" = 0 ] && echo "ALL PASS" || { echo "SOME FAILED"; tail -40 "$TMP/cc.log"; }
 exit $FAIL

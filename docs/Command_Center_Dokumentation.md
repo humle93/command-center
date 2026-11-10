@@ -63,6 +63,7 @@ Tabeller i grupper:
 - **Overvågning**: `domains`, `check_history`, `monitors`, `health_history`, `alarms`
 - **Alarmer og login**: `alert_outbox` (én række pr. kanal), `login_attempts`
 - **SEO**: `seopages`, `crawl_runs`, `keywords`, `keyword_difficulty`, `keyword_ideas`, `content_gap`, `visibility`, `internal_links`
+- **Vækst (v7.24)**: `content_briefs` (planen), `link_targets` (manuel linkliste, `url` unik) og `content_audits` (de sidste 50 målinger fra optimereren, ryddet af ruten selv)
 - **Indhold**: `articles`, `backlink_prospects`, `outreach`
 - **Drift/integrationer**: `socialqueue`, `competitors`, `linkcheck`, `ai_visibility`
 - **Adgang**: `api_clients` (MCP-nøgler, hash + scopes), `api_audit` (kald pr. nøgle)
@@ -96,6 +97,28 @@ Modulerne (`MODULES` i `app/main.py`, 11 stk.): `domains`, `keywords`, `ai`, `mo
 - Der gemmes **to** crawl-runs: det nye og det forrige, så `/api/crawl/diff` kan sammenligne. Dashboard, duplikat-rapport, redirect-audit og link-forslag læser kun den seneste run
 - Ikke-200-sider analyseres uden at hente dem igen (HTML videregives)
 - Under crawl rapporterer `/api/crawl/status` `percent`, `eta_seconds` og `elapsed_seconds` (beregnet i `crawl_progress()`); dashboardet poller den og viser fremdrift. Øvrige tunge opgaver bruger estimaterne i `TASK_ESTIMATES`
+
+## 6b. Vækst: lokal indholdsoptimering (v7.24)
+
+Fanen Vækst måler indhold uden at hente data fra en søgemaskine eller en betalt API. Det er et bevidst
+valg: Surfer, Ahrefs og Semrush bygger på egne webindekser, og den slags kan en enkelt installation ikke
+genskabe. Til gengæld kan alt det, der står i teksten, måles præcist.
+
+| Funktion | Implementering |
+| --- | --- |
+| Optælling | `content_text()` fjerner scripts/styles, `content_words()` tæller ord, `content_term_counts()` tæller termer uden `CONTENT_STOPWORDS` (dansk + engelsk), og `term_stats()` tæller hele ord/fraser med regex-grænser — ikke delstrenge |
+| Score | `local_content_optimizer()` vægter hver kontrol (keyword i titel/H1/første 10 %/2 H2 = 6+5+4+4, tæthed 5, H2 5, ordantal 7, sætninger 3, afsnit 2, interne links 4, meta 3, termdækning 10) og regner `earned/total*100`. Manglende kontroller sorteres efter vægt til `fixes` |
+| Konkurrenter | `compare_with_competitors()` henter op til `COMPETITOR_MAX` (3) URL'er gennem `safe_request()` (SSRF-guarden gælder også her), laver et `content_profile()` pr. side og finder termer, som mindst to konkurrenter bruger men egen tekst ikke nævner |
+| Briefs | `brief_from_keyword()` sætter mål for ord/H2 ud fra konkurrenternes gennemsnit (ellers standard 1200 ord og 5 H2), samler termer og bygger overskrifter med `brief_headings()`. Gemmes i `content_briefs` med status fra `BRIEF_STATUS` |
+| Linkliste | `POST /links/target/add` validerer URL'en med `normalize_url()` og gemmer med `INSERT OR IGNORE` (samme URL kun én gang). Status følger `LINK_STATUS` |
+
+Ruterne er `POST /growth/optimize` og `/growth/compare` (JSON, bruges af `fetch` i dashboardet),
+`/growth/brief`, `/growth/brief/status`, `/growth/brief/delete` samt `/links/target/add`,
+`/links/target/status` og `/links/target/delete`. De tre tunge har poster i `TASK_ESTIMATES`, så
+fremdriftskortet også dækker dem.
+
+Begrænsning: der er ingen søgevolumen, sværhedsgrad, placeringer eller backlink-data. Tallene kommer
+fra teksten og fra de sider, brugeren selv angiver.
 
 ## 7. Indhold og kvalitetsgate
 
@@ -155,6 +178,7 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 
 ## 12. Versionshistorik (kort)
 
+- **v7.24.0** — Vækst-fanen: lokal indholdsoptimerer (`local_content_optimizer`, vægtet score + termdækning), konkurrent-sammenligning mod brugerangivne URL'er, indholdsplan (`content_briefs`) og manuel linkliste (`link_targets`) — ingen API-nøgle. UI'et er samtidig moderniseret: grupperet navigation, fanebeskrivelser og fælles visuel rytme for kort, felter og knapper
 - **v7.23.0** — Backup i UI: `POST /backup/now` og `POST /backup/restore` (kræver `GENDAN`), kort i fanen Moduler, `pre-restore`-backup før hver gendannelse
 - **v7.22.0** — Offline dashboard: Tailwind, Alpine og Chart.js serveres fra `app/static/vendor/` i stedet for CDN
 - **v7.21.0** — CSRF-beskyttelse (Origin/Sec-Fetch-Site-kontrol på muterende kald) og ny session ved hvert login

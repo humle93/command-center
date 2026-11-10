@@ -24,6 +24,7 @@ TABS = [
     ("seo", "cc-seo"),
     ("keywords", "cc-keywords"),
     ("articles", "cc-articles"),
+    ("vaekst", "cc-vaekst"),
     ("links", "cc-links"),
     ("spy", "cc-spy"),
     ("social", "cc-social"),

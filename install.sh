@@ -231,10 +231,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.23.0"
+APP_VERSION = "7.24.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.24.0", "Vaekst-fanen: lokal indholdsoptimerer, konkurrent-sammenligning, indholdsplan og linkliste - uden API-noegle"),
     ("7.23.0", "Backup i UI: tag en backup nu og gendan en gemt backup med bekraeftelse - der tages altid en pre-restore-kopi foerst"),
     ("7.22.0", "Offline dashboard: Tailwind, Alpine og Chart.js ligger lokalt under /static/vendor - ingen CDN-afhaengighed"),
     ("7.21.0", "CSRF-beskyttelse: muterende kald fra andre sites afvises (403); ny session ved hvert login og gammel sid slettes"),
@@ -258,7 +259,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Backup og gendannelse i fanen Moduler - med skriftlig bekraeftelse og en kopi foerst"
+NEWEST_LINE = "Vaekst-fanen maaler indhold, sammenligner med konkurrenter og holder planen - helt lokalt"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -654,6 +655,21 @@ def migrate_db():
             channel TEXT NOT NULL, severity TEXT, subject TEXT, body TEXT, payload TEXT,
             attempts INTEGER DEFAULT 0, next_attempt_at TEXT, state TEXT DEFAULT 'pending',
             last_error TEXT, created_at TEXT, sent_at TEXT
+        )""")
+        # v7.24: vaekst-fanen. Briefs er planen, link_targets er den manuelle linkliste, og
+        # content_audits er historikken fra indholdsoptimereren (de sidste 50 beholdes).
+        db.execute("""CREATE TABLE IF NOT EXISTS content_briefs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, keyword TEXT NOT NULL, intent TEXT, title TEXT,
+            words INTEGER, headings TEXT, terms TEXT, notes TEXT, planned_for TEXT,
+            status TEXT DEFAULT 'Planlagt', created_at TEXT
+        )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS link_targets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT UNIQUE NOT NULL, site TEXT, type TEXT,
+            reason TEXT, contact TEXT, status TEXT DEFAULT 'Ny', created_at TEXT
+        )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS content_audits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, keyword TEXT, score INTEGER,
+            words INTEGER, target_words INTEGER, terms_json TEXT, checks_json TEXT, created_at TEXT
         )""")
 
 
@@ -1136,8 +1152,8 @@ def invite_user(email: str, base_url: str = "", deliver=None, allow_example: boo
 
 
 # Fanerne i dashboardet - bruges naar en handling skal lande i den rigtige fane efter et POST.
-DASHBOARD_TABS = ("cockpit", "seo", "keywords", "articles", "links", "spy", "social", "monitors",
-                  "ai", "pro", "moduler", "brugere", "alarms", "notes")
+DASHBOARD_TABS = ("cockpit", "seo", "keywords", "articles", "vaekst", "links", "spy", "social",
+                  "monitors", "ai", "pro", "moduler", "brugere", "alarms", "notes")
 
 
 def invite_redirect(ok: bool, text: str, email: str = "", kind: str = "") -> str:
@@ -2436,6 +2452,9 @@ CRAWL_STATE = {"running": False, "done": 0, "total": 0, "start": "", "error": No
 # Anslået varighed (sekunder) pr. tung opgave - bruges af UI'et til timer + ETA.
 TASK_ESTIMATES = {
     "/seo/audit": {"label": "SEO-audit", "seconds": 12},
+    "/growth/optimize": {"label": "Indholdsoptimering", "seconds": 12},
+    "/growth/compare": {"label": "Konkurrent-sammenligning", "seconds": 20},
+    "/growth/brief": {"label": "Indholds-brief", "seconds": 15},
     "/seo/rewrite": {"label": "AI titel/meta-forslag", "seconds": 25},
     "/seo/linksuggest": {"label": "Interne link-forslag", "seconds": 25},
     "/serp/discover": {"label": "SERP-discovery", "seconds": 20},
@@ -4797,6 +4816,438 @@ async def visibility_series():
     return JSONResponse({"labels": [r["day"][5:] for r in rows], "scores": [r["score"] for r in rows]})
 
 
+# ---------- Vækst (v7.24): lokal SEO-optimering uden API-nøgle ----------
+# Surfer, Ahrefs, Semrush og BabyLoveGrowth gør tre ting: måler indhold mod et termsæt,
+# sammenligner med konkurrenter og holder en plan. Det kan gøres lokalt: vi tæller ord og termer
+# selv, henter konkurrenternes sider med safe_request() og gemmer planen i SQLite. Ingen nøgle,
+# ingen eksterne AI-kald - og ingen påstand om søgevolumen eller backlink-data, vi ikke har.
+CONTENT_MAX_CHARS = 200_000
+COMPETITOR_MAX = 3
+CONTENT_DEFAULT_WORDS = 800
+BRIEF_STATUS = ("Planlagt", "Skrevet", "Publiceret", "Fravalgt")
+LINK_STATUS = ("Ny", "Kontaktet", "Link aftalt", "Link live", "Afvist")
+LINK_TYPES = ("Gæsteblog", "Ressourceside", "Nyhedsmedie", "Forum", "Katalog", "Partner", "Andet")
+
+# Danske og engelske funktionsord - de siger intet om emnet og ville fylde termlisten op.
+CONTENT_STOPWORDS = set("""
+og i jeg det at en den til er som på de med han af for ikke der var mig sig men et har om vi min
+havde ham hun nu over da fra du ud sin dem os op man hans hvor eller hvad skal selv her alle vil
+blev kunne ind når være dog noget ville jo deres efter ned skulle denne end dette mit også under
+have dig anden hende mine alt meget sit sine vor mod disse hvis din nogle hos blive mange ad
+bliver hendes været thi jer sådan mellem uden mere mindre stor stort små godt god dårlig
+the a an and or but if then than that this these those is are was were be been being of to in
+on at for from with without by as it its into about over under not no yes you your we our they
+their he she his her him them me my mine who whom which what when where why how all any both
+each few more most other some such only own same so too very can will just should now here
+there also may might must shall do does did done has have had having out up down off again
+""".split())
+
+
+def content_text(html: str) -> str:
+    """Synlig tekst fra HTML - scripts, styles og skabeloner tæller ikke med."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    for tag in soup(["script", "style", "noscript", "template"]):
+        tag.decompose()
+    return soup.get_text(" ", strip=True)
+
+
+def content_words(text: str) -> list:
+    return re.findall(r"[\w\u00C0-\u024F']+", (text or "").lower())
+
+
+def content_term_counts(text: str) -> dict:
+    counts = {}
+    for word in content_words(text):
+        word = word.strip("'")
+        if len(word) < 3 or word in CONTENT_STOPWORDS or word.isdigit():
+            continue
+        counts[word] = counts.get(word, 0) + 1
+    return counts
+
+
+def content_top_terms(text: str, limit: int = 12) -> list:
+    counts = content_term_counts(text)
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [{"term": t, "count": n} for t, n in ordered[:limit]]
+
+
+def parse_term_list(raw: str, limit: int = 25) -> list:
+    """'a, b; c' -> ['a', 'b', 'c'] (små bogstaver, uden dubletter)."""
+    out = []
+    for part in re.split(r"[,;\n]+", raw or ""):
+        term = re.sub(r"\s+", " ", part.strip().lower())
+        if term and term not in out:
+            out.append(term)
+    return out[:limit]
+
+
+def term_stats(text: str, term: str, words: int = 0) -> dict:
+    """Antal forekomster og tæthed for et ord eller en frase (hele ord, ikke delstrenge)."""
+    term = re.sub(r"\s+", " ", (term or "").strip().lower())
+    if not term:
+        return {"term": "", "count": 0, "density": 0.0, "present": False}
+    pattern = r"(?<![\w\u00C0-\u024F])" + re.escape(term) + r"(?![\w\u00C0-\u024F])"
+    count = len(re.findall(pattern, (text or "").lower()))
+    wc = words or len(content_words(text))
+    density = round(count * max(len(term.split()), 1) / max(wc, 1) * 100, 2)
+    return {"term": term, "count": count, "density": density, "present": count > 0}
+
+
+def content_profile(html: str, url: str = "") -> dict:
+    """Det vi kan måle på en side uden hjælp udefra: ord, overskrifter, links og toptermer."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    title_tag = soup.find("title")
+    title = title_tag.get_text(" ", strip=True) if title_tag else ""
+    meta_tag = soup.find("meta", attrs={"name": "description"})
+    meta = (meta_tag.get("content") or "").strip() if meta_tag else ""
+    h1 = [h.get_text(" ", strip=True) for h in soup.find_all("h1")]
+    h2 = [h.get_text(" ", strip=True) for h in soup.find_all("h2")]
+    text = content_text(html)
+    words = content_words(text)
+    host = urlparse(url).netloc if url else ""
+    links = [a.get("href", "") for a in soup.find_all("a", href=True)]
+    internal = [l for l in links if l.startswith("/") or (host and host in l)]
+    external = [l for l in links if l.startswith("http") and (not host or host not in l)]
+    return {"url": url, "title": title, "meta": meta, "h1": h1[:3], "h2": h2, "h2_count": len(h2),
+            "words": len(words), "text": text, "internal": len(internal), "external": len(external),
+            "top_terms": content_top_terms(text)}
+
+
+def local_content_optimizer(html: str, keyword: str = "", terms=None, target_words: int = 0) -> dict:
+    """Lokal 0-100-score med begrundede forbedringer - samme idé som Surfer, uden SERP-data.
+
+    Hver kontrol har en vægt, så scoren er et vægtet gennemsnit af det, der faktisk kan måles i
+    teksten: fokus-keyword på de rigtige pladser, tæthed, struktur, længde, links og dækning af
+    de relaterede termer. Ingen skjult model og ingen tal udefra.
+    """
+    keyword = re.sub(r"\s+", " ", (keyword or "").strip().lower())
+    terms = [t for t in (terms or []) if t and t != keyword]
+    profile = content_profile(html or "")
+    text, wc = profile["text"], profile["words"]
+    try:
+        target = max(100, int(target_words or CONTENT_DEFAULT_WORDS))
+    except (TypeError, ValueError):
+        target = CONTENT_DEFAULT_WORDS
+    checks = []
+
+    def add(name, ok, weight, info="", hint=""):
+        checks.append({"name": name, "ok": bool(ok), "weight": weight, "info": info, "hint": hint})
+
+    word_list = content_words(text)
+    first_tenth = " ".join(word_list[: max(int(wc * 0.1), 25)])
+    kw_stats = term_stats(text, keyword, wc) if keyword else {"term": "", "count": 0, "density": 0.0}
+    if keyword:
+        title_hit = keyword in profile["title"].lower()
+        h1_hit = any(keyword in h.lower() for h in profile["h1"])
+        h2_hits = sum(1 for h in profile["h2"] if keyword in h.lower())
+        add("Keyword i titel", title_hit, 6, "ja" if title_hit else "nej",
+            "Skriv fokus-keyword i sidens titel")
+        add("Keyword i H1", h1_hit, 5, "ja" if h1_hit else "nej",
+            "Lad H1 indeholde fokus-keyword")
+        add("Keyword i første 10 % af teksten", keyword in first_tenth, 4,
+            f"{kw_stats['count']} forekomster i alt", "Nævn fokus-keyword tidligt i indledningen")
+        add("Keyword i mindst 2 H2", h2_hits >= 2, 4, f"{h2_hits} H2",
+            "Brug fokus-keyword i mindst to underoverskrifter")
+        add("Keyword-tæthed 0,5-3 %", 0.5 <= kw_stats["density"] <= 3.0, 5,
+            f"{kw_stats['density']} %", "Juster antallet af gange fokus-keyword nævnes")
+    else:
+        add("Fokus-keyword angivet", False, 8, "mangler",
+            "Skriv det søgeord, siden skal ranke på")
+
+    add("Mindst 3 H2-overskrifter", profile["h2_count"] >= 3, 5, f"{profile['h2_count']} stk",
+        "Del indholdet op i mindst tre H2-afsnit")
+    add("Ordantal når målet", wc >= target, 7, f"{wc} af {target} ord",
+        f"Skriv ca. {max(target - wc, 0)} ord mere")
+    sentences = [s for s in re.split(r"[.!?]+\s", text) if len(s.strip()) > 2]
+    avg_sent = round(wc / max(len(sentences), 1), 1)
+    add("Korte sætninger (< 25 ord)", avg_sent < 25, 3, f"snit {avg_sent} ord",
+        "Del lange sætninger op")
+    paragraphs = BeautifulSoup(html or "", "html.parser").find_all("p")
+    long_paras = sum(1 for p in paragraphs if len(content_words(p.get_text(" ", strip=True))) > 150)
+    add("Korte afsnit (< 150 ord)", long_paras == 0, 2, f"{long_paras} lange",
+        "Del lange afsnit op")
+    add("Mindst 2 interne links", profile["internal"] >= 2, 4, f"{profile['internal']} stk",
+        "Link til mindst to relevante sider på sitet")
+    if profile["title"] or profile["meta"] or re.search(r"<head[\s>]", html or "", re.I):
+        meta_len = len(profile["meta"])
+        add("Meta description 70-160 tegn", 70 <= meta_len <= 160, 3, f"{meta_len} tegn",
+            "Skriv en meta description på 70-160 tegn")
+
+    extra_terms = [term_stats(text, t, wc) for t in terms]
+    if terms:
+        share = len([t for t in extra_terms if t["present"]]) / len(terms)
+        add("Relaterede termer dækket", share >= 0.6, 10, f"{round(share * 100)} % af {len(terms)}",
+            "Brug de manglende termer naturligt i teksten")
+
+    total = sum(c["weight"] for c in checks)
+    earned = sum(c["weight"] for c in checks if c["ok"])
+    fixes = sorted([c for c in checks if not c["ok"]], key=lambda c: -c["weight"])
+    term_rows = ([kw_stats] if keyword else []) + extra_terms
+    return {"score": round(earned / total * 100) if total else 0, "words": wc, "target_words": target,
+            "h2_count": profile["h2_count"], "title": profile["title"],
+            "meta_len": len(profile["meta"]), "internal": profile["internal"],
+            "external": profile["external"], "checks": checks,
+            "fixes": [{"text": c["name"], "info": c["info"], "hint": c["hint"]} for c in fixes],
+            "terms": [t for t in term_rows if t["term"]], "top_terms": profile["top_terms"]}
+
+
+def fetch_page_html(url: str) -> dict:
+    """Henter en side efter SSRF-tjek - samme vej som resten af appen bruger."""
+    try:
+        url = normalize_url(url)
+        response = safe_request(url, timeout=12)
+        return {"ok": True, "url": url, "html": (response.text or "")[:CONTENT_MAX_CHARS],
+                "status": response.status_code}
+    except Exception as e:
+        return {"ok": False, "url": (url or "").strip()[:200], "error": str(e)[:200]}
+
+
+def compare_with_competitors(url: str = "", html: str = "", competitors=None, keyword: str = "") -> dict:
+    """Sammenligner eget indhold med brugerangivne konkurrent-URL'er - helt uden SERP-API.
+
+    Vi kan ikke sige, hvem der ranker; brugeren peger på de sider, der skal måles imod. Det giver
+    ordantal, overskrifter og hvilke termer de dækker, som vi ikke gør.
+    """
+    competitors = [c.strip() for c in (competitors or []) if c and c.strip()][:COMPETITOR_MAX]
+    own_html, own_url = html or "", (url or "").strip()
+    if not own_html.strip():
+        if not own_url:
+            return {"ok": False, "error": "Indsæt din tekst eller din URL"}
+        fetched = fetch_page_html(own_url)
+        if not fetched.get("ok"):
+            return {"ok": False, "error": fetched.get("error") or "Din side kunne ikke hentes"}
+        own_html, own_url = fetched["html"], fetched["url"]
+    own = content_profile(own_html, own_url)
+    rows, words_list, h2_list, tally = [], [], [], {}
+    for competitor_url in competitors:
+        fetched = fetch_page_html(competitor_url)
+        if not fetched.get("ok"):
+            rows.append({"url": competitor_url, "ok": False,
+                         "error": fetched.get("error") or "kunne ikke hentes"})
+            continue
+        prof = content_profile(fetched["html"], fetched["url"])
+        rows.append({"url": prof["url"], "ok": True, "title": prof["title"], "words": prof["words"],
+                     "h2_count": prof["h2_count"], "top_terms": prof["top_terms"],
+                     "headings": prof["h2"][:6]})
+        words_list.append(prof["words"])
+        h2_list.append(prof["h2_count"])
+        for term in {t["term"] for t in prof["top_terms"]}:
+            tally[term] = tally.get(term, 0) + 1
+    good = [r for r in rows if r.get("ok")]
+    avg_words = round(sum(words_list) / len(words_list)) if words_list else 0
+    avg_h2 = round(sum(h2_list) / len(h2_list), 1) if h2_list else 0
+    own_counts = content_term_counts(own["text"])
+    keyword = re.sub(r"\s+", " ", (keyword or "").strip().lower())
+    missing, single = [], []
+    for term, hits in sorted(tally.items(), key=lambda kv: (-kv[1], kv[0])):
+        if term in own_counts or term == keyword:
+            continue
+        item = {"term": term, "in_competitors": hits}
+        if len(good) >= 2 and hits >= 2:
+            missing.append(item)
+        else:
+            single.append(item)
+    advice = []
+    if avg_words and own["words"] < avg_words * 0.8:
+        advice.append(f"Skriv ca. {max(avg_words - own['words'], 0)} ord mere - konkurrenternes snit er {avg_words} ord")
+    if avg_h2 and own["h2_count"] < avg_h2:
+        advice.append(f"Tilføj {max(int(round(avg_h2)) - own['h2_count'], 1)} H2-afsnit - konkurrenterne har {avg_h2} i snit")
+    if missing:
+        advice.append("Dæk de emner mindst to konkurrenter skriver om: " + ", ".join(m["term"] for m in missing[:6]))
+    if not advice:
+        advice.append("Du dækker det samme som konkurrenterne - brug overskuddet på bedre eksempler og links")
+    return {"ok": True, "own": {k: v for k, v in own.items() if k != "text"}, "competitors": rows,
+            "averages": {"words": avg_words, "h2": avg_h2, "pages": len(good)},
+            "missing_terms": missing[:15], "single_terms": single[:10], "advice": advice}
+
+
+def brief_headings(keyword: str, terms=None) -> list:
+    kw = keyword or "emnet"
+    headings = [f"Hvad er {kw}?", f"Hvorfor {kw} betyder noget for køberen"]
+    if terms:
+        headings.append("Det skal du vide om " + " og ".join(terms[:2]))
+    headings += [f"Sådan vælger du {kw}", "Pris og hvad du får for pengene",
+                 f"Ofte stillede spørgsmål om {kw}"]
+    return headings
+
+
+def brief_from_keyword(keyword: str, intent: str = "", terms_raw: str = "", competitors_raw: str = "") -> dict:
+    """Bygger en indholds-brief lokalt: mål for ord/H2, termliste, overskrifter og vinkler.
+
+    Er der konkurrent-URL'er med, kommer målene derfra (gennemsnit af deres ord og H2), og deres
+    topptermer og overskrifter bliver en del af briefen. Ellers bruges standardmålene.
+    """
+    keyword = re.sub(r"\s+", " ", (keyword or "").strip())
+    if not keyword:
+        return {"ok": False, "error": "Skriv et emne eller keyword"}
+    terms = parse_term_list(terms_raw, 12)
+    competitor_urls = [u.strip() for u in re.split(r"[\n,]+", competitors_raw or "") if u.strip()][:COMPETITOR_MAX]
+    words_list, h2_list, competitor_terms, angles, failed = [], [], [], [], []
+    for competitor_url in competitor_urls:
+        fetched = fetch_page_html(competitor_url)
+        if not fetched.get("ok"):
+            failed.append(competitor_url)
+            continue
+        prof = content_profile(fetched["html"], fetched["url"])
+        words_list.append(prof["words"])
+        h2_list.append(prof["h2_count"])
+        competitor_terms += [t["term"] for t in prof["top_terms"]]
+        angles += prof["h2"][:3]
+    target_words = int(round((sum(words_list) / len(words_list)) / 100.0) * 100) if words_list else 1200
+    target_words = max(800, min(target_words, 3000))
+    target_h2 = max(3, int(round(sum(h2_list) / len(h2_list)))) if h2_list else 5
+    merged = []
+    for term in terms + competitor_terms:
+        term = (term or "").strip().lower()
+        if term and term != keyword.lower() and term not in merged:
+            merged.append(term)
+    notes = [f"Mål: ca. {target_words} ord og {target_h2} H2-overskrifter"]
+    if words_list:
+        notes.append(f"Målene er gennemsnittet af {len(words_list)} konkurrentside(r)")
+    else:
+        notes.append("Ingen konkurrentsider blev læst - målene er standard (1200 ord, 5 H2)")
+    if angles:
+        notes.append("Konkurrenternes vinkler: " + " · ".join(angles[:5]))
+    if failed:
+        notes.append("Kunne ikke hente: " + ", ".join(failed))
+    notes.append("Termerne er talt fra teksten - der er ingen søgevolumen i tallene")
+    return {"ok": True, "keyword": keyword, "intent": (intent or "").strip()[:80],
+            "title": keyword[:1].upper() + keyword[1:] + " – guide, pris og valg",
+            "words": target_words, "h2": target_h2, "terms": merged[:12],
+            "headings": brief_headings(keyword, merged)[:max(target_h2, 5)], "notes": notes}
+
+
+@app.post("/growth/optimize")
+async def growth_optimize(request: Request):
+    """Indholdsoptimerer: tekst eller URL ind, score/termer/fixes ud (JSON til dashboardet)."""
+    form = await request.form()
+    content = str(form.get("content") or "")[:CONTENT_MAX_CHARS]
+    url = str(form.get("url") or "").strip()
+    keyword = str(form.get("keyword") or "").strip()
+    terms = parse_term_list(str(form.get("terms") or ""))
+    try:
+        target_words = int(str(form.get("target_words") or "0") or 0)
+    except ValueError:
+        target_words = 0
+    loop = asyncio.get_running_loop()
+    if not content.strip():
+        if not url:
+            return JSONResponse({"ok": False, "error": "Indsæt teksten eller en URL"}, status_code=400)
+        fetched = await loop.run_in_executor(executor, fetch_page_html, url)
+        if not fetched.get("ok"):
+            return JSONResponse({"ok": False, "error": fetched.get("error") or "Siden kunne ikke hentes"},
+                               status_code=400)
+        content, url = fetched["html"], fetched["url"]
+    result = await loop.run_in_executor(executor, local_content_optimizer, content, keyword, terms, target_words)
+    result.update({"ok": True, "url": url, "keyword": keyword})
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO content_audits (source, keyword, score, words, target_words, terms_json, checks_json, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (url or "indsat tekst", keyword, result["score"], result["words"], result["target_words"],
+             jsonlib.dumps(result["terms"], ensure_ascii=False),
+             jsonlib.dumps(result["fixes"], ensure_ascii=False), now_iso()),
+        )
+        db.execute("DELETE FROM content_audits WHERE id NOT IN (SELECT id FROM content_audits ORDER BY id DESC LIMIT 50)")
+    return JSONResponse(result)
+
+
+@app.post("/growth/compare")
+async def growth_compare(request: Request):
+    """Sammenligner egen side/tekst med op til tre konkurrent-URL'er (JSON)."""
+    form = await request.form()
+    content = str(form.get("content") or "")[:CONTENT_MAX_CHARS]
+    url = str(form.get("url") or "").strip()
+    keyword = str(form.get("keyword") or "").strip()
+    competitors = [c.strip() for c in re.split(r"[\n,]+", str(form.get("competitors") or "")) if c.strip()]
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        executor, compare_with_competitors, url, content, competitors[:COMPETITOR_MAX], keyword)
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=400)
+    return JSONResponse(result)
+
+
+@app.post("/growth/brief")
+async def growth_brief(keyword: str = Form(...), intent: str = Form(""), terms: str = Form(""),
+                       competitors: str = Form(""), planned_for: str = Form("")):
+    """Gemmer en indholds-brief i planen. Mål og termer bygges lokalt."""
+    keyword = keyword.strip()
+    if not keyword:
+        return RedirectResponse("/?tab=vaekst&brief=fejl&brief_msg=" +
+                                urllib.parse.quote("Skriv et emne eller keyword"), status_code=303)
+    planned = planned_for.strip()[:10]
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", planned or ""):
+        planned = ""
+    loop = asyncio.get_running_loop()
+    brief = await loop.run_in_executor(executor, brief_from_keyword, keyword, intent, terms, competitors)
+    if not brief.get("ok"):
+        return RedirectResponse("/?tab=vaekst&brief=fejl&brief_msg=" +
+                                urllib.parse.quote(brief.get("error", "Briefen kunne ikke bygges")[:160]),
+                                status_code=303)
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO content_briefs (keyword, intent, title, words, headings, terms, notes, planned_for, status, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (keyword[:120], brief["intent"], brief["title"][:200], brief["words"],
+             "\n".join(brief["headings"]), ", ".join(brief["terms"]), "\n".join(brief["notes"]),
+             planned, BRIEF_STATUS[0], now_iso()),
+        )
+    return RedirectResponse("/?tab=vaekst&brief=ok", status_code=303)
+
+
+@app.post("/growth/brief/status")
+async def growth_brief_status(id: int = Form(...), status: str = Form(...)):
+    if status not in BRIEF_STATUS:
+        return RedirectResponse("/?tab=vaekst", status_code=303)
+    with get_db() as db:
+        db.execute("UPDATE content_briefs SET status=? WHERE id=?", (status, id))
+    return RedirectResponse("/?tab=vaekst", status_code=303)
+
+
+@app.post("/growth/brief/delete")
+async def growth_brief_delete(id: int = Form(...)):
+    with get_db() as db:
+        db.execute("DELETE FROM content_briefs WHERE id=?", (id,))
+    return RedirectResponse("/?tab=vaekst", status_code=303)
+
+
+@app.post("/links/target/add")
+async def link_target_add(url: str = Form(...), type_: str = Form(""), contact: str = Form(""),
+                          reason: str = Form(""), site: str = Form("")):
+    """Manuel linkliste: den side man gerne vil have et link fra (ingen automatisk prospecting)."""
+    try:
+        url = normalize_url(url)
+    except ValueError as e:
+        return RedirectResponse("/?tab=vaekst&link=fejl&link_msg=" + urllib.parse.quote(str(e)[:160]),
+                                status_code=303)
+    site = (site or urlparse(url).netloc).strip()[:120]
+    link_type = type_ if type_ in LINK_TYPES else LINK_TYPES[-1]
+    with get_db() as db:
+        db.execute(
+            "INSERT OR IGNORE INTO link_targets (url, site, type, reason, contact, status, created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (url, site, link_type, reason.strip()[:300], contact.strip()[:200], LINK_STATUS[0], now_iso()),
+        )
+    return RedirectResponse("/?tab=vaekst&link=ok", status_code=303)
+
+
+@app.post("/links/target/status")
+async def link_target_status(id: int = Form(...), status: str = Form(...)):
+    if status not in LINK_STATUS:
+        return RedirectResponse("/?tab=vaekst", status_code=303)
+    with get_db() as db:
+        db.execute("UPDATE link_targets SET status=? WHERE id=?", (status, id))
+    return RedirectResponse("/?tab=vaekst", status_code=303)
+
+
+@app.post("/links/target/delete")
+async def link_target_delete(id: int = Form(...)):
+    with get_db() as db:
+        db.execute("DELETE FROM link_targets WHERE id=?", (id,))
+    return RedirectResponse("/?tab=vaekst", status_code=303)
+
+
 # ---------- Sanitering af artikel-HTML (XSS) ----------
 # AI-genereret indhold (og SERP-snippets i prompten) er ikke til at stole paa. Foer det vises
 # med |safe i dashboardet, fjernes alt undtagen en lille allow-list af formateringstags.
@@ -4842,6 +5293,10 @@ async def dashboard(request: Request):
     bk_msg = (request.query_params.get("bk_msg") or "").strip()[:200]
     cc_link = (request.query_params.get("cc_link") or "").strip().lower()[:8]
     cc_msg = (request.query_params.get("cc_msg") or "").strip()[:180]
+    brief_state = (request.query_params.get("brief") or "").strip().lower()[:8]
+    brief_msg = (request.query_params.get("brief_msg") or "").strip()[:180]
+    link_state = (request.query_params.get("link") or "").strip().lower()[:8]
+    link_msg = (request.query_params.get("link_msg") or "").strip()[:180]
     with get_db() as db:
         domains = db.execute("SELECT * FROM domains ORDER BY id DESC").fetchall()
         competitors = db.execute("SELECT * FROM competitors ORDER BY id DESC LIMIT 20").fetchall()
@@ -4870,6 +5325,12 @@ async def dashboard(request: Request):
         difficulties = db.execute("SELECT * FROM keyword_difficulty ORDER BY created_at DESC LIMIT 20").fetchall()
         # Read here, while the connection is open (get_db closes it when the block ends).
         backlink_rows = db.execute("SELECT * FROM backlink_prospects ORDER BY id DESC LIMIT 30").fetchall()
+        briefs = db.execute(
+            "SELECT * FROM content_briefs ORDER BY CASE status WHEN 'Planlagt' THEN 0 "
+            "WHEN 'Skrevet' THEN 1 ELSE 2 END, id DESC LIMIT 40"
+        ).fetchall()
+        link_targets = db.execute("SELECT * FROM link_targets ORDER BY id DESC LIMIT 40").fetchall()
+        content_audits = db.execute("SELECT * FROM content_audits ORDER BY id DESC LIMIT 5").fetchall()
         strategy_row = db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone()
         check_row = db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone()
         sgap_row = db.execute("SELECT value FROM settings WHERE key='sgap_snapshot'").fetchone()
@@ -4945,6 +5406,16 @@ async def dashboard(request: Request):
         "gaps": gaps,
         "outreach_rows": outreach_rows,
         "backlink_rows": backlink_rows,
+        "briefs": briefs,
+        "brief_statuses": BRIEF_STATUS,
+        "brief_feedback": ({"ok": brief_state == "ok", "message": brief_msg}
+                           if brief_state in ("ok", "fejl") else None),
+        "link_targets": link_targets,
+        "link_statuses": LINK_STATUS,
+        "link_types": LINK_TYPES,
+        "link_feedback": ({"ok": link_state == "ok", "message": link_msg}
+                          if link_state in ("ok", "fejl") else None),
+        "content_audits": content_audits,
         "ai_vis": ai_vis,
         "links_sug": links_sug,
         "health_hist_n": health_hist,
@@ -5641,6 +6112,8 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
       ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 8px; }
       ::-webkit-scrollbar-thumb:hover { background: #52525b; }
       nav, header { backdrop-filter: blur(12px); }
+      nav > div { scrollbar-width: none; }
+      nav > div::-webkit-scrollbar { display: none; }
       tbody tr { transition: background-color .12s ease; }
       tbody tr:hover { background: rgba(39,39,42,.45); }
       button, a, input { transition: all .15s ease; }
@@ -5650,13 +6123,106 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
       .bg-zinc-900:hover { border-color: #3f3f46; }
       @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
       @media (max-width: 640px) {
+        .cc-tabbar .cc-pill { display: none; }
+        .cc-hero { padding: .9rem 1rem; }
+        .cc-hero-stats { width: 100%; justify-content: space-between; gap: .9rem; }
+        .cc-hero-stats b { font-size: 1rem; }
+        .cc-term-row { grid-template-columns: minmax(0,1fr) 54px 72px; gap: .4rem; }
+        .cc-score { width: 84px; height: 84px; }
+        .cc-score b { font-size: 1.2rem; }
         nav::-webkit-scrollbar { display: none; }
         th, td { padding-top: .45rem; padding-bottom: .45rem; }
       }
+      /* ---- Designlag (v7.24): én rolig visuel rytme for kort, felter og navigation ---- */
+      :root { --cc-line: #27272a; --cc-line-strong: #3f3f46; --cc-accent: #34d399; }
+      body {
+        background:
+          radial-gradient(1100px 520px at 12% -8%, rgba(52,211,153,.10), transparent 62%),
+          radial-gradient(900px 480px at 96% -4%, rgba(56,189,248,.07), transparent 58%),
+          #09090b;
+        background-attachment: fixed;
+      }
+      main section > div.bg-zinc-900.border-zinc-800 {
+        background-image: linear-gradient(180deg, rgba(39,39,42,.42), rgba(24,24,27,.72));
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.035), 0 24px 48px -40px rgba(0,0,0,.95);
+        transition: border-color .18s ease, box-shadow .18s ease;
+      }
+      main section > div.bg-zinc-900.border-zinc-800:hover {
+        border-color: var(--cc-line-strong);
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 30px 60px -44px rgba(0,0,0,1);
+      }
+      main input:not([type=checkbox]):not([type=radio]), main select, main textarea {
+        background-color: rgba(9,9,11,.75) !important;
+        border-color: var(--cc-line) !important;
+        color: #e4e4e7;
+      }
+      main input:not([type=checkbox]):not([type=radio]):focus, main select:focus, main textarea:focus {
+        border-color: rgba(52,211,153,.55) !important;
+        box-shadow: 0 0 0 3px rgba(52,211,153,.12);
+        outline: none;
+      }
+      main button:hover { filter: brightness(1.12); }
+      .cc-nav-link { display:inline-flex; align-items:center; gap:.35rem; white-space:nowrap; padding:.38rem .68rem;
+        border-radius:.65rem; font-size:.72rem; color:#a1a1aa; border:1px solid transparent; }
+      .cc-nav-link:hover { color:#e4e4e7; background:rgba(63,63,70,.35); }
+      .cc-nav-link.is-active { color:#6ee7b7; background:linear-gradient(180deg, rgba(52,211,153,.18), rgba(52,211,153,.06));
+        border-color: rgba(52,211,153,.32); box-shadow: inset 0 0 0 1px rgba(52,211,153,.08); }
+      .cc-nav-group { display:flex; align-items:center; gap:.1rem; padding-right:.45rem; margin-right:.35rem; border-right:1px solid var(--cc-line); }
+      .cc-nav-group:last-child { border-right:0; }
+      .cc-card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:.75rem; margin-bottom:.9rem; }
+      .cc-card-title { font-size:.7rem; text-transform:uppercase; letter-spacing:.12em; color:#d4d4d8; font-weight:600; }
+      .cc-card-sub { font-size:.72rem; color:#71717a; margin-top:.3rem; max-width:60ch; line-height:1.55; }
+      .cc-pill { display:inline-flex; align-items:center; gap:.3rem; font-size:.62rem; letter-spacing:.08em; text-transform:uppercase;
+        padding:.2rem .55rem; border-radius:999px; border:1px solid rgba(52,211,153,.3); color:#6ee7b7;
+        background:rgba(52,211,153,.08); white-space:nowrap; }
+      .cc-eyebrow { font-size:.62rem; text-transform:uppercase; letter-spacing:.18em; color:#34d399; }
+      .cc-btn { display:inline-flex; align-items:center; gap:.4rem; border-radius:.7rem; padding:.5rem .9rem; font-size:.75rem;
+        border:1px solid var(--cc-line-strong); color:#d4d4d8; background:rgba(39,39,42,.6); }
+      .cc-btn-primary { display:inline-flex; align-items:center; gap:.4rem; border-radius:.7rem; padding:.5rem 1rem;
+        font-size:.78rem; font-weight:600; color:#052e21; background:linear-gradient(180deg,#6ee7b7,#34d399);
+        border:1px solid rgba(52,211,153,.6); }
+      .cc-hero { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:1rem;
+        border:1px solid rgba(52,211,153,.22); border-radius:1rem; padding:1.1rem 1.25rem;
+        background: radial-gradient(600px 170px at 0% 0%, rgba(52,211,153,.16), transparent 70%), rgba(17,17,19,.75); }
+      .cc-hero-title { font-size:1.05rem; font-weight:700; color:#f4f4f5; margin-top:.15rem; }
+      .cc-hero-text { font-size:.76rem; color:#a1a1aa; margin-top:.35rem; max-width:72ch; line-height:1.55; }
+      .cc-hero-stats { display:flex; gap:1.4rem; }
+      .cc-hero-stats b { display:block; font-size:1.15rem; color:#6ee7b7; font-variant-numeric:tabular-nums; }
+      .cc-hero-stats span { font-size:.62rem; color:#71717a; text-transform:uppercase; letter-spacing:.1em; }
+      .cc-score { position:relative; display:grid; place-items:center; width:104px; height:104px; border-radius:999px;
+        background: conic-gradient(var(--ring) calc(var(--pct) * 1%), rgba(63,63,70,.4) 0); flex:none; }
+      .cc-score::before { content:""; position:absolute; inset:9px; border-radius:inherit; background:#111113;
+        box-shadow: inset 0 0 0 1px rgba(255,255,255,.04); }
+      .cc-score b, .cc-score small { position:relative; font-variant-numeric:tabular-nums; }
+      .cc-score b { font-size:1.5rem; color:#f4f4f5; line-height:1; }
+      .cc-score small { font-size:.65rem; color:#71717a; }
+      .cc-term-row { display:grid; grid-template-columns: minmax(0,1fr) 84px 84px; gap:.6rem; align-items:center; font-size:.72rem; }
+      .cc-bar { height:5px; border-radius:999px; background:rgba(63,63,70,.45); overflow:hidden; }
+      .cc-bar i { display:block; height:100%; border-radius:inherit; background:linear-gradient(90deg,#34d399,#22d3ee); }
+      .cc-check { display:flex; align-items:baseline; gap:.5rem; font-size:.72rem; padding:.3rem .55rem; border-radius:.5rem; }
+      .cc-check + .cc-check { margin-top:.15rem; }
+      .cc-check.is-ok { color:#a7f3d0; background:rgba(52,211,153,.05); }
+      .cc-check.is-bad { color:#fecdd3; background:rgba(251,113,133,.06); }
+      .cc-check .cc-dot { width:6px; height:6px; border-radius:999px; background:currentColor; flex:none; margin-top:.35rem; }
+      .cc-fix { display:flex; flex-direction:column; gap:.12rem; font-size:.72rem; padding:.45rem .6rem; border-radius:.6rem;
+        background:rgba(251,191,36,.06); border:1px solid rgba(251,191,36,.18); }
+      .cc-fix b { color:#fcd34d; font-weight:600; }
+      .cc-fix span { color:#a1a1aa; }
+      .cc-chip { display:inline-flex; align-items:center; gap:.3rem; font-size:.68rem; padding:.2rem .5rem; border-radius:999px;
+        border:1px solid var(--cc-line-strong); color:#d4d4d8; background:rgba(39,39,42,.55); }
+      .cc-chip.is-missing { border-color:rgba(251,113,133,.35); color:#fda4af; background:rgba(251,113,133,.07); }
+      .cc-metric { display:flex; flex-direction:column; gap:.1rem; padding:.55rem .7rem; border-radius:.7rem;
+        border:1px solid var(--cc-line); background:rgba(9,9,11,.5); }
+      .cc-metric b { font-size:.95rem; color:#e4e4e7; font-variant-numeric:tabular-nums; }
+      .cc-metric span { font-size:.62rem; color:#71717a; text-transform:uppercase; letter-spacing:.09em; }
+      .cc-note { font-size:.72rem; color:#71717a; line-height:1.55; }
+      .cc-tabbar { display:flex; align-items:center; justify-content:space-between; gap:1rem; padding:.1rem .15rem 0; }
+      .cc-tabbar h2 { font-size:.95rem; font-weight:600; color:#f4f4f5; }
+      .cc-tabbar p { font-size:.72rem; color:#71717a; margin-top:.15rem; }
     </style>
 </head>
 {% if insecure %}<div class="bg-yellow-600 text-black text-xs text-center py-1.5 px-4 font-semibold">&Uacute;t&uacute;n HTTPS &mdash; login og adgangskoder sendes ukrypteret. S&aelig;t nginx + TLS op foran CC (se Install-dokumentationen).</div>{% endif %}
-<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: '{{ initial_tab }}', seoResult: null, seoLoading: false, crawl: null, histChart: null, histOpen: false, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
+<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: '{{ initial_tab }}', seoResult: null, seoLoading: false, crawl: null, histChart: null, histOpen: false, dups: null, healthChart: null, diff: null, redir: null, rewrite: null, growth: null, growthLoading: false, growthError: '', cmp: null, cmpLoading: false, cmpError: '' }">
 {% if env_password_warning %}
 <div class="bg-red-500/10 border-b border-red-500/40 text-red-300 text-xs text-center py-2 px-4">⚠️ {{ env_password_warning }}</div>
 {% endif %}
@@ -5666,41 +6232,61 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 {% if env_password_notice %}
 <div class="bg-sky-500/10 border-b border-sky-500/40 text-sky-300 text-xs text-center py-2 px-4">🧹 {{ env_password_notice.text }}</div>
 {% endif %}
-<header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
-    <div class="max-w-7xl mx-auto flex items-center justify-between">
-        <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v{{ app_version }} PRO</span></h1>
-            <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
+<header class="border-b border-zinc-800/80 bg-zinc-950/80 px-4 py-2.5">
+    <div class="max-w-7xl mx-auto flex items-center justify-between gap-3">
+        <div class="flex items-center gap-2.5 min-w-0">
+            <span class="grid place-items-center w-8 h-8 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-sm shrink-0">⚡</span>
+            <div class="leading-tight min-w-0">
+                <h1 class="font-semibold text-[13px] tracking-wide whitespace-nowrap">Command Center <span class="text-emerald-400">v{{ app_version }}</span></h1>
+                <p class="hidden sm:block text-[11px] text-zinc-500 truncate">SEO, indhold og drift</p>
+            </div>
         </div>
-        <div class="flex items-center gap-3">
-            <form action="/update/apply" method="POST" onsubmit="return confirm('Hent og installér nyeste version fra GitHub? Der laves en DB-backup først, og appen skal genstartes bagefter.')"><button class="text-xs text-zinc-400 hover:text-emerald-400">⬆️ Opdatér</button></form>
-            <a href="/health" class="text-xs text-emerald-400">Systemstatus</a>
-            {% if current_user %}<span class="text-xs text-zinc-500">👤 {{ current_user.email }}</span>
-            {% if client_ip %}<span class="text-xs text-zinc-600" title="Din IP">{{ client_ip }}</span>{% endif %}
-            <a href="/logout" class="text-xs text-zinc-500 hover:text-rose-400">Log ud</a>{% endif %}
+        <div class="flex items-center gap-2 text-[11px] shrink-0">
+            <form action="/update/apply" method="POST" onsubmit="return confirm('Hent og installér nyeste version fra GitHub? Der laves en DB-backup først, og appen skal genstartes bagefter.')"><button class="text-[11px] text-zinc-400 hover:text-emerald-400" title="Opdatér fra GitHub">⬆️<span class="hidden sm:inline"> Opdatér</span></button></form>
+            <a href="/health" class="text-[11px] text-emerald-400 hover:text-emerald-300" title="Systemstatus">🩺<span class="hidden sm:inline"> Systemstatus</span></a>
+            {% if current_user %}<span class="hidden sm:inline text-[11px] text-zinc-500">👤 {{ current_user.email }}</span>
+            {% if client_ip %}<span class="hidden md:inline text-[11px] text-zinc-600" title="Din IP">{{ client_ip }}</span>{% endif %}
+            <a href="/logout" class="text-[11px] text-zinc-500 hover:text-rose-400"><span class="hidden sm:inline">Log ud</span><span class="sm:hidden" aria-label="Log ud">⏏</span></a>{% endif %}
         </div>
     </div>
 </header>
-<nav class="sticky top-0 z-50 border-b border-zinc-800 bg-zinc-900/70 px-4 py-2 shadow-lg shadow-black/20">
-    <div class="max-w-7xl mx-auto flex gap-2 overflow-x-auto">
-        <button @click="tab='cockpit'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='cockpit' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🧭 1. Cockpit</button>
-        <button @click="tab='seo'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='seo' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🔍 2. SEO & Audit</button>
-        <button @click="tab='keywords'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='keywords' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🎯 3. Keywords</button>
-        <button @click="tab='articles'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='articles' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">✍️ 4. Indhold</button>
-        <button @click="tab='links'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='links' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🔗 5. Links</button>
-        <button @click="tab='spy'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='spy' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🕷️ 6. Spy</button>
-        <button @click="tab='social'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='social' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">📱 7. Social</button>
-        <button @click="tab='monitors'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='monitors' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🩺 8. Monitors</button>
-        <button @click="tab='ai'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='ai' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🤖 AI Tools</button>
-        <button @click="tab='pro'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='pro' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">💼 Pro</button>
-        <button @click="tab='moduler'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='moduler' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">⚙️ Moduler</button>
-        <button @click="tab='brugere'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='brugere' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">👤 Brugere</button>
-        
-        <button @click="tab='alarms'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='alarms' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">🚨 Alarmer{% if alarms %} ({{ alarms|length }}){% endif %}</button>
-        <button @click="tab='notes'" class="px-3 py-1.5 rounded-lg text-xs border" :class="tab==='notes' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'text-zinc-400 border-transparent'">📝 Noter</button>
+<nav class="sticky top-0 z-50 border-b border-zinc-800/80 bg-zinc-950/75 px-3 py-1.5 shadow-lg shadow-black/20">
+    <div class="max-w-7xl mx-auto flex items-center gap-1 overflow-x-auto">
+        <div class="cc-nav-group">
+            <button @click="tab='cockpit'" class="cc-nav-link" :class="tab==='cockpit' && 'is-active'">🧭 Cockpit</button>
+        </div>
+        <div class="cc-nav-group">
+            <button @click="tab='seo'" class="cc-nav-link" :class="tab==='seo' && 'is-active'">🔍 SEO &amp; audit</button>
+            <button @click="tab='keywords'" class="cc-nav-link" :class="tab==='keywords' && 'is-active'">🎯 Keywords</button>
+            <button @click="tab='vaekst'" class="cc-nav-link" :class="tab==='vaekst' && 'is-active'">🚀 Vækst</button>
+        </div>
+        <div class="cc-nav-group">
+            <button @click="tab='articles'" class="cc-nav-link" :class="tab==='articles' && 'is-active'">✍️ Indhold</button>
+            <button @click="tab='links'" class="cc-nav-link" :class="tab==='links' && 'is-active'">🔗 Links</button>
+            <button @click="tab='spy'" class="cc-nav-link" :class="tab==='spy' && 'is-active'">🕷️ Spy</button>
+        </div>
+        <div class="cc-nav-group">
+            <button @click="tab='social'" class="cc-nav-link" :class="tab==='social' && 'is-active'">📱 Social</button>
+            <button @click="tab='monitors'" class="cc-nav-link" :class="tab==='monitors' && 'is-active'">🩺 Monitors</button>
+            <button @click="tab='alarms'" class="cc-nav-link" :class="tab==='alarms' && 'is-active'">🚨 Alarmer{% if alarms %} ({{ alarms|length }}){% endif %}</button>
+        </div>
+        <div class="cc-nav-group">
+            <button @click="tab='ai'" class="cc-nav-link" :class="tab==='ai' && 'is-active'">🤖 AI</button>
+            <button @click="tab='pro'" class="cc-nav-link" :class="tab==='pro' && 'is-active'">💼 Pro</button>
+            <button @click="tab='moduler'" class="cc-nav-link" :class="tab==='moduler' && 'is-active'">⚙️ Moduler</button>
+            <button @click="tab='brugere'" class="cc-nav-link" :class="tab==='brugere' && 'is-active'">👤 Brugere</button>
+            <button @click="tab='notes'" class="cc-nav-link" :class="tab==='notes' && 'is-active'">📝 Noter</button>
+        </div>
     </div>
 </nav>
 <main class="max-w-7xl mx-auto p-4 space-y-4">
+    <div class="cc-tabbar flex-wrap">
+        <div>
+            <h2 x-text="ccTabInfo[tab]?.title || 'Cockpit'">Cockpit</h2>
+            <p x-text="ccTabInfo[tab]?.hint || ''"></p>
+        </div>
+        <span class="cc-pill">v{{ app_version }}</span>
+    </div>
 
     {% if not ai_enabled or not wp_enabled %}
     <div class="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-3 text-xs text-amber-300">
@@ -5712,13 +6298,14 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
     <section x-show="tab === 'cockpit'" class="space-y-4">
         <div class="bg-emerald-500/5 border border-emerald-500/20 rounded-2xl p-4">
             <h2 class="text-xs uppercase tracking-wider text-emerald-300 mb-2">🧭 Sådan bruger du Command Center (workflow)</h2>
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
-                <button @click="tab='seo'" class="bg-zinc-950 border border-zinc-800 rounded-xl p-2 text-left hover:border-emerald-500/40"><b class="text-emerald-400">2. SEO & Audit</b><br><span class="text-zinc-500">Kør audit + crawl</span></button>
-                <button @click="tab='keywords'" class="bg-zinc-950 border border-zinc-800 rounded-xl p-2 text-left hover:border-emerald-500/40"><b class="text-emerald-400">3. Keywords</b><br><span class="text-zinc-500">Positioner + difficulty</span></button>
-                <button @click="tab='articles'" class="bg-zinc-950 border border-zinc-800 rounded-xl p-2 text-left hover:border-emerald-500/40"><b class="text-emerald-400">4. Indhold</b><br><span class="text-zinc-500">AI-artikler + autopilot</span></button>
-                <button @click="tab='links'" class="bg-zinc-950 border border-zinc-800 rounded-xl p-2 text-left hover:border-emerald-500/40"><b class="text-emerald-400">5. Links</b><br><span class="text-zinc-500">Interne + backlinks</span></button>
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-2 text-[11px]">
+                <button @click="tab='seo'" class="bg-zinc-950 border border-zinc-800 rounded-xl p-2 text-left hover:border-emerald-500/40"><b class="text-emerald-400">SEO &amp; audit</b><br><span class="text-zinc-500">Kør audit + crawl</span></button>
+                <button @click="tab='keywords'" class="bg-zinc-950 border border-zinc-800 rounded-xl p-2 text-left hover:border-emerald-500/40"><b class="text-emerald-400">Keywords</b><br><span class="text-zinc-500">Positioner + difficulty</span></button>
+                <button @click="tab='articles'" class="bg-zinc-950 border border-zinc-800 rounded-xl p-2 text-left hover:border-emerald-500/40"><b class="text-emerald-400">Indhold</b><br><span class="text-zinc-500">AI-artikler + autopilot</span></button>
+                <button @click="tab='links'" class="bg-zinc-950 border border-zinc-800 rounded-xl p-2 text-left hover:border-emerald-500/40"><b class="text-emerald-400">Links</b><br><span class="text-zinc-500">Interne + backlinks</span></button>
+                <button @click="tab='vaekst'" class="bg-zinc-950 border border-zinc-800 rounded-xl p-2 text-left hover:border-emerald-500/40"><b class="text-emerald-400">Vækst</b><br><span class="text-zinc-500">Optimer + plan</span></button>
             </div>
-            <p class="text-[10px] text-zinc-600 mt-2">Trin 1 (Cockpit) er denne side: overvågning + alarmer. Trin 6-8 (Spy/Social/Monitors) er løbende vækst. AI Tools/Pro/Moduler er værktøj.</p>
+            <p class="text-[10px] text-zinc-600 mt-2">Cockpit er overblikket. SEO, Keywords og Vækst er den daglige analyse og plan; Indhold, Links og Spy producerer og finder muligheder. Social, Monitors og Alarmer holder driften i gang.</p>
         </div>
         {% if alarms %}
         <div class="bg-rose-500/10 border border-rose-500/30 rounded-2xl p-4">
@@ -6131,6 +6718,324 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                         {% endif %}
                     </tbody>
                 </table>
+            </div>
+        </div>
+    </section>
+
+    <!-- VÆKST -->
+    <section x-show="tab === 'vaekst'" class="space-y-4" style="display: none;">
+        <div class="cc-hero">
+            <div class="min-w-0">
+                <p class="cc-eyebrow">Vækst</p>
+                <h2 class="cc-hero-title">Indhold der er målt — ikke gættet</h2>
+                <p class="cc-hero-text">Optimer teksten mod et fokus-keyword og dine egne termer, mål den mod konkurrenter du selv peger på, og hold planen samlet. Alt regnes lokalt: ingen API-nøgle, ingen kald til fremmede tjenester, og ingen data der forlader serveren.</p>
+            </div>
+            <div class="cc-hero-stats">
+                <div title="Briefs i planen"><b>{{ briefs|length }}</b><span>briefs</span></div>
+                <div title="Linkmuligheder i listen"><b>{{ link_targets|length }}</b><span>links</span></div>
+                <div title="Seneste score fra indholdsoptimeringen"><b>{{ content_audits[0].score if content_audits else '–' }}</b><span>score</span></div>
+            </div>
+        </div>
+
+        {% if brief_feedback %}
+        <div class="rounded-xl border px-4 py-2 text-xs {{ 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' if brief_feedback.ok else 'border-rose-500/30 bg-rose-500/10 text-rose-300' }}">
+            {{ 'Briefen er lagt i planen.' if brief_feedback.ok else ('Briefen blev ikke oprettet: ' ~ (brief_feedback.message or 'ukendt fejl')) }}
+        </div>
+        {% endif %}
+        {% if link_feedback %}
+        <div class="rounded-xl border px-4 py-2 text-xs {{ 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' if link_feedback.ok else 'border-rose-500/30 bg-rose-500/10 text-rose-300' }}">
+            {{ 'Linkmuligheden er gemt.' if link_feedback.ok else ('Linkmuligheden blev ikke gemt: ' ~ (link_feedback.message or 'ukendt fejl')) }}
+        </div>
+        {% endif %}
+
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <div class="cc-card-head">
+                <div>
+                    <h2 class="cc-card-title">Indholdsoptimerer</h2>
+                    <p class="cc-card-sub">Indsæt din tekst eller en URL. Scoren er et vægtet gennemsnit af fokus-keyword, struktur, længde, links og dækning af dine termer — og hver manglende kontrol kommer med et konkret forslag.</p>
+                </div>
+                <span class="cc-pill">Lokal</span>
+            </div>
+            <form @submit.prevent="ccOptimize($el)" class="grid gap-2 md:grid-cols-2">
+                <textarea name="content" rows="5" placeholder="Indsæt artikeltekst eller HTML (kan udelades, hvis du angiver en URL)" class="md:col-span-2 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm"></textarea>
+                <input type="text" name="url" placeholder="https://ditdomaene.dk/guide (valgfrit)" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <input type="text" name="keyword" placeholder="Fokus-keyword" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <input type="text" name="terms" placeholder="Relaterede termer, adskilt af komma" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <input type="number" name="target_words" min="100" max="10000" step="50" value="1200" placeholder="Mål for ordantal" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <div class="md:col-span-2 flex flex-wrap items-center gap-3">
+                    <button class="cc-btn-primary">Analysér indhold</button>
+                    <span class="text-[11px] text-zinc-500" x-show="growthLoading" style="display: none;">Regner på teksten…</span>
+                    <span class="text-[11px] text-zinc-600">Ingen nøgle · intet sendes videre</span>
+                </div>
+            </form>
+            <p class="text-xs text-rose-400 mt-2" x-show="growthError" x-text="growthError" style="display: none;"></p>
+
+            <div x-show="growth" style="display: none;" class="mt-5 space-y-5">
+                <div class="flex flex-wrap items-center gap-5">
+                    <div class="cc-score" :style="'--pct:' + (growth?.score || 0) + ';--ring:' + ((growth?.score || 0) >= 80 ? '#34d399' : (growth?.score || 0) >= 50 ? '#fbbf24' : '#fb7185')">
+                        <b x-text="growth?.score"></b><small>/100</small>
+                    </div>
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 flex-1 min-w-[240px]">
+                        <div class="cc-metric"><b x-text="growth?.words"></b><span>ord</span></div>
+                        <div class="cc-metric"><b x-text="growth?.target_words"></b><span>mål</span></div>
+                        <div class="cc-metric"><b x-text="growth?.h2_count"></b><span>H2-afsnit</span></div>
+                        <div class="cc-metric"><b x-text="growth?.internal"></b><span>interne links</span></div>
+                    </div>
+                </div>
+
+                <div class="grid gap-4 lg:grid-cols-2">
+                    <div>
+                        <h3 class="cc-card-title mb-2">Termdækning</h3>
+                        <div class="space-y-2">
+                            <template x-for="t in (growth?.terms || [])" :key="t.term">
+                                <div class="cc-term-row">
+                                    <span class="text-zinc-200 truncate" x-text="t.term"></span>
+                                    <div class="cc-bar"><i :style="'width:' + Math.min(100, (t.density || 0) * 25) + '%'"></i></div>
+                                    <span class="text-zinc-500 text-right" x-text="t.count + '× · ' + t.density + ' %'"></span>
+                                </div>
+                            </template>
+                            <p x-show="!(growth?.terms || []).length" class="cc-note">Skriv et fokus-keyword eller nogle termer for at måle dækningen.</p>
+                        </div>
+                        <div x-show="(growth?.top_terms || []).length" class="mt-4">
+                            <h3 class="cc-card-title mb-2">Tekstens egne toptermer</h3>
+                            <div class="flex flex-wrap gap-1.5">
+                                <template x-for="t in (growth?.top_terms || []).slice(0, 10)" :key="'top' + t.term">
+                                    <span class="cc-chip"><span x-text="t.term"></span><span class="text-zinc-500" x-text="t.count + '×'"></span></span>
+                                </template>
+                            </div>
+                        </div>
+                    </div>
+                    <div>
+                        <h3 class="cc-card-title mb-2">Kontroller</h3>
+                        <ul class="space-y-1">
+                            <template x-for="c in (growth?.checks || [])" :key="c.name">
+                                <li class="cc-check" :class="c.ok ? 'is-ok' : 'is-bad'">
+                                    <span class="cc-dot"></span>
+                                    <span x-text="c.name"></span>
+                                    <span class="text-zinc-500 ml-auto text-right" x-text="c.info"></span>
+                                </li>
+                            </template>
+                        </ul>
+                    </div>
+                </div>
+
+                <div x-show="(growth?.fixes || []).length">
+                    <h3 class="cc-card-title mb-2">Næste skridt, vigtigst først</h3>
+                    <div class="space-y-1.5">
+                        <template x-for="(f, i) in (growth?.fixes || [])" :key="'fix' + i">
+                            <div class="cc-fix"><b x-text="(i + 1) + '. ' + f.text"></b><span x-text="f.hint"></span></div>
+                        </template>
+                    </div>
+                </div>
+                <p x-show="!(growth?.fixes || []).length" class="text-xs text-emerald-300">Alt det målbare sidder i skabet — gå efter links og opdateringer nu.</p>
+            </div>
+
+            {% if content_audits %}
+            <div class="mt-5 border-t border-zinc-800 pt-3">
+                <h3 class="cc-card-title mb-2">Seneste målinger</h3>
+                <div class="space-y-1">
+                    {% for a in content_audits %}
+                    <div class="flex items-center gap-3 text-[11px] text-zinc-500">
+                        <span class="px-2 py-0.5 rounded-md {% if a.score >= 80 %}bg-emerald-500/10 text-emerald-400{% elif a.score >= 50 %}bg-amber-500/10 text-amber-400{% else %}bg-rose-500/10 text-rose-400{% endif %}">{{ a.score }}</span>
+                        <span class="text-zinc-300 truncate max-w-[45%]" title="{{ a.source }}">{{ a.keyword or a.source }}</span>
+                        <span>{{ a.words }} ord</span>
+                        <span class="ml-auto whitespace-nowrap">{{ a.created_at[:16] }}</span>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <div class="cc-card-head">
+                <div>
+                    <h2 class="cc-card-title">Sammenlign med konkurrenter</h2>
+                    <p class="cc-card-sub">Du peger selv på de sider, du vil måles imod — op til tre. Vi henter dem, tæller ord og overskrifter og viser hvilke emner de dækker, som du ikke gør.</p>
+                </div>
+                <span class="cc-pill">Uden SERP-API</span>
+            </div>
+            <form @submit.prevent="ccCompare($el)" class="grid gap-2 md:grid-cols-2">
+                <input type="text" name="url" placeholder="Din side (URL)" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <input type="text" name="keyword" placeholder="Fokus-keyword (valgfrit)" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <textarea name="competitors" rows="3" placeholder="Konkurrent-URL'er — én pr. linje (op til 3)" class="md:col-span-2 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm"></textarea>
+                <div class="md:col-span-2 flex items-center gap-3">
+                    <button class="cc-btn">Sammenlign</button>
+                    <span class="text-[11px] text-zinc-500" x-show="cmpLoading" style="display: none;">Henter siderne…</span>
+                </div>
+            </form>
+            <p class="text-xs text-rose-400 mt-2" x-show="cmpError" x-text="cmpError" style="display: none;"></p>
+
+            <div x-show="cmp" style="display: none;" class="mt-4 space-y-4">
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <div class="cc-metric"><b x-text="cmp?.own?.words"></b><span>dine ord</span></div>
+                    <div class="cc-metric"><b x-text="cmp?.averages?.words || '–'"></b><span>deres snit</span></div>
+                    <div class="cc-metric"><b x-text="cmp?.own?.h2_count"></b><span>dine H2</span></div>
+                    <div class="cc-metric"><b x-text="cmp?.averages?.h2 || '–'"></b><span>deres H2</span></div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-xs">
+                        <thead class="text-zinc-500 text-left">
+                            <tr><th class="py-2 pr-3">Side</th><th class="py-2 pr-3">Ord</th><th class="py-2 pr-3">H2</th><th class="py-2">Toptermer</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr class="border-t border-zinc-800">
+                                <td class="py-2 pr-3 text-emerald-300">Din side</td>
+                                <td class="py-2 pr-3 text-zinc-300" x-text="cmp?.own?.words"></td>
+                                <td class="py-2 pr-3 text-zinc-300" x-text="cmp?.own?.h2_count"></td>
+                                <td class="py-2 text-zinc-500" x-text="(cmp?.own?.top_terms || []).slice(0, 6).map(t => t.term).join(', ')"></td>
+                            </tr>
+                            <template x-for="c in (cmp?.competitors || [])" :key="c.url">
+                                <tr class="border-t border-zinc-800">
+                                    <td class="py-2 pr-3 max-w-xs truncate" :title="c.url">
+                                        <span x-show="c.ok" class="text-zinc-300" x-text="c.url"></span>
+                                        <span x-show="!c.ok" class="text-rose-400" x-text="c.url + ' — ' + (c.error || 'fejl')"></span>
+                                    </td>
+                                    <td class="py-2 pr-3 text-zinc-400" x-text="c.ok ? c.words : '–'"></td>
+                                    <td class="py-2 pr-3 text-zinc-400" x-text="c.ok ? c.h2_count : '–'"></td>
+                                    <td class="py-2 text-zinc-500" x-text="c.ok ? (c.top_terms || []).slice(0, 6).map(t => t.term).join(', ') : ''"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+                <div>
+                    <h3 class="cc-card-title mb-2">Emner du mangler</h3>
+                    <div class="flex flex-wrap gap-1.5">
+                        <template x-for="m in (cmp?.missing_terms || [])" :key="'miss' + m.term">
+                            <span class="cc-chip is-missing"><span x-text="m.term"></span><span x-text="m.in_competitors + '/' + (cmp?.averages?.pages || 0)"></span></span>
+                        </template>
+                        <template x-for="m in (cmp?.single_terms || [])" :key="'single' + m.term">
+                            <span class="cc-chip"><span x-text="m.term"></span><span class="text-zinc-500" x-text="m.in_competitors + ' side'"></span></span>
+                        </template>
+                        <p x-show="!(cmp?.missing_terms || []).length && !(cmp?.single_terms || []).length" class="cc-note">Ingen emnegab fundet i de sider, der kunne hentes.</p>
+                    </div>
+                </div>
+                <ul class="space-y-1">
+                    <template x-for="(a, i) in (cmp?.advice || [])" :key="'adv' + i">
+                        <li class="text-xs text-zinc-300 flex gap-2"><span class="text-emerald-400">→</span><span x-text="a"></span></li>
+                    </template>
+                </ul>
+            </div>
+        </div>
+
+        <div class="grid gap-4 lg:grid-cols-2">
+            <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+                <div class="cc-card-head">
+                    <div>
+                        <h2 class="cc-card-title">Indholdsplan</h2>
+                        <p class="cc-card-sub">En brief pr. emne: mål for ord og H2, termer, overskrifter og de vinkler konkurrenterne bruger. Bygges lokalt.</p>
+                    </div>
+                    <span class="cc-pill">{{ briefs|length }} i kø</span>
+                </div>
+                <form action="/growth/brief" method="POST" class="grid gap-2">
+                    <input type="text" name="keyword" placeholder="Emne eller keyword" required class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                    <div class="grid grid-cols-2 gap-2">
+                        <select name="intent" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                            <option value="informationssøgning">Informationssøgning</option>
+                            <option value="sammenligning">Sammenligning</option>
+                            <option value="transaktionel">Købsintention</option>
+                            <option value="lokal">Lokal søgning</option>
+                        </select>
+                        <input type="date" name="planned_for" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                    </div>
+                    <input type="text" name="terms" placeholder="Termer du vil dække (valgfrit)" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                    <textarea name="competitors" rows="2" placeholder="Konkurrent-URL'er til at sætte målene (valgfrit)" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm"></textarea>
+                    <div><button class="cc-btn-primary">Byg brief</button></div>
+                </form>
+
+                <div class="mt-4 space-y-2 max-h-[26rem] overflow-y-auto pr-1">
+                    {% for b in briefs %}
+                    <details class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs">
+                        <summary class="cursor-pointer flex items-center gap-2">
+                            <span class="font-medium text-zinc-200 truncate">{{ b.keyword }}</span>
+                            <span class="cc-pill ml-auto">{{ b.status }}</span>
+                        </summary>
+                        <div class="mt-3 space-y-2 text-zinc-400">
+                            <p class="text-zinc-300">{{ b.title }}</p>
+                            <p class="cc-note">Mål: {{ b.words }} ord · {{ b.headings.split('\n')|length }} overskrifter{% if b.planned_for %} · planlagt {{ b.planned_for }}{% endif %}{% if b.intent %} · {{ b.intent }}{% endif %}</p>
+                            <div>
+                                <p class="text-zinc-500 uppercase tracking-wider text-[10px] mb-1">Overskrifter</p>
+                                <p class="whitespace-pre-line">{{ b.headings }}</p>
+                            </div>
+                            {% if b.terms %}
+                            <div>
+                                <p class="text-zinc-500 uppercase tracking-wider text-[10px] mb-1">Termer</p>
+                                <div class="flex flex-wrap gap-1">
+                                    {% for term in b.terms.split(', ') %}<span class="cc-chip">{{ term }}</span>{% endfor %}
+                                </div>
+                            </div>
+                            {% endif %}
+                            <div>
+                                <p class="text-zinc-500 uppercase tracking-wider text-[10px] mb-1">Noter</p>
+                                <p class="whitespace-pre-line">{{ b.notes }}</p>
+                            </div>
+                            <div class="flex items-center gap-2 pt-1">
+                                <form action="/growth/brief/status" method="POST">
+                                    <input type="hidden" name="id" value="{{ b.id }}">
+                                    <select name="status" onchange="this.form.submit()" class="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[11px]">
+                                        {% for st in brief_statuses %}<option value="{{ st }}"{{ ' selected' if st == b.status else '' }}>{{ st }}</option>{% endfor %}
+                                    </select>
+                                </form>
+                                <form action="/growth/brief/delete" method="POST" class="ml-auto">
+                                    <input type="hidden" name="id" value="{{ b.id }}">
+                                    <button class="text-zinc-500 hover:text-rose-400">Slet</button>
+                                </form>
+                            </div>
+                        </div>
+                    </details>
+                    {% else %}
+                    <p class="cc-note">Ingen briefs endnu — skriv et emne ovenfor, og planen bygges med det samme.</p>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+                <div class="cc-card-head">
+                    <div>
+                        <h2 class="cc-card-title">Linkmuligheder</h2>
+                        <p class="cc-card-sub">Din egen liste over sider, du vil have et link fra — med kontakt, begrundelse og status. Ingen automatisk udsendelse.</p>
+                    </div>
+                    <span class="cc-pill">{{ link_targets|length }} i alt</span>
+                </div>
+                <form action="/links/target/add" method="POST" class="grid gap-2">
+                    <input type="text" name="url" placeholder="https://partner.dk/ressourcer" required class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                    <div class="grid grid-cols-2 gap-2">
+                        <select name="type_" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                            {% for t in link_types %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+                        </select>
+                        <input type="text" name="contact" placeholder="Kontakt (navn eller mail)" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                    </div>
+                    <input type="text" name="reason" placeholder="Hvorfor er siden relevant?" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                    <div><button class="cc-btn-primary">Tilføj mulighed</button></div>
+                </form>
+
+                <div class="mt-4 space-y-2 max-h-[26rem] overflow-y-auto pr-1">
+                    {% for l in link_targets %}
+                    <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs space-y-1">
+                        <div class="flex items-center gap-2">
+                            <a href="{{ l.url }}" target="_blank" rel="noopener" class="font-medium text-emerald-400 truncate">{{ l.site or l.url }}</a>
+                            <span class="cc-pill ml-auto">{{ l.type }}</span>
+                        </div>
+                        {% if l.reason %}<p class="text-zinc-400">{{ l.reason }}</p>{% endif %}
+                        {% if l.contact %}<p class="text-zinc-500">Kontakt: {{ l.contact }}</p>{% endif %}
+                        <div class="flex items-center gap-2 pt-1">
+                            <form action="/links/target/status" method="POST">
+                                <input type="hidden" name="id" value="{{ l.id }}">
+                                <select name="status" onchange="this.form.submit()" class="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[11px]">
+                                    {% for st in link_statuses %}<option value="{{ st }}"{{ ' selected' if st == l.status else '' }}>{{ st }}</option>{% endfor %}
+                                </select>
+                            </form>
+                            <form action="/links/target/delete" method="POST" class="ml-auto">
+                                <input type="hidden" name="id" value="{{ l.id }}">
+                                <button class="text-zinc-500 hover:text-rose-400">Slet</button>
+                            </form>
+                        </div>
+                    </div>
+                    {% else %}
+                    <p class="cc-note">Ingen linkmuligheder endnu. Tilføj den første side, du vil række ud til.</p>
+                    {% endfor %}
+                </div>
             </div>
         </div>
     </section>
@@ -6769,16 +7674,16 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 </main>
 
 
-<div id="cc-task" class="hidden fixed bottom-4 right-4 z-[60] w-80 max-w-[90vw] bg-zinc-900 border border-zinc-800 rounded-2xl p-3 shadow-2xl shadow-black/60 text-xs" role="status" aria-live="polite">
-    <div class="flex items-center justify-between mb-1">
-        <span id="cc-task-label" class="text-zinc-200 font-medium">Arbejder...</span>
+<div id="cc-task" class="hidden fixed bottom-4 right-4 z-[60] w-80 max-w-[90vw] rounded-2xl border border-zinc-800 bg-zinc-900/95 backdrop-blur-md p-3 shadow-2xl shadow-black/60 text-xs" role="status" aria-live="polite">
+    <div class="flex items-center justify-between mb-1.5">
+        <span id="cc-task-label" class="text-zinc-200 font-medium">Arbejder…</span>
         <button type="button" onclick="ccTaskHide()" class="text-zinc-500 hover:text-rose-400" aria-label="Skjul fremdrift">✕</button>
     </div>
     <div class="h-1.5 bg-zinc-800 rounded-full overflow-hidden"><div id="cc-task-bar" class="h-full bg-emerald-500 transition-all duration-500" style="width:0%"></div></div>
-    <div class="flex items-center justify-between mt-1 text-[11px] text-zinc-500"><span id="cc-task-pct">0 %</span><span id="cc-task-eta"></span></div>
+    <div class="flex items-center justify-between mt-1.5 text-[11px] text-zinc-500"><span id="cc-task-pct">0 %</span><span id="cc-task-eta"></span></div>
     <p id="cc-task-note" class="text-[10px] text-zinc-500 mt-1 hidden"></p>
 </div>
-<div id="cc-toast" class="hidden fixed bottom-4 left-4 z-[60] bg-zinc-900 border border-emerald-500/30 rounded-xl px-3 py-2 text-xs text-emerald-300 shadow-lg" role="status"></div>
+<div id="cc-toast" class="hidden fixed bottom-4 left-4 z-[60] rounded-xl border border-emerald-500/30 bg-zinc-900/95 backdrop-blur-md px-3 py-2 text-xs text-emerald-300 shadow-lg" role="status"></div>
 
 <script>
     // ---- Opgave-fremdrift: timer, procent og ETA paa alle laengere opgaver ----
@@ -6961,6 +7866,61 @@ function loadVis() {
     });
 }
 if (document.getElementById('vischart')) loadVis();
+
+    // ---- Vækst (v7.24): fanebeskrivelser, indholdsoptimering og konkurrent-sammenligning ----
+    const ccTabInfo = {
+        cockpit: { title: 'Cockpit', hint: 'Overvågning, budget, jobs og åbne alarmer' },
+        seo: { title: 'SEO & audit', hint: 'Enkelt side, crawl, duplikater og redirects' },
+        keywords: { title: 'Keywords', hint: 'Positioner, idéer, sværhedsgrad og synlighed' },
+        vaekst: { title: 'Vækst', hint: 'Optimer indhold, mål mod konkurrenter og hold planen' },
+        articles: { title: 'Indhold', hint: 'Artikler, kvalitetsgate og WordPress-kladder' },
+        links: { title: 'Links', hint: 'Brudte links og forslag til interne links' },
+        spy: { title: 'Spy', hint: 'Find og læs konkurrenternes sider' },
+        social: { title: 'Social', hint: 'Opslagskø og broen til Steamgears Autopilot' },
+        monitors: { title: 'Monitors', hint: 'Tekst-, JSON- og prisovervågning' },
+        ai: { title: 'AI-værktøjer', hint: 'Titel/meta, outreach og AI-synlighed' },
+        pro: { title: 'Pro', hint: 'Content gap, sværhedsgrad og e-mailfund' },
+        moduler: { title: 'Moduler', hint: 'Slå funktionsområder til og fra' },
+        brugere: { title: 'Brugere', hint: 'Adgang, invitationer og MCP-nøgler' },
+        alarms: { title: 'Alarmer', hint: 'Hvad der kræver din opmærksomhed' },
+        notes: { title: 'Noter', hint: 'Hurtige noter til arbejdsflowet' }
+    };
+
+    // Den aktive fane skal altid vaere synlig i den vandrette navigation - ogsaa paa mobil.
+    function ccScrollActiveTab() {
+        const el = document.querySelector('.cc-nav-link.is-active');
+        if (!el || !el.scrollIntoView) return;
+        const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        el.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', inline: 'center', block: 'nearest' });
+    }
+    document.addEventListener('alpine:initialized', function () { setTimeout(ccScrollActiveTab, 60); });
+    document.addEventListener('click', function (e) {
+        if (e.target.closest && e.target.closest('.cc-nav-link')) { setTimeout(ccScrollActiveTab, 30); }
+    });
+
+    function ccFormBody(form) { return new URLSearchParams(new FormData(form)); }
+
+    function ccOptimize(form) {
+        const s = ccState();
+        s.growthLoading = true; s.growthError = ''; s.growth = null;
+        fetch('/growth/optimize', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: ccFormBody(form) })
+            .then(function (r) { return r.json(); })
+            .then(function (d) { if (!d.ok) { s.growthError = d.error || 'Analysen fejlede'; } else { s.growth = d; } })
+            .catch(function () { s.growthError = 'Netværksfejl - prøv igen'; })
+            .finally(function () { s.growthLoading = false; });
+    }
+
+    function ccCompare(form) {
+        const s = ccState();
+        s.cmpLoading = true; s.cmpError = ''; s.cmp = null;
+        fetch('/growth/compare', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: ccFormBody(form) })
+            .then(function (r) { return r.json(); })
+            .then(function (d) { if (!d.ok) { s.cmpError = d.error || 'Sammenligningen fejlede'; } else { s.cmp = d; } })
+            .catch(function () { s.cmpError = 'Netværksfejl - prøv igen'; })
+            .finally(function () { s.cmpLoading = false; });
+    }
 </script>
 </body>
 </html>
@@ -7225,12 +8185,17 @@ EOF_USERSVC
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.20 PRO
+# Command Center v7.24 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
+
+## Nyheder i v7.24
+
+- **Vækst-fanen (v7.24.0)** — en lokal udgave af det, Surfer, Ahrefs, Semrush og BabyLoveGrowth gør, uden API-nøgle: **indholdsoptimerer** med vægtet 0-100-score, termdækning og prioriteret forbedringsliste, **sammenligning** med op til tre konkurrent-URL'er du selv peger på, **indholdsplan** med briefs (mål for ord og H2, termer, overskrifter og konkurrenternes vinkler) og en **linkliste** med kontakt, begrundelse og status. Alt regnes lokalt — ingen nøgler, ingen eksterne AI-kald og ingen data der forlader serveren
+- **Moderniseret UI (v7.24.0)** — navigationen er delt i grupper (overblik, analyse, produktion, drift, system) med tydelig aktiv fane, hver fane har en kort beskrivelse øverst, og kort, felter, knapper og tabeller har fået én fælles visuel rytme. Funktioner, ruter og genveje er de samme
 
 ## Nyheder i v7.22
 
@@ -7278,6 +8243,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 - 🎯 **SEO-strategi** — AdSense / Affiliate / Backlink-vækst styrer AI-artiklernes stil + længde og autopilotens arbejde, med automatisk pre-flight-checkliste
 - 🌱 **Growth Pack** — backlink-prospector (SerpAPI top 10 → sitetype + kontakt-e-mail + AI-outreach-draft), keyword-ideer via Google/DDG-autocomplete, visibility-index
 - 🎯 **Keywords** — Google-positioner via SerpAPI (dagligt kl. 06:00), sværhedsgrads-heuristik, content gap mod top 10
+- 🚀 **Vækst** — lokal indholdsoptimering uden API-nøgle: score og termdækning for en tekst eller URL, sammenligning mod op til tre konkurrent-URL'er, indholdsplan med briefs og en manuel linkliste. Måler kun det, der står i teksten — ingen søgevolumen, ingen backlink-data
 - 🕷️ **SERP & Spy** — konkurrent-opdagelse + crawl af titel/H1/beskrivelse
 - 🔗 **Links** — ekstern linktjek + AI-forslag til interne links
 - 📱 **Social** — opslagskø med CSV-export og "→ Autopilot" (kladde i WordPress-pluginnet — kun **én** kladde pr. opslag, også ved dobbeltklik). Planlagt tid indtastes i lokal tid og gemmes som **lokal tid + UTC**, så sommertid ikke flytter opslaget
@@ -7292,7 +8258,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 
 ![Cockpit](docs/img/cc-cockpit.png)
 
-Cockpit med opdaterings-panel og alarmer. Login-siden og alle 14 faner ligger i `docs/img/`
+Cockpit med opdaterings-panel og alarmer. Login-siden og alle 15 faner ligger i `docs/img/`
 (`cc-login.png`, `cc-cockpit.png` … `cc-notes.png`); billederne er taget med
 `python3 scripts/screenshots.py` mod den kørende app, og samme kommando opdaterer dem — se
 [manualens afsnit om screenshots](docs/Command_Center_Bruger_og_Systemmanual.md#opdater-screenshots).
@@ -7386,7 +8352,7 @@ skriver alle filer (inkl. `deploy/nginx-command-center.conf` og `deploy/command-
 - **Backup**: `app/backups/cc-daglig-*.db` (14 gemmes) + `cc-pre-update-*.db` før hver opdatering. Gendan fra Moduler-fanen (skriv `GENDAN`)
 - **Health**: `/health` (200, eller 503 ved kritisk DB/disk-tilstand) viser også månedens API-forbrug
 - **Tests**: `python3 tests/test_v8_features.py` (enhedstests), `bash tests/ci_check.sh` (boot + alle sider + auth + WordPress-bro + link-audit)
-- **Screenshots**: `python3 scripts/screenshots.py` tager login-siden og alle 14 faner ind i `docs/img/` (kræver `pip install playwright` + `python3 -m playwright install chromium`; kør mod en kørende app med `--base/--user/--password`). CI advarer, hvis billederne er ældre end dashboard-skabelonen
+- **Screenshots**: `python3 scripts/screenshots.py` tager login-siden og alle 15 faner ind i `docs/img/` (kræver `pip install playwright` + `python3 -m playwright install chromium`; kør mod en kørende app med `--base/--user/--password`). CI advarer, hvis billederne er ældre end dashboard-skabelonen
 - **Fælles agentregler i alle repoer**: `bash scripts/agents_md_rollout.sh --dry-run` viser planen, og uden `--dry-run` lægger den `AGENTS.md` ind i alle dine repoer som branch + PR (kræver `gh` logget ind). En eksisterende fil overskrives kun med `--overwrite`, og `main` røres aldrig
 - **Scripts i `scripts/`**: alle otte har samme header — `navn - formål`, `Brug:`, `Kraever:` og `Sidst aendret` — og er eksekverbare. `bash scripts/update.sh -h` (og `--help` på de øvrige med flag) læser headeren, så hjælpen ikke kan drive fra scriptet. Versionsnumre står ikke i headere: de læses fra `APP_VERSION` i `app/main.py`
 
@@ -7462,7 +8428,8 @@ og handoff, `AGENTS.md` er de korte regler for agenter.
 - Dashboardet henter Tailwind, Alpine.js og Chart.js lokalt fra `app/static/vendor/` (siden v7.22), så det virker uden internetadgang. Login-siden er helt selvstændig.
 - Opdatering kræver `GITHUB_TOKEN`; ændringer i `requirements.txt` rapporteres men installeres først ved næste `./run.sh`.
 - `install.sh` indeholder kopier af projektets filer (CI tjekker at de matcher); ret derfor altid kildefilerne og kør regen, ikke installeren.
-- Screenshots i `docs/img/` er taget med `python3 scripts/screenshots.py` mod v7.13.x-UI'et; kør scriptet igen efter større UI-ændringer.
+- Screenshots i `docs/img/` er taget med `python3 scripts/screenshots.py` mod v7.13.x-UI'et; kør scriptet igen efter større UI-ændringer (vækst-fanen er endnu ikke fotograferet).
+- **Vækst måler tekst, ikke markedet**: Surfer, Ahrefs og Semrush bygger på egne webindekser og søgedata. Vækst-fanen tæller ord og termer i det indhold, du giver den, og henter kun de konkurrentsider, du selv angiver — derfor ingen søgevolumen, sværhedsgrad, placeringer eller backlink-profiler.
 EOF_README
 
 echo "📄 scripts/smoke_test.sh..."

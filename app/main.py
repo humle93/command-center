@@ -111,10 +111,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.23.0"
+APP_VERSION = "7.24.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.24.0", "Vaekst-fanen: lokal indholdsoptimerer, konkurrent-sammenligning, indholdsplan og linkliste - uden API-noegle"),
     ("7.23.0", "Backup i UI: tag en backup nu og gendan en gemt backup med bekraeftelse - der tages altid en pre-restore-kopi foerst"),
     ("7.22.0", "Offline dashboard: Tailwind, Alpine og Chart.js ligger lokalt under /static/vendor - ingen CDN-afhaengighed"),
     ("7.21.0", "CSRF-beskyttelse: muterende kald fra andre sites afvises (403); ny session ved hvert login og gammel sid slettes"),
@@ -138,7 +139,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Backup og gendannelse i fanen Moduler - med skriftlig bekraeftelse og en kopi foerst"
+NEWEST_LINE = "Vaekst-fanen maaler indhold, sammenligner med konkurrenter og holder planen - helt lokalt"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -534,6 +535,21 @@ def migrate_db():
             channel TEXT NOT NULL, severity TEXT, subject TEXT, body TEXT, payload TEXT,
             attempts INTEGER DEFAULT 0, next_attempt_at TEXT, state TEXT DEFAULT 'pending',
             last_error TEXT, created_at TEXT, sent_at TEXT
+        )""")
+        # v7.24: vaekst-fanen. Briefs er planen, link_targets er den manuelle linkliste, og
+        # content_audits er historikken fra indholdsoptimereren (de sidste 50 beholdes).
+        db.execute("""CREATE TABLE IF NOT EXISTS content_briefs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, keyword TEXT NOT NULL, intent TEXT, title TEXT,
+            words INTEGER, headings TEXT, terms TEXT, notes TEXT, planned_for TEXT,
+            status TEXT DEFAULT 'Planlagt', created_at TEXT
+        )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS link_targets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT UNIQUE NOT NULL, site TEXT, type TEXT,
+            reason TEXT, contact TEXT, status TEXT DEFAULT 'Ny', created_at TEXT
+        )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS content_audits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, keyword TEXT, score INTEGER,
+            words INTEGER, target_words INTEGER, terms_json TEXT, checks_json TEXT, created_at TEXT
         )""")
 
 
@@ -1016,8 +1032,8 @@ def invite_user(email: str, base_url: str = "", deliver=None, allow_example: boo
 
 
 # Fanerne i dashboardet - bruges naar en handling skal lande i den rigtige fane efter et POST.
-DASHBOARD_TABS = ("cockpit", "seo", "keywords", "articles", "links", "spy", "social", "monitors",
-                  "ai", "pro", "moduler", "brugere", "alarms", "notes")
+DASHBOARD_TABS = ("cockpit", "seo", "keywords", "articles", "vaekst", "links", "spy", "social",
+                  "monitors", "ai", "pro", "moduler", "brugere", "alarms", "notes")
 
 
 def invite_redirect(ok: bool, text: str, email: str = "", kind: str = "") -> str:
@@ -2316,6 +2332,9 @@ CRAWL_STATE = {"running": False, "done": 0, "total": 0, "start": "", "error": No
 # Anslået varighed (sekunder) pr. tung opgave - bruges af UI'et til timer + ETA.
 TASK_ESTIMATES = {
     "/seo/audit": {"label": "SEO-audit", "seconds": 12},
+    "/growth/optimize": {"label": "Indholdsoptimering", "seconds": 12},
+    "/growth/compare": {"label": "Konkurrent-sammenligning", "seconds": 20},
+    "/growth/brief": {"label": "Indholds-brief", "seconds": 15},
     "/seo/rewrite": {"label": "AI titel/meta-forslag", "seconds": 25},
     "/seo/linksuggest": {"label": "Interne link-forslag", "seconds": 25},
     "/serp/discover": {"label": "SERP-discovery", "seconds": 20},
@@ -4677,6 +4696,438 @@ async def visibility_series():
     return JSONResponse({"labels": [r["day"][5:] for r in rows], "scores": [r["score"] for r in rows]})
 
 
+# ---------- Vækst (v7.24): lokal SEO-optimering uden API-nøgle ----------
+# Surfer, Ahrefs, Semrush og BabyLoveGrowth gør tre ting: måler indhold mod et termsæt,
+# sammenligner med konkurrenter og holder en plan. Det kan gøres lokalt: vi tæller ord og termer
+# selv, henter konkurrenternes sider med safe_request() og gemmer planen i SQLite. Ingen nøgle,
+# ingen eksterne AI-kald - og ingen påstand om søgevolumen eller backlink-data, vi ikke har.
+CONTENT_MAX_CHARS = 200_000
+COMPETITOR_MAX = 3
+CONTENT_DEFAULT_WORDS = 800
+BRIEF_STATUS = ("Planlagt", "Skrevet", "Publiceret", "Fravalgt")
+LINK_STATUS = ("Ny", "Kontaktet", "Link aftalt", "Link live", "Afvist")
+LINK_TYPES = ("Gæsteblog", "Ressourceside", "Nyhedsmedie", "Forum", "Katalog", "Partner", "Andet")
+
+# Danske og engelske funktionsord - de siger intet om emnet og ville fylde termlisten op.
+CONTENT_STOPWORDS = set("""
+og i jeg det at en den til er som på de med han af for ikke der var mig sig men et har om vi min
+havde ham hun nu over da fra du ud sin dem os op man hans hvor eller hvad skal selv her alle vil
+blev kunne ind når være dog noget ville jo deres efter ned skulle denne end dette mit også under
+have dig anden hende mine alt meget sit sine vor mod disse hvis din nogle hos blive mange ad
+bliver hendes været thi jer sådan mellem uden mere mindre stor stort små godt god dårlig
+the a an and or but if then than that this these those is are was were be been being of to in
+on at for from with without by as it its into about over under not no yes you your we our they
+their he she his her him them me my mine who whom which what when where why how all any both
+each few more most other some such only own same so too very can will just should now here
+there also may might must shall do does did done has have had having out up down off again
+""".split())
+
+
+def content_text(html: str) -> str:
+    """Synlig tekst fra HTML - scripts, styles og skabeloner tæller ikke med."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    for tag in soup(["script", "style", "noscript", "template"]):
+        tag.decompose()
+    return soup.get_text(" ", strip=True)
+
+
+def content_words(text: str) -> list:
+    return re.findall(r"[\w\u00C0-\u024F']+", (text or "").lower())
+
+
+def content_term_counts(text: str) -> dict:
+    counts = {}
+    for word in content_words(text):
+        word = word.strip("'")
+        if len(word) < 3 or word in CONTENT_STOPWORDS or word.isdigit():
+            continue
+        counts[word] = counts.get(word, 0) + 1
+    return counts
+
+
+def content_top_terms(text: str, limit: int = 12) -> list:
+    counts = content_term_counts(text)
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [{"term": t, "count": n} for t, n in ordered[:limit]]
+
+
+def parse_term_list(raw: str, limit: int = 25) -> list:
+    """'a, b; c' -> ['a', 'b', 'c'] (små bogstaver, uden dubletter)."""
+    out = []
+    for part in re.split(r"[,;\n]+", raw or ""):
+        term = re.sub(r"\s+", " ", part.strip().lower())
+        if term and term not in out:
+            out.append(term)
+    return out[:limit]
+
+
+def term_stats(text: str, term: str, words: int = 0) -> dict:
+    """Antal forekomster og tæthed for et ord eller en frase (hele ord, ikke delstrenge)."""
+    term = re.sub(r"\s+", " ", (term or "").strip().lower())
+    if not term:
+        return {"term": "", "count": 0, "density": 0.0, "present": False}
+    pattern = r"(?<![\w\u00C0-\u024F])" + re.escape(term) + r"(?![\w\u00C0-\u024F])"
+    count = len(re.findall(pattern, (text or "").lower()))
+    wc = words or len(content_words(text))
+    density = round(count * max(len(term.split()), 1) / max(wc, 1) * 100, 2)
+    return {"term": term, "count": count, "density": density, "present": count > 0}
+
+
+def content_profile(html: str, url: str = "") -> dict:
+    """Det vi kan måle på en side uden hjælp udefra: ord, overskrifter, links og toptermer."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    title_tag = soup.find("title")
+    title = title_tag.get_text(" ", strip=True) if title_tag else ""
+    meta_tag = soup.find("meta", attrs={"name": "description"})
+    meta = (meta_tag.get("content") or "").strip() if meta_tag else ""
+    h1 = [h.get_text(" ", strip=True) for h in soup.find_all("h1")]
+    h2 = [h.get_text(" ", strip=True) for h in soup.find_all("h2")]
+    text = content_text(html)
+    words = content_words(text)
+    host = urlparse(url).netloc if url else ""
+    links = [a.get("href", "") for a in soup.find_all("a", href=True)]
+    internal = [l for l in links if l.startswith("/") or (host and host in l)]
+    external = [l for l in links if l.startswith("http") and (not host or host not in l)]
+    return {"url": url, "title": title, "meta": meta, "h1": h1[:3], "h2": h2, "h2_count": len(h2),
+            "words": len(words), "text": text, "internal": len(internal), "external": len(external),
+            "top_terms": content_top_terms(text)}
+
+
+def local_content_optimizer(html: str, keyword: str = "", terms=None, target_words: int = 0) -> dict:
+    """Lokal 0-100-score med begrundede forbedringer - samme idé som Surfer, uden SERP-data.
+
+    Hver kontrol har en vægt, så scoren er et vægtet gennemsnit af det, der faktisk kan måles i
+    teksten: fokus-keyword på de rigtige pladser, tæthed, struktur, længde, links og dækning af
+    de relaterede termer. Ingen skjult model og ingen tal udefra.
+    """
+    keyword = re.sub(r"\s+", " ", (keyword or "").strip().lower())
+    terms = [t for t in (terms or []) if t and t != keyword]
+    profile = content_profile(html or "")
+    text, wc = profile["text"], profile["words"]
+    try:
+        target = max(100, int(target_words or CONTENT_DEFAULT_WORDS))
+    except (TypeError, ValueError):
+        target = CONTENT_DEFAULT_WORDS
+    checks = []
+
+    def add(name, ok, weight, info="", hint=""):
+        checks.append({"name": name, "ok": bool(ok), "weight": weight, "info": info, "hint": hint})
+
+    word_list = content_words(text)
+    first_tenth = " ".join(word_list[: max(int(wc * 0.1), 25)])
+    kw_stats = term_stats(text, keyword, wc) if keyword else {"term": "", "count": 0, "density": 0.0}
+    if keyword:
+        title_hit = keyword in profile["title"].lower()
+        h1_hit = any(keyword in h.lower() for h in profile["h1"])
+        h2_hits = sum(1 for h in profile["h2"] if keyword in h.lower())
+        add("Keyword i titel", title_hit, 6, "ja" if title_hit else "nej",
+            "Skriv fokus-keyword i sidens titel")
+        add("Keyword i H1", h1_hit, 5, "ja" if h1_hit else "nej",
+            "Lad H1 indeholde fokus-keyword")
+        add("Keyword i første 10 % af teksten", keyword in first_tenth, 4,
+            f"{kw_stats['count']} forekomster i alt", "Nævn fokus-keyword tidligt i indledningen")
+        add("Keyword i mindst 2 H2", h2_hits >= 2, 4, f"{h2_hits} H2",
+            "Brug fokus-keyword i mindst to underoverskrifter")
+        add("Keyword-tæthed 0,5-3 %", 0.5 <= kw_stats["density"] <= 3.0, 5,
+            f"{kw_stats['density']} %", "Juster antallet af gange fokus-keyword nævnes")
+    else:
+        add("Fokus-keyword angivet", False, 8, "mangler",
+            "Skriv det søgeord, siden skal ranke på")
+
+    add("Mindst 3 H2-overskrifter", profile["h2_count"] >= 3, 5, f"{profile['h2_count']} stk",
+        "Del indholdet op i mindst tre H2-afsnit")
+    add("Ordantal når målet", wc >= target, 7, f"{wc} af {target} ord",
+        f"Skriv ca. {max(target - wc, 0)} ord mere")
+    sentences = [s for s in re.split(r"[.!?]+\s", text) if len(s.strip()) > 2]
+    avg_sent = round(wc / max(len(sentences), 1), 1)
+    add("Korte sætninger (< 25 ord)", avg_sent < 25, 3, f"snit {avg_sent} ord",
+        "Del lange sætninger op")
+    paragraphs = BeautifulSoup(html or "", "html.parser").find_all("p")
+    long_paras = sum(1 for p in paragraphs if len(content_words(p.get_text(" ", strip=True))) > 150)
+    add("Korte afsnit (< 150 ord)", long_paras == 0, 2, f"{long_paras} lange",
+        "Del lange afsnit op")
+    add("Mindst 2 interne links", profile["internal"] >= 2, 4, f"{profile['internal']} stk",
+        "Link til mindst to relevante sider på sitet")
+    if profile["title"] or profile["meta"] or re.search(r"<head[\s>]", html or "", re.I):
+        meta_len = len(profile["meta"])
+        add("Meta description 70-160 tegn", 70 <= meta_len <= 160, 3, f"{meta_len} tegn",
+            "Skriv en meta description på 70-160 tegn")
+
+    extra_terms = [term_stats(text, t, wc) for t in terms]
+    if terms:
+        share = len([t for t in extra_terms if t["present"]]) / len(terms)
+        add("Relaterede termer dækket", share >= 0.6, 10, f"{round(share * 100)} % af {len(terms)}",
+            "Brug de manglende termer naturligt i teksten")
+
+    total = sum(c["weight"] for c in checks)
+    earned = sum(c["weight"] for c in checks if c["ok"])
+    fixes = sorted([c for c in checks if not c["ok"]], key=lambda c: -c["weight"])
+    term_rows = ([kw_stats] if keyword else []) + extra_terms
+    return {"score": round(earned / total * 100) if total else 0, "words": wc, "target_words": target,
+            "h2_count": profile["h2_count"], "title": profile["title"],
+            "meta_len": len(profile["meta"]), "internal": profile["internal"],
+            "external": profile["external"], "checks": checks,
+            "fixes": [{"text": c["name"], "info": c["info"], "hint": c["hint"]} for c in fixes],
+            "terms": [t for t in term_rows if t["term"]], "top_terms": profile["top_terms"]}
+
+
+def fetch_page_html(url: str) -> dict:
+    """Henter en side efter SSRF-tjek - samme vej som resten af appen bruger."""
+    try:
+        url = normalize_url(url)
+        response = safe_request(url, timeout=12)
+        return {"ok": True, "url": url, "html": (response.text or "")[:CONTENT_MAX_CHARS],
+                "status": response.status_code}
+    except Exception as e:
+        return {"ok": False, "url": (url or "").strip()[:200], "error": str(e)[:200]}
+
+
+def compare_with_competitors(url: str = "", html: str = "", competitors=None, keyword: str = "") -> dict:
+    """Sammenligner eget indhold med brugerangivne konkurrent-URL'er - helt uden SERP-API.
+
+    Vi kan ikke sige, hvem der ranker; brugeren peger på de sider, der skal måles imod. Det giver
+    ordantal, overskrifter og hvilke termer de dækker, som vi ikke gør.
+    """
+    competitors = [c.strip() for c in (competitors or []) if c and c.strip()][:COMPETITOR_MAX]
+    own_html, own_url = html or "", (url or "").strip()
+    if not own_html.strip():
+        if not own_url:
+            return {"ok": False, "error": "Indsæt din tekst eller din URL"}
+        fetched = fetch_page_html(own_url)
+        if not fetched.get("ok"):
+            return {"ok": False, "error": fetched.get("error") or "Din side kunne ikke hentes"}
+        own_html, own_url = fetched["html"], fetched["url"]
+    own = content_profile(own_html, own_url)
+    rows, words_list, h2_list, tally = [], [], [], {}
+    for competitor_url in competitors:
+        fetched = fetch_page_html(competitor_url)
+        if not fetched.get("ok"):
+            rows.append({"url": competitor_url, "ok": False,
+                         "error": fetched.get("error") or "kunne ikke hentes"})
+            continue
+        prof = content_profile(fetched["html"], fetched["url"])
+        rows.append({"url": prof["url"], "ok": True, "title": prof["title"], "words": prof["words"],
+                     "h2_count": prof["h2_count"], "top_terms": prof["top_terms"],
+                     "headings": prof["h2"][:6]})
+        words_list.append(prof["words"])
+        h2_list.append(prof["h2_count"])
+        for term in {t["term"] for t in prof["top_terms"]}:
+            tally[term] = tally.get(term, 0) + 1
+    good = [r for r in rows if r.get("ok")]
+    avg_words = round(sum(words_list) / len(words_list)) if words_list else 0
+    avg_h2 = round(sum(h2_list) / len(h2_list), 1) if h2_list else 0
+    own_counts = content_term_counts(own["text"])
+    keyword = re.sub(r"\s+", " ", (keyword or "").strip().lower())
+    missing, single = [], []
+    for term, hits in sorted(tally.items(), key=lambda kv: (-kv[1], kv[0])):
+        if term in own_counts or term == keyword:
+            continue
+        item = {"term": term, "in_competitors": hits}
+        if len(good) >= 2 and hits >= 2:
+            missing.append(item)
+        else:
+            single.append(item)
+    advice = []
+    if avg_words and own["words"] < avg_words * 0.8:
+        advice.append(f"Skriv ca. {max(avg_words - own['words'], 0)} ord mere - konkurrenternes snit er {avg_words} ord")
+    if avg_h2 and own["h2_count"] < avg_h2:
+        advice.append(f"Tilføj {max(int(round(avg_h2)) - own['h2_count'], 1)} H2-afsnit - konkurrenterne har {avg_h2} i snit")
+    if missing:
+        advice.append("Dæk de emner mindst to konkurrenter skriver om: " + ", ".join(m["term"] for m in missing[:6]))
+    if not advice:
+        advice.append("Du dækker det samme som konkurrenterne - brug overskuddet på bedre eksempler og links")
+    return {"ok": True, "own": {k: v for k, v in own.items() if k != "text"}, "competitors": rows,
+            "averages": {"words": avg_words, "h2": avg_h2, "pages": len(good)},
+            "missing_terms": missing[:15], "single_terms": single[:10], "advice": advice}
+
+
+def brief_headings(keyword: str, terms=None) -> list:
+    kw = keyword or "emnet"
+    headings = [f"Hvad er {kw}?", f"Hvorfor {kw} betyder noget for køberen"]
+    if terms:
+        headings.append("Det skal du vide om " + " og ".join(terms[:2]))
+    headings += [f"Sådan vælger du {kw}", "Pris og hvad du får for pengene",
+                 f"Ofte stillede spørgsmål om {kw}"]
+    return headings
+
+
+def brief_from_keyword(keyword: str, intent: str = "", terms_raw: str = "", competitors_raw: str = "") -> dict:
+    """Bygger en indholds-brief lokalt: mål for ord/H2, termliste, overskrifter og vinkler.
+
+    Er der konkurrent-URL'er med, kommer målene derfra (gennemsnit af deres ord og H2), og deres
+    topptermer og overskrifter bliver en del af briefen. Ellers bruges standardmålene.
+    """
+    keyword = re.sub(r"\s+", " ", (keyword or "").strip())
+    if not keyword:
+        return {"ok": False, "error": "Skriv et emne eller keyword"}
+    terms = parse_term_list(terms_raw, 12)
+    competitor_urls = [u.strip() for u in re.split(r"[\n,]+", competitors_raw or "") if u.strip()][:COMPETITOR_MAX]
+    words_list, h2_list, competitor_terms, angles, failed = [], [], [], [], []
+    for competitor_url in competitor_urls:
+        fetched = fetch_page_html(competitor_url)
+        if not fetched.get("ok"):
+            failed.append(competitor_url)
+            continue
+        prof = content_profile(fetched["html"], fetched["url"])
+        words_list.append(prof["words"])
+        h2_list.append(prof["h2_count"])
+        competitor_terms += [t["term"] for t in prof["top_terms"]]
+        angles += prof["h2"][:3]
+    target_words = int(round((sum(words_list) / len(words_list)) / 100.0) * 100) if words_list else 1200
+    target_words = max(800, min(target_words, 3000))
+    target_h2 = max(3, int(round(sum(h2_list) / len(h2_list)))) if h2_list else 5
+    merged = []
+    for term in terms + competitor_terms:
+        term = (term or "").strip().lower()
+        if term and term != keyword.lower() and term not in merged:
+            merged.append(term)
+    notes = [f"Mål: ca. {target_words} ord og {target_h2} H2-overskrifter"]
+    if words_list:
+        notes.append(f"Målene er gennemsnittet af {len(words_list)} konkurrentside(r)")
+    else:
+        notes.append("Ingen konkurrentsider blev læst - målene er standard (1200 ord, 5 H2)")
+    if angles:
+        notes.append("Konkurrenternes vinkler: " + " · ".join(angles[:5]))
+    if failed:
+        notes.append("Kunne ikke hente: " + ", ".join(failed))
+    notes.append("Termerne er talt fra teksten - der er ingen søgevolumen i tallene")
+    return {"ok": True, "keyword": keyword, "intent": (intent or "").strip()[:80],
+            "title": keyword[:1].upper() + keyword[1:] + " – guide, pris og valg",
+            "words": target_words, "h2": target_h2, "terms": merged[:12],
+            "headings": brief_headings(keyword, merged)[:max(target_h2, 5)], "notes": notes}
+
+
+@app.post("/growth/optimize")
+async def growth_optimize(request: Request):
+    """Indholdsoptimerer: tekst eller URL ind, score/termer/fixes ud (JSON til dashboardet)."""
+    form = await request.form()
+    content = str(form.get("content") or "")[:CONTENT_MAX_CHARS]
+    url = str(form.get("url") or "").strip()
+    keyword = str(form.get("keyword") or "").strip()
+    terms = parse_term_list(str(form.get("terms") or ""))
+    try:
+        target_words = int(str(form.get("target_words") or "0") or 0)
+    except ValueError:
+        target_words = 0
+    loop = asyncio.get_running_loop()
+    if not content.strip():
+        if not url:
+            return JSONResponse({"ok": False, "error": "Indsæt teksten eller en URL"}, status_code=400)
+        fetched = await loop.run_in_executor(executor, fetch_page_html, url)
+        if not fetched.get("ok"):
+            return JSONResponse({"ok": False, "error": fetched.get("error") or "Siden kunne ikke hentes"},
+                               status_code=400)
+        content, url = fetched["html"], fetched["url"]
+    result = await loop.run_in_executor(executor, local_content_optimizer, content, keyword, terms, target_words)
+    result.update({"ok": True, "url": url, "keyword": keyword})
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO content_audits (source, keyword, score, words, target_words, terms_json, checks_json, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (url or "indsat tekst", keyword, result["score"], result["words"], result["target_words"],
+             jsonlib.dumps(result["terms"], ensure_ascii=False),
+             jsonlib.dumps(result["fixes"], ensure_ascii=False), now_iso()),
+        )
+        db.execute("DELETE FROM content_audits WHERE id NOT IN (SELECT id FROM content_audits ORDER BY id DESC LIMIT 50)")
+    return JSONResponse(result)
+
+
+@app.post("/growth/compare")
+async def growth_compare(request: Request):
+    """Sammenligner egen side/tekst med op til tre konkurrent-URL'er (JSON)."""
+    form = await request.form()
+    content = str(form.get("content") or "")[:CONTENT_MAX_CHARS]
+    url = str(form.get("url") or "").strip()
+    keyword = str(form.get("keyword") or "").strip()
+    competitors = [c.strip() for c in re.split(r"[\n,]+", str(form.get("competitors") or "")) if c.strip()]
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        executor, compare_with_competitors, url, content, competitors[:COMPETITOR_MAX], keyword)
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=400)
+    return JSONResponse(result)
+
+
+@app.post("/growth/brief")
+async def growth_brief(keyword: str = Form(...), intent: str = Form(""), terms: str = Form(""),
+                       competitors: str = Form(""), planned_for: str = Form("")):
+    """Gemmer en indholds-brief i planen. Mål og termer bygges lokalt."""
+    keyword = keyword.strip()
+    if not keyword:
+        return RedirectResponse("/?tab=vaekst&brief=fejl&brief_msg=" +
+                                urllib.parse.quote("Skriv et emne eller keyword"), status_code=303)
+    planned = planned_for.strip()[:10]
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", planned or ""):
+        planned = ""
+    loop = asyncio.get_running_loop()
+    brief = await loop.run_in_executor(executor, brief_from_keyword, keyword, intent, terms, competitors)
+    if not brief.get("ok"):
+        return RedirectResponse("/?tab=vaekst&brief=fejl&brief_msg=" +
+                                urllib.parse.quote(brief.get("error", "Briefen kunne ikke bygges")[:160]),
+                                status_code=303)
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO content_briefs (keyword, intent, title, words, headings, terms, notes, planned_for, status, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (keyword[:120], brief["intent"], brief["title"][:200], brief["words"],
+             "\n".join(brief["headings"]), ", ".join(brief["terms"]), "\n".join(brief["notes"]),
+             planned, BRIEF_STATUS[0], now_iso()),
+        )
+    return RedirectResponse("/?tab=vaekst&brief=ok", status_code=303)
+
+
+@app.post("/growth/brief/status")
+async def growth_brief_status(id: int = Form(...), status: str = Form(...)):
+    if status not in BRIEF_STATUS:
+        return RedirectResponse("/?tab=vaekst", status_code=303)
+    with get_db() as db:
+        db.execute("UPDATE content_briefs SET status=? WHERE id=?", (status, id))
+    return RedirectResponse("/?tab=vaekst", status_code=303)
+
+
+@app.post("/growth/brief/delete")
+async def growth_brief_delete(id: int = Form(...)):
+    with get_db() as db:
+        db.execute("DELETE FROM content_briefs WHERE id=?", (id,))
+    return RedirectResponse("/?tab=vaekst", status_code=303)
+
+
+@app.post("/links/target/add")
+async def link_target_add(url: str = Form(...), type_: str = Form(""), contact: str = Form(""),
+                          reason: str = Form(""), site: str = Form("")):
+    """Manuel linkliste: den side man gerne vil have et link fra (ingen automatisk prospecting)."""
+    try:
+        url = normalize_url(url)
+    except ValueError as e:
+        return RedirectResponse("/?tab=vaekst&link=fejl&link_msg=" + urllib.parse.quote(str(e)[:160]),
+                                status_code=303)
+    site = (site or urlparse(url).netloc).strip()[:120]
+    link_type = type_ if type_ in LINK_TYPES else LINK_TYPES[-1]
+    with get_db() as db:
+        db.execute(
+            "INSERT OR IGNORE INTO link_targets (url, site, type, reason, contact, status, created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (url, site, link_type, reason.strip()[:300], contact.strip()[:200], LINK_STATUS[0], now_iso()),
+        )
+    return RedirectResponse("/?tab=vaekst&link=ok", status_code=303)
+
+
+@app.post("/links/target/status")
+async def link_target_status(id: int = Form(...), status: str = Form(...)):
+    if status not in LINK_STATUS:
+        return RedirectResponse("/?tab=vaekst", status_code=303)
+    with get_db() as db:
+        db.execute("UPDATE link_targets SET status=? WHERE id=?", (status, id))
+    return RedirectResponse("/?tab=vaekst", status_code=303)
+
+
+@app.post("/links/target/delete")
+async def link_target_delete(id: int = Form(...)):
+    with get_db() as db:
+        db.execute("DELETE FROM link_targets WHERE id=?", (id,))
+    return RedirectResponse("/?tab=vaekst", status_code=303)
+
+
 # ---------- Sanitering af artikel-HTML (XSS) ----------
 # AI-genereret indhold (og SERP-snippets i prompten) er ikke til at stole paa. Foer det vises
 # med |safe i dashboardet, fjernes alt undtagen en lille allow-list af formateringstags.
@@ -4722,6 +5173,10 @@ async def dashboard(request: Request):
     bk_msg = (request.query_params.get("bk_msg") or "").strip()[:200]
     cc_link = (request.query_params.get("cc_link") or "").strip().lower()[:8]
     cc_msg = (request.query_params.get("cc_msg") or "").strip()[:180]
+    brief_state = (request.query_params.get("brief") or "").strip().lower()[:8]
+    brief_msg = (request.query_params.get("brief_msg") or "").strip()[:180]
+    link_state = (request.query_params.get("link") or "").strip().lower()[:8]
+    link_msg = (request.query_params.get("link_msg") or "").strip()[:180]
     with get_db() as db:
         domains = db.execute("SELECT * FROM domains ORDER BY id DESC").fetchall()
         competitors = db.execute("SELECT * FROM competitors ORDER BY id DESC LIMIT 20").fetchall()
@@ -4750,6 +5205,12 @@ async def dashboard(request: Request):
         difficulties = db.execute("SELECT * FROM keyword_difficulty ORDER BY created_at DESC LIMIT 20").fetchall()
         # Read here, while the connection is open (get_db closes it when the block ends).
         backlink_rows = db.execute("SELECT * FROM backlink_prospects ORDER BY id DESC LIMIT 30").fetchall()
+        briefs = db.execute(
+            "SELECT * FROM content_briefs ORDER BY CASE status WHEN 'Planlagt' THEN 0 "
+            "WHEN 'Skrevet' THEN 1 ELSE 2 END, id DESC LIMIT 40"
+        ).fetchall()
+        link_targets = db.execute("SELECT * FROM link_targets ORDER BY id DESC LIMIT 40").fetchall()
+        content_audits = db.execute("SELECT * FROM content_audits ORDER BY id DESC LIMIT 5").fetchall()
         strategy_row = db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone()
         check_row = db.execute("SELECT value FROM settings WHERE key='strategy_check'").fetchone()
         sgap_row = db.execute("SELECT value FROM settings WHERE key='sgap_snapshot'").fetchone()
@@ -4825,6 +5286,16 @@ async def dashboard(request: Request):
         "gaps": gaps,
         "outreach_rows": outreach_rows,
         "backlink_rows": backlink_rows,
+        "briefs": briefs,
+        "brief_statuses": BRIEF_STATUS,
+        "brief_feedback": ({"ok": brief_state == "ok", "message": brief_msg}
+                           if brief_state in ("ok", "fejl") else None),
+        "link_targets": link_targets,
+        "link_statuses": LINK_STATUS,
+        "link_types": LINK_TYPES,
+        "link_feedback": ({"ok": link_state == "ok", "message": link_msg}
+                          if link_state in ("ok", "fejl") else None),
+        "content_audits": content_audits,
         "ai_vis": ai_vis,
         "links_sug": links_sug,
         "health_hist_n": health_hist,

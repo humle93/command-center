@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 6. november 2026 · **Version:** 7.23.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 10. november 2026 · **Version:** 7.24.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,16 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Vækst uden API-nøgle + moderniseret UI (v7.24.0) — implementeret
+- **Baggrund:** ønsket var "Surfer SEO, Ahrefs, Semrush og BabyLoveGrowth — vores egen version uden API-nøgle". Svaret er en lokal motor, ikke en kopi: vi kan måle tekst, men ikke genskabe deres webindekser.
+- **Nyt i `app/main.py`:** `local_content_optimizer()` (vægtet 0-100-score, termdækning, prioriterede fixes), `content_profile()`/`content_top_terms()`/`term_stats()` (hele ord, dansk+engelsk stopord), `compare_with_competitors()` (op til 3 brugerangivne URL'er gennem `safe_request()`), `brief_from_keyword()` (mål for ord/H2 fra konkurrenternes snit, ellers 1200 ord/5 H2) samt `fetch_page_html()`.
+- **Nye tabeller:** `content_briefs`, `link_targets` (`url` unik) og `content_audits` (de sidste 50 målinger). De oprettes i `migrate_db`, så eksisterende installationer også får dem.
+- **Nye ruter (8):** `/growth/optimize`, `/growth/compare` (JSON til `fetch`), `/growth/brief`, `/growth/brief/status`, `/growth/brief/delete`, `/links/target/add`, `/links/target/status`, `/links/target/delete`. Alle tre tunge har poster i `TASK_ESTIMATES`.
+- **UI:** ny fane **🚀 Vækst** med fire kort (optimerer, sammenligning, plan, linkliste). Derudover er skallen moderniseret: navigationen er delt i fem grupper med tydelig aktiv fane, hver fane har titel + beskrivelse øverst (`ccTabInfo`), og kort, felter, knapper, tabeller og fremdriftskort har fået én fælles visuel rytme via et designlag i `<style>`. Alle id'er og tekster, som tests og JS læser (`#cc-task`, `border-red-500/40`, `border-sky-500/40`, `Database-backup`, `Kladder venter` …), er bevaret.
+- **Test:** 27 nye checks i `tests/test_v8_features.py` (score høj/lav, hele ord, termlister, toptermer, ruter uden `SERPAPI_KEY`/`AIMLAPI_KEY`, konkurrent-gab mod den lokale testserver, briefs, status, sletning, linkliste og dubletter) og 15 i `tests/ci_check.sh`.
+- **Bevidst udeladt:** søgevolumen, sværhedsgrad, placeringer og backlink-profiler. Det kræver et eksternt indeks og står stadig i roadmappen.
+- **`install.sh` er regenereret** (EOF_MAIN, EOF_HTML, EOF_README), så versionspariteten i CI er grøn.
 
 ### Backup/restore i UI (v7.23.0) — implementeret
 - Fanen Moduler viser backup-kortet: `POST /backup/now` tager en `manuel`-backup, og `POST /backup/restore` gendanner en fil fra `backups/` når feltet `confirm` er `GENDAN`.
@@ -456,7 +466,7 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
   tages én gang) samt `tests/ci_check.sh` (genforsoeg mod `fake_wp` lader kladdetallet vaere 1).
 
 ### Screenshot-script (v7.13.1)
-- `scripts/screenshots.py` tager `cc-login.png` og alle 14 fanebilleder i `docs/img/` mod en kørende
+- `scripts/screenshots.py` tager `cc-login.png` og alle 15 fanebilleder i `docs/img/` mod en kørende
   app: `python3 scripts/screenshots.py --base http://127.0.0.1:8000 --user X --password Y`.
   `--only cockpit,notes`, `--viewport` og `--skip-login` findes til delkørsler; login sker via
   `context.request.post("/login")`, og fanerne skiftes med `Alpine.$data(body).tab = <key>`.
@@ -468,7 +478,7 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - Chromium crashede foerst paa dashboardet i denne VM - det er **miljoeet, ikke appen**: der findes
   intet `/etc/fonts`, saa Skia aborterer med `FATAL: SkFontMgr_FontConfigInterface.cpp:163 Not
   implemented` (SIGTRAP). Loesning: lav en `fonts.conf` med `<dir>` (DejaVu/Noto) + `<cachedir>` og
-  saet `FONTCONFIG_FILE`/`FONTCONFIG_PATH`. Derefter kan alle 14 faner fotograferes headless.
+  saet `FONTCONFIG_FILE`/`FONTCONFIG_PATH`. Derefter kan alle 15 faner fotograferes headless.
 - Mangler der en emoji-font i det saet, bliver emoji i UI'et tomme kasser paa billederne. Det er kun
   kosmetisk - layout og tekst er korrekt.
 
@@ -534,6 +544,8 @@ springer tjekket over til rene undtagelser.
 - Én proces + SQLite + APScheduler: ingen vandret skalering; et job deler event-loop med HTTP.
 - Dashboardet henter Tailwind/Alpine/Chart.js fra CDN; login-siden er selvstændig.
 - Crawleren bruger `requests` (ingen JS-rendering) og ca. 20 kontroller — ikke Sitebulb-niveau.
+- Vækst-fanen måler tekst og de sider, brugeren selv peger på; der er ingen søgevolumen, placeringer eller backlink-data (det kræver et eksternt indeks). Konkurrentsammenligning henter højst tre sider pr. kald.
+- `docs/img/` er ikke fotograferet efter v7.24-UI'et; kør `scripts/screenshots.py` mod en kørende app for at opdatere billederne.
 - Efter Juno-fjernelsen: ingen GSC-data, og `drift`/`gsc_*`-tabeller kan stadig ligge tomme i en
   eksisterende `center.db` (intet læser eller skriver dem).
 - Systemd-genstartsstien er ikke testet i denne VM (ingen systemd); pidfile-stien er verificeret.

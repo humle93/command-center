@@ -1754,6 +1754,32 @@ r = TestClient(main.app).get("/login")
 check("understi: uden CC_BASE_PATH er siden uaendret", 'action="/login"' in r.text and "CC_BASE" not in r.text)
 main.CC_BASE_PATH = _base_saved
 
+# --- v7.28.0: scripts/ultracc_setup.sh - plan uden skrivning, argumenter, nginx-blok med egen sti ---
+import subprocess as _sp
+_ud = tempfile.mkdtemp()
+for _d in ("scripts", "deploy"):
+    shutil.copytree(os.path.join(ROOT, _d), os.path.join(_ud, _d))
+with open(os.path.join(_ud, ".env"), "w") as _f:
+    _f.write("SERPAPI_KEY=hemmelig\nCC_PORT=8000\nCC_PUBLIC_URL=https://gammel.trycloudflare.com\n")
+_uenv = dict(os.environ, HOME=_ud, ULTRACC_NGINX_DIR=os.path.join(_ud, "nginx"), CC_SETUP_RESTART_CMD="true")
+def _ucc(*a):
+    return _sp.run(["bash", os.path.join(_ud, "scripts", "ultracc_setup.sh"), *a], env=_uenv,
+                   capture_output=True, text=True, timeout=60)
+check("ultracc: http-adresse afvises (kode 2)", _ucc("--url", "http://x.usbx.me/cc", "--port", "12001").returncode == 2)
+check("ultracc: adresse uden understi afvises (kode 2)", _ucc("--url", "https://x.usbx.me", "--port", "12001").returncode == 2)
+check("ultracc: ukendt flag afvises (kode 2)", _ucc("--url", "https://x.usbx.me/cc", "--port", "12001", "--force").returncode == 2)
+check("ultracc: port udenfor 1024-65535 afvises", _ucc("--url", "https://x.usbx.me/cc", "--port", "80").returncode == 2)
+_r = _ucc("--url", "https://x.usbx.me/tools/cc/", "--port", "12001")
+check("ultracc: planen koerer (kode 0) og viser den nye adresse", _r.returncode == 0
+      and "CC_PUBLIC_URL: 'https://gammel.trycloudflare.com' -> 'https://x.usbx.me/tools/cc'" in _r.stdout, _r.stdout + _r.stderr)
+check("ultracc: nginx-blokken faar egen sti og port", "location /tools/cc/ {" in _r.stdout
+      and "proxy_pass http://127.0.0.1:12001;" in _r.stdout and "return 301 /tools/cc/;" in _r.stdout)
+check("ultracc: planen skriver intet (.env og nginx-mappe uroerte)",
+      open(os.path.join(_ud, ".env")).read().startswith("SERPAPI_KEY=hemmelig\nCC_PORT=8000")
+      and not os.path.exists(os.path.join(_ud, "nginx")))
+check("ultracc: noegler vises ikke i planen", "hemmelig" not in _r.stdout)
+shutil.rmtree(_ud, ignore_errors=True)
+
 srv.shutdown()
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)
 print("ALL PASS" if not FAILED else f"{len(FAILED)} FAILED")

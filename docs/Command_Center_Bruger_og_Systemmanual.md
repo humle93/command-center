@@ -325,6 +325,8 @@ Appen skal blive på `127.0.0.1`; nginx står for TLS:
 
 Ultra.cc giver ikke en egen app sit eget domæne — kun en understi på din faste adresse, fx `https://<bruger>.<server>.usbx.me/cc/`. Før v7.28 kunne appen kun ligge på roden, og derfor blev der brugt en `trycloudflare`-tunnel (ny URL ved hver genstart, så `CC_PUBLIC_URL` og login-knappen i WordPress gik i stykker). Nu:
 
+Hurtigst: `bash scripts/ultracc_setup.sh --url https://<bruger>.<server>.usbx.me/cc` viser planen, og `--apply` udfører skridt 1-4 (inkl. at stoppe `cloudflared`) og tjekker login-siden. Manuelt:
+
 1. `app-ports free` → vælg en port, og skriv den i `.env` som `CC_PORT=<port>` (`CC_HOST=127.0.0.1`)
 2. `.env`: `CC_PUBLIC_URL=https://<bruger>.<server>.usbx.me/cc`
 3. `cp deploy/nginx-ultracc-proxy.conf ~/.apps/nginx/proxy.d/command-center.conf`, ret `12345` til din port, og kør `app-nginx restart`

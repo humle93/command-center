@@ -134,6 +134,21 @@ MCP-server/gateway; et OAuth-login direkte fra Command Center findes ikke endnu.
 Fra v7.28 logger man ind direkte på Ultra.cc-serverens faste adresse — ingen `cloudflared`/`trycloudflare`-tunnel.
 Ultra.cc giver en egen app en **understi** (`https://<bruger>.<server>.usbx.me/cc/`), og den kan appen nu ligge på.
 
+**Hurtigst: scriptet.** Det gør skridt 1-4 nedenfor og tjekker bagefter, at login-siden svarer udefra:
+
+```bash
+cd ~/command-center
+bash scripts/ultracc_setup.sh --url https://<bruger>.<server>.usbx.me/cc            # vis planen - skriver intet
+bash scripts/ultracc_setup.sh --url https://<bruger>.<server>.usbx.me/cc --apply    # udfør den
+```
+
+Porten tages fra `--port`, ellers fra `CC_PORT` i `.env` (hvis den ikke er standarden 8000), ellers fra `app-ports free`.
+Der tages backup af `.env` (`.env.bak-<tid>`), crontab (`~/.crontab-backup-<tid>`) og en afvigende nginx-fil, før de
+ændres. `--keep-tunnel` lader `cloudflared` være. Slutter scriptet med `ok … /login svarer 200`, er du færdig — gå til 5).
+Kode 2 = forkerte argumenter, 3 = et skridt fejlede, 4 = appen eller nginx svarer ikke (beskeden siger hvad du tjekker).
+
+Manuelt, skridt for skridt:
+
 **1) Find tunnellen og stop den** (den kan være startet på flere måder — tjek alle fire):
 
 ```bash

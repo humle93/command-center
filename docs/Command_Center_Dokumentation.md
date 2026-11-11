@@ -19,8 +19,9 @@ app/
   data/center.db           # SQLite (gitignored)
   backups/cc-*.db          # daglige + pre-update-backups
   static/                  # oprettes ved start (git kan ikke gemme tomme mapper)
-deploy/                    # nginx-config, systemd-units
+deploy/                    # nginx-config (rod + Ultra.cc-understi), systemd-units
 scripts/smoke_test.sh      # /health, /login, /setup
+scripts/ultracc_setup.sh   # v7.28: tunnel -> Ultra.cc-understi (plan, --apply)
 tests/                     # enhedstests, CI-boot-test, link-audit
 install.sh                 # selvstændig installer (indeholder kopier af filerne)
 ```
@@ -142,6 +143,8 @@ GZip, så rækkefølgen udefra er GZip → understi → auth → ruter:
 - **Ud:** `Location: /x` → `/cc/x` (ikke `//…` og ikke allerede præfikset), `Set-Cookie …; Path=/` → `Path=/cc`.
 - **HTML** (`text/html`, buffret, ny `Content-Length`): `href|action|src|formaction="/x"` → `"/cc/x"`, og et `<script>` lige efter `<head>` sætter `window.CC_BASE` og pakker `window.fetch`, så `fetch('/api/…')` rammer `/cc/api/…`. Dashboardets tidsestimat (`ccEstimate`) fjerner præfikset igen, før det slår ruten op i `TASK_ESTIMATES`.
 - Er `CC_BASE_PATH` tom, kalder laget blot videre — ingen omskrivning.
+
+`scripts/ultracc_setup.sh --url https://<bruger>.<server>.usbx.me/cc [--port N] [--apply]` udfører skridtene: stopper `cloudflared` (systemd `--user`, crontab — skrevet fra en backupfil, så der aldrig læses og skrives samtidig — og processer), sætter `CC_HOST`/`CC_PORT`/`CC_PUBLIC_URL`/`CC_FORWARDED_ALLOW_IPS` i `.env` (backup, filmode bevaret, andre linjer urørte, en sat `CC_BASE_PATH` tømmes), skriver nginx-blokken med sti og port (kun ikke-kommentarlinjer omskrives), kører `app-nginx restart` og `scripts/restart.sh` og tjekker `/health` lokalt og `<url>/login` udefra. Uden `--apply` skrives intet. Kode 0/2/3/4 = ok/argumenter/skridt/tjek.
 
 `CC_PUBLIC_URL` beholder stien, så login-linket, invitationsmailen og `cc_sso_push()` (WordPress-knappen) automatisk peger
 på `…/cc/…`. Host-tjekket på `/mcp` bruger kun værten og er uændret.

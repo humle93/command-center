@@ -129,19 +129,30 @@ MCP-server/gateway; et OAuth-login direkte fra Command Center findes ikke endnu.
 
 ---
 
-### 2e0. Direkte på serverens IP (enklest — ingen nginx, ingen tunnel)
+### 2e0. Eget domæne eller offentlig IP (enklest — ingen nginx, ingen tunnel)
 
 ```bash
 cd ~/command-center
-bash scripts/ultracc_setup.sh --ip            # viser planen - skriver intet
-bash scripts/ultracc_setup.sh --ip --apply    # udfører den
+bash scripts/ultracc_setup.sh --domain www.ditdomaene.dk                     # plan - skriver intet
+bash scripts/ultracc_setup.sh --domain www.ditdomaene.dk --apply             # http://www.ditdomaene.dk:<port>
+bash scripts/ultracc_setup.sh --domain www.ditdomaene.dk --port 80 --apply   # uden :port (kræver root)
+bash scripts/ultracc_setup.sh --ip --apply                                   # uden domæne: http://<offentlig-ip>:<port>
 ```
+
+**Domænet:** opret først en A-post hos din DNS-udbyder: `www.ditdomaene.dk → <serverens offentlige IP>`. Scriptet slår
+domænet op og stopper, hvis der ingen A-post er, eller hvis den peger på lokalnet. Peger den på en anden offentlig IP end
+serverens netkort, siger det til (det er rigtigt bag en router med portviderestilling, ellers er A-posten forkert).
+
+**Kun offentligt:** localhost og lokalnet (10.x, 192.168.x, 172.16-31.x, 100.64-127.x, 169.254.x) afvises altid.
+
+**Port 80** (adressen uden `:port`) kræver root. På Ultra.cc har du ikke root, så adressen bliver `http://www.ditdomaene.dk:<port>`
+med en port fra `app-ports free`.
 
 Scriptet stopper `cloudflared`, sætter `CC_HOST=0.0.0.0`, `CC_PORT` og `CC_PUBLIC_URL=http://<ip>:<port>` i `.env`
 (backup først), skifter en gammel systemd-enhed ud og genstarter. Til sidst tjekker det, at `http://<ip>:<port>/login`
 svarer 200. Så åbner du `http://<ip>:<port>/` og logger ind med e-mail og adgangskode.
 
-- **IP'en:** findes selv (`hostname -I`), offentlig frem for privat. Forkert? Angiv den: `--ip 203.0.113.5`.
+- **IP'en (`--ip`):** findes selv (`hostname -I`), kun offentlige. Har serveren kun lokalnet-adresser (bag NAT), stopper scriptet; angiv så den offentlige: `--ip 203.0.113.5`.
 - **Porten:** `--port`, ellers `CC_PORT` i `.env`, ellers `app-ports free`.
 - **Svarer den fra serveren, men ikke fra din computer:** porten er blokeret af en firewall hos udbyderen.
 - **Ingen TLS:** adgangskoden sendes ukrypteret over nettet. Brug en stærk, unik kode — eller nginx-vejen i §2e for https.

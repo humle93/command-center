@@ -321,10 +321,11 @@ Appen skal blive på `127.0.0.1`; nginx står for TLS:
    Ultra.cc: `deploy/nginx-ultracc-proxy.conf` til `~/.apps/nginx/proxy.d/command-center.conf` (ret porten), derefter `app-nginx restart`
 4. Åbn `CC_PUBLIC_URL` — log ind med e-mail og adgangskode (første besøg opretter din bruger, hvis der ingen standardbruger er)
 
-### Direkte på serverens IP (v7.28)
+### Eget domæne eller offentlig IP (v7.28)
 
-Det enkleste: ingen nginx, ingen tunnel, ingen token — bare `http://<ip>:<port>/` og login med e-mail og adgangskode.
-`bash scripts/ultracc_setup.sh --ip` viser planen, og `--apply` sætter `CC_HOST=0.0.0.0`, `CC_PORT` og
+Det enkleste: ingen nginx, ingen tunnel, ingen token — bare `http://www.ditdomaene.dk:<port>/` (eller `http://<offentlig-ip>:<port>/`)
+og login med e-mail og adgangskode. Localhost og lokalnet afvises, og et domæne skal have en A-post til serverens offentlige IP.
+`bash scripts/ultracc_setup.sh --domain www.ditdomaene.dk` (eller `--ip`) viser planen, og `--apply` sætter `CC_HOST=0.0.0.0`, `CC_PORT` og
 `CC_PUBLIC_URL=http://<ip>:<port>`, stopper `cloudflared`, genstarter og tjekker login-siden. Uden TLS sendes adgangskoden
 ukrypteret, og dashboardet viser den gule HTTPS-bjælke som påmindelse. Login-låsen (5 fejl = 10 min. pr. IP) virker også
 her: `X-Forwarded-For` bruges kun fra en betroet proxy, så en klient ikke kan skifte "IP" ved hvert forsøg.

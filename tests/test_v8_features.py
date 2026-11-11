@@ -1812,10 +1812,40 @@ check("ultracc --ip: lytter paa 0.0.0.0 og bruger ikke nginx",
       "CC_HOST: '' -> '0.0.0.0'" in _r.stdout and "nginx: bruges ikke (--ip)" in _r.stdout and "location" not in _r.stdout)
 check("ultracc --ip: en gammel systemd-enhed med fast vaert/port bliver fundet",
       "har fast --host 127.0.0.1 --port 8000" in _r.stdout)
-_uenv["CC_SETUP_IPS"] = "10.1.2.3"
-check("ultracc --ip: kun privat adresse giver en advarsel", "privat adresse" in _ucc("--ip", "--port", "12002").stdout)
-check("ultracc --ip: angivet adresse bruges", "http://198.51.100.4:12002" in _ucc("--ip", "198.51.100.4", "--port", "12002").stdout)
-check("ultracc --ip: loopback afvises", _ucc("--ip", "127.0.0.1", "--port", "12002").returncode == 2)
+_uenv["CC_SETUP_IPS"] = "10.1.2.3 192.168.1.20"
+_r = _ucc("--ip", "--port", "12002")
+check("ultracc --ip: kun lokalnet paa netkortene afvises (kode 2) med forklaring",
+      _r.returncode == 2 and "ingen offentlig IP" in _r.stderr, _r.stderr)
+check("ultracc --ip: angivet offentlig adresse bruges", "http://198.51.100.4:12002" in _ucc("--ip", "198.51.100.4", "--port", "12002").stdout)
+for _bad in ("127.0.0.1", "10.0.0.5", "192.168.1.20", "172.20.0.4", "100.64.1.1", "169.254.169.254"):
+    check(f"ultracc --ip: {_bad} afvises (ikke offentlig)", _ucc("--ip", _bad, "--port", "12002").returncode == 2)
+_uenv["CC_SETUP_IPS"] = "203.0.113.5"
+_uenv["CC_SETUP_RESOLVE"] = "203.0.113.5"
+_r = _ucc("--domain", "WWW.Kandufattedet.dk", "--port", "12002")
+check("ultracc --domain: adressen bliver http://<domaene>:<port> og lytter paa 0.0.0.0",
+      _r.returncode == 0 and "'http://www.kandufattedet.dk:12002'" in _r.stdout and "CC_HOST: '' -> '0.0.0.0'" in _r.stdout
+      and "nginx: bruges ikke (--domain)" in _r.stdout, _r.stdout + _r.stderr)
+_uenv["CC_SETUP_UID"] = "0"
+check("ultracc --domain: port 80 som root giver adressen uden :port",
+      "'http://www.kandufattedet.dk'" in _ucc("--domain", "www.kandufattedet.dk", "--port", "80").stdout)
+_uenv["CC_SETUP_UID"] = "1000"
+_r = _ucc("--domain", "www.kandufattedet.dk", "--port", "80")
+check("ultracc --domain: port 80 uden root afvises med forklaring", _r.returncode == 2 and "kraever root" in _r.stderr, _r.stderr)
+_uenv["CC_SETUP_RESOLVE"] = "192.168.1.20"
+_r = _ucc("--domain", "www.kandufattedet.dk", "--port", "12002")
+check("ultracc --domain: domaene der peger paa lokalnet afvises", _r.returncode == 2 and "lokal/privat" in _r.stderr, _r.stderr)
+_uenv["CC_SETUP_RESOLVE"] = ""
+_r = _ucc("--domain", "www.kandufattedet.dk", "--port", "12002")
+check("ultracc --domain: domaene uden A-post afvises og forklarer A-posten", _r.returncode == 2 and "A-post" in _r.stderr, _r.stderr)
+_uenv["CC_SETUP_RESOLVE"] = "198.51.100.9"
+check("ultracc --domain: anden offentlig IP end netkortet giver en NAT-bemaerkning",
+      "portviderestilling" in _ucc("--domain", "www.kandufattedet.dk", "--port", "12002").stdout)
+check("ultracc --domain: ugyldigt navn afvises",
+      _ucc("--domain", "http://www.kandufattedet.dk/cc", "--port", "12002").returncode == 2)
+check("ultracc: --domain og --ip sammen afvises", _ucc("--domain", "a.dk", "--ip", "--port", "12002").returncode == 2)
+for _k in ("CC_SETUP_RESOLVE", "CC_SETUP_UID"):
+    _uenv.pop(_k, None)
+_uenv["CC_SETUP_IPS"] = "127.0.0.1 10.1.2.3 203.0.113.5"
 check("ultracc: --ip og --url sammen afvises", _ucc("--ip", "--url", "https://x.usbx.me/cc", "--port", "12002").returncode == 2)
 check("ultracc: uden --ip/--url afvises", _ucc("--port", "12002").returncode == 2)
 _usrc = open(os.path.join(ROOT, "scripts", "ultracc_setup.sh")).read()

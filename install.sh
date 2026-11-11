@@ -42,13 +42,17 @@ CC_SSRF_ALLOW=
 # invitationsmailen, Host-tjekket paa /mcp (MCP-noegler afvises med 421, hvis vaerten ikke
 # matcher noejagtigt), og knappen "Log ind i Command Center" i WordPress (v7.27: uden en
 # https-adresse her bliver knappen ikke forbundet).
-# Format: med https://, kun vaerten, uden anfoerselstegn og uden kommentar paa samme linje:
-#     CC_PUBLIC_URL=https://humle91.ultra.cc
-# Ultra.cc: brug praecis den adresse du selv skriver i browseren (den staar typisk i panelet
-# under fanen Network/Domains). Sti som /apps/cc virker ikke - brug subdomaene eller egen port.
+# Format: med https://, uden anfoerselstegn og uden kommentar paa samme linje:
+#     CC_PUBLIC_URL=https://cc.eksempel.dk                 (eget subdomaene, VPS)
+#     CC_PUBLIC_URL=https://<bruger>.<server>.usbx.me/cc   (Ultra.cc, understi - v7.28)
+# Ultra.cc: brug din faste adresse fra panelet + /cc og deploy/nginx-ultracc-proxy.conf - ingen
+# Cloudflare-tunnel. Stien (/cc) bliver appens understi: links, redirects og cookien faar den paa.
 # Tom betyder "kun lokal": login-linket bliver http://127.0.0.1:8000/login, og Host-tjekket paa
 # /mcp slaaes HELT fra - det er kun OK paa en maskine, ingen andre kan naa.
 CC_PUBLIC_URL=
+# Understi bag nginx (v7.28). Tom = stien fra CC_PUBLIC_URL (fx /cc), eller roden hvis den ingen har.
+# Saet kun, hvis nginx' sti skal vaere en anden end den i CC_PUBLIC_URL.
+CC_BASE_PATH=
 # Standardbruger oprettet ved opstart (kun naar der ikke findes brugere i databasen).
 # Kontoen faar must_change_password, saa koden her kun bruges til det foerste login - derefter
 # skifter du den under fanen Brugere. Klartekst staar kun i .env (.env committes aldrig).
@@ -246,10 +250,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.27.0"
+APP_VERSION = "7.28.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.28.0", "Almindeligt login paa Ultra.cc uden Cloudflare-tunnel: appen kan nu ligge paa en understi (https://bruger.server.usbx.me/cc) bag Ultra.cc's egen nginx"),
     ("7.27.0", "Log ind fra WordPress med et klik: knappen i Steamgears (7.76+) sender en signeret billet, der holder 1 minut og kun virker en gang - kun for en kendt e-mail"),
     ("7.26.0", "Ny fane Chat: tal med AI og giv den vaerktoejer fra MCP-connectors (GitHub, WordPress, Gmail, Google Drive m.fl.) - alt der aendrer noget kraever din godkendelse"),
     ("7.25.0", "AI via OpenRouter i stedet for aimlapi: OPENROUTER_API_KEY + AI_MODEL (OpenRouter-slug), et faelles AI-kald og en advarsel hvis kun den gamle AIMLAPI_KEY er sat"),
@@ -277,7 +282,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Log ind fra WordPress med et klik - kraever CC_PUBLIC_URL og Steamgears Autopilot 7.76+"
+NEWEST_LINE = "Login direkte via Ultra.cc's nginx paa en understi - ingen Cloudflare-tunnel"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -802,6 +807,25 @@ PBKDF2_ITERATIONS = 240_000
 MIN_PASSWORD_LEN = 8
 EMAIL_MAX_LEN = 254
 CC_PUBLIC_URL = os.environ.get("CC_PUBLIC_URL", "").strip()   # adressen der staar i invitationsmailen
+
+
+def cc_base_path(public_url: str = None, explicit: str = None) -> str:
+    """Understien appen ligger paa bag nginx (v7.28), fx '/cc' - eller '' naar den ligger paa roden.
+
+    CC_BASE_PATH vinder; ellers bruges stien fra CC_PUBLIC_URL (https://bruger.server.usbx.me/cc).
+    Kun bogstaver, tal og - _ . / accepteres: alt andet giver '' (roden) i stedet for et halvt praefiks.
+    """
+    explicit = os.environ.get("CC_BASE_PATH", "") if explicit is None else explicit
+    raw = explicit.strip()
+    if not raw:
+        raw = urlparse(CC_PUBLIC_URL if public_url is None else public_url).path or ""
+    raw = "/" + raw.strip().strip("/")
+    if raw == "/" or not re.fullmatch(r"(/[A-Za-z0-9._-]+)+", raw) or "/.." in raw:
+        return ""
+    return raw
+
+
+CC_BASE_PATH = cc_base_path()
 _USER_EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}")
 
 _LOGIN_FAILS: dict = {}  # IP -> (antal fejl, laas-til)
@@ -6970,6 +6994,99 @@ async def lifespan(app_: FastAPI):
     scheduler.shutdown()
 
 
+# ---------- Understi bag nginx (v7.28): Ultra.cc uden Cloudflare-tunnel ----------
+# Ultra.cc's egen nginx giver kun "location /<app>/" paa https://<bruger>.<server>.usbx.me - ikke et
+# eget domaene. Appens ruter, skabeloner og JS bruger absolutte stier ('/login', fetch('/api/...')),
+# saa i stedet for at roere 100+ steder goer dette lag tre ting, naar CC_BASE_PATH er sat:
+#   ind:  /cc/login -> /login (og /login virker stadig, fx fra 127.0.0.1 og scripts/update.sh)
+#   ud:   Location: /x -> /cc/x, Set-Cookie Path=/ -> Path=/cc, og i HTML href/action/src="/x" -> "/cc/x"
+#   JS:   window.CC_BASE + en fetch-indpakning, saa fetch('/api/...') rammer /cc/api/...
+# Laget ligger inden for GZip (ser ukomprimeret HTML) og uden for auth-middlewaren (ser strippet sti).
+_BASE_ATTR_RE = re.compile(rb'(\s(?:href|action|src|formaction)=["\'])/(?!/)')
+_BASE_COOKIE_RE = re.compile(rb'(?i)(;\s*path=)/(?=;|$)')
+
+
+def base_path_script(base: str) -> bytes:
+    return ("<script>window.CC_BASE=%s;(function(){var f=window.fetch;if(!f)return;"
+            "window.fetch=function(u,o){var b=window.CC_BASE;if(typeof u==='string'&&u.charAt(0)==='/'"
+            "&&u.charAt(1)!=='/'&&u!==b&&u.indexOf(b+'/')!==0){u=b+u;}return f.call(this,u,o);};})();</script>"
+            % jsonlib.dumps(base)).encode()
+
+
+def rewrite_html_for_base(body: bytes, base: str) -> bytes:
+    b = base.encode()
+    body = _BASE_ATTR_RE.sub(lambda m: m.group(1) + b + b"/", body)
+    script = base_path_script(base)
+    i = body.lower().find(b"<head>")
+    if i >= 0:
+        return body[:i + 6] + script + body[i + 6:]
+    return script + body
+
+
+class BasePathMiddleware:
+    def __init__(self, app, base: str = None):
+        self.app = app
+        self._base = base
+
+    @property
+    def base(self) -> str:
+        return CC_BASE_PATH if self._base is None else self._base
+
+    async def __call__(self, scope, receive, send):
+        base = self.base
+        if scope["type"] != "http" or not base:
+            return await self.app(scope, receive, send)
+        path = scope.get("path", "")
+        if path == base:
+            qs = scope.get("query_string", b"")
+            loc = (base + "/").encode() + (b"?" + qs if qs else b"")
+            await send({"type": "http.response.start", "status": 307,
+                        "headers": [(b"location", loc), (b"content-length", b"0")]})
+            await send({"type": "http.response.body", "body": b""})
+            return
+        if path.startswith(base + "/"):
+            scope = dict(scope)
+            scope["path"] = path[len(base):]
+            raw = scope.get("raw_path")
+            if raw and raw.startswith(base.encode() + b"/"):
+                scope["raw_path"] = raw[len(base):]
+        bb = base.encode()
+        state = {"start": None, "html": False, "chunks": []}
+
+        async def wrapped(message):
+            if message["type"] == "http.response.start":
+                headers = []
+                for k, v in message.get("headers", []):
+                    lk = k.lower()
+                    if lk == b"location" and v.startswith(b"/") and not v.startswith(b"//") \
+                            and v != bb and not v.startswith(bb + b"/"):
+                        v = bb + v
+                    elif lk == b"set-cookie":
+                        v = _BASE_COOKIE_RE.sub(lambda m: m.group(1) + bb, v)
+                    elif lk == b"content-type" and v.lower().startswith(b"text/html"):
+                        state["html"] = True
+                    headers.append((k, v))
+                message = dict(message, headers=headers)
+                if state["html"]:
+                    state["start"] = message
+                    return
+                return await send(message)
+            if message["type"] == "http.response.body" and state["html"]:
+                state["chunks"].append(message.get("body", b""))
+                if message.get("more_body"):
+                    return
+                body = rewrite_html_for_base(b"".join(state["chunks"]), base)
+                start = state["start"]
+                start["headers"] = [(k, v) for k, v in start["headers"] if k.lower() != b"content-length"]
+                start["headers"].append((b"content-length", str(len(body)).encode()))
+                await send(start)
+                return await send({"type": "http.response.body", "body": body})
+            return await send(message)
+
+        return await self.app(scope, receive, wrapped)
+
+
+app.add_middleware(BasePathMiddleware)
 app.add_middleware(GZipMiddleware, minimum_size=500)
 app.router.lifespan_context = lifespan
 EOF_MAIN
@@ -8790,7 +8907,9 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
     document.addEventListener('submit', function (e) {
         const form = e.target;
         if (!form || (form.getAttribute('method') || 'get').toLowerCase() !== 'post') return;
-        const meta = ccEstimate(new URL(form.getAttribute('action') || form.action, location.href).pathname);
+        let ccPath = new URL(form.getAttribute('action') || form.action, location.href).pathname;
+        if (window.CC_BASE && ccPath.indexOf(window.CC_BASE + '/') === 0) ccPath = ccPath.slice(window.CC_BASE.length);
+        const meta = ccEstimate(ccPath);
         if (!meta) return;
         setTimeout(function () {
             if (e.defaultPrevented || ccTask) return;
@@ -9218,15 +9337,15 @@ cat << 'EOF_NGINX' > "$PROJECT_DIR/deploy/nginx-command-center.conf"
 # Command Center bag nginx (Ultra.cc / VPS)
 #
 # Saadan bruges den:
-#   Ultra.cc: læg filen i din nginx-proxy-mappe (fx ~/.apps/nginx/proxy.d/command-center.conf)
-#             eller kopier "location /"-blokken ind i den server { } du bruger.
+#   Ultra.cc: brug deploy/nginx-ultracc-proxy.conf i stedet (kun location-blokke paa en understi,
+#             fx https://<bruger>.<server>.usbx.me/cc/) - ingen Cloudflare-tunnel.
 #   VPS:      kopier til /etc/nginx/conf.d/command-center.conf og ret server_name.
 #
 # Appen skal lytte paa 127.0.0.1:8000 (CC_HOST/CC_PORT i .env) og har ingen websockets,
 # saa der er ingen "map"- eller "upstream"-blokke - kun det her, som virker inde i en server { }.
 #
-# VIGTIGT: appen kan ikke ligge paa en understi (https://host/apps/cc/) - alle links er absolute.
-# Brug et subdomæne eller en egen port til Command Center.
+# Denne fil er til et eget (sub)domaene paa roden. En understi (https://host/cc/) virker fra v7.28,
+# naar stien staar i CC_PUBLIC_URL - se deploy/nginx-ultracc-proxy.conf.
 #
 # MCP-adgang (v7.16) bruger samme location: POST /mcp svarer med almindelig JSON (ingen SSE), saa
 # proxy_buffering off + de 300 s timeouts nedenfor er rigeligt. Appen sender selv X-Accel-Buffering: no.
@@ -9288,12 +9407,16 @@ EOF_USERSVC
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.27 PRO
+# Command Center v7.28 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
+
+## Nyheder i v7.28
+
+- **Almindeligt login via Ultra.cc — ingen Cloudflare-tunnel (v7.28.0)** — Ultra.cc's egen nginx giver kun en understi på din faste adresse (`https://<bruger>.<server>.usbx.me/cc/`), og appen kunne før kun ligge på roden af et domæne; derfor blev der brugt en `trycloudflare`-tunnel, hvis URL skiftede ved hver genstart. Nu kan appen ligge på en understi: sæt `CC_PUBLIC_URL=https://<bruger>.<server>.usbx.me/cc`, læg `deploy/nginx-ultracc-proxy.conf` i `~/.apps/nginx/proxy.d/` og log ind på `…/cc/` med e-mail og adgangskode som altid. `bash scripts/ultracc_setup.sh --url https://<bruger>.<server>.usbx.me/cc` viser planen (tunnel, `.env`, nginx-blok), og med `--apply` stopper den `cloudflared`, retter `.env`, lægger blokken ind, genstarter og tjekker at `…/cc/login` svarer 200. Et ASGI-lag (`BasePathMiddleware`) fjerner `/cc` fra indgående kald og sætter det på redirects, session-cookien (`Path=/cc`), links/formularer/scripts i HTML og på `fetch()`-kald; uden understi er alt som før. Se [Installation og udrulning §2e](docs/Installation_og_udrulning.md#2e-ultracc-uden-cloudflare) for skridtene og hvordan tunnellen fjernes
 
 ## Nyheder i v7.27
 
@@ -9413,9 +9536,9 @@ curl -s https://<din-adresse>/mcp -H "Authorization: Bearer cc_..." \
 
 ## Ultra.cc / nginx (reverse proxy)
 
-1. `.env`: `cp .env.example .env` og udfyld nøglerne. Sæt `CC_PUBLIC_URL` til **præcis** den adresse du åbner i browseren — med `https://`, uden anførselstegn og uden sti (`CC_PUBLIC_URL=https://humle91.ultra.cc`). Lad `CC_HOST=127.0.0.1` og `CC_FORWARDED_ALLOW_IPS=127.0.0.1` stå. `install.sh` skriver kun `.env.example`, og opdateringer rører aldrig `.env` — så linjen forbliver tom, indtil du selv udfylder den
+1. `.env`: `cp .env.example .env` og udfyld nøglerne. Sæt `CC_PUBLIC_URL` til **præcis** den adresse du åbner i browseren — med `https://` og uden anførselstegn. På Ultra.cc er det din faste adresse + understien (`CC_PUBLIC_URL=https://<bruger>.<server>.usbx.me/cc`); på en VPS med eget subdomæne kun værten (`https://cc.eksempel.dk`). Sæt `CC_PORT` til en ledig port (Ultra.cc: `app-ports free`). Lad `CC_HOST=127.0.0.1` og `CC_FORWARDED_ALLOW_IPS=127.0.0.1` stå. `install.sh` skriver kun `.env.example`, og opdateringer rører aldrig `.env` — så linjen forbliver tom, indtil du selv udfylder den
 2. Start appen: `./run.sh`, eller `deploy/command-center.user.service` med `systemctl --user enable --now command-center`
-3. Læg `deploy/nginx-command-center.conf` ind i den `server { }` du bruger (Ultra.cc: `~/.apps/nginx/proxy.d/`), og genindlæs nginx
+3. Ultra.cc: kopiér `deploy/nginx-ultracc-proxy.conf` til `~/.apps/nginx/proxy.d/command-center.conf`, ret porten og kør `app-nginx restart` (filen er kun `location`-blokke — Ultra.cc har selv `server { }` og TLS). VPS: læg `deploy/nginx-command-center.conf` ind i din `server { }` og genindlæs nginx. Ingen Cloudflare-tunnel er nødvendig
 4. Åbn `CC_PUBLIC_URL` — standardbrugeren fra `.env` kan logge ind med det samme (er linjerne tomme, opretter første besøg din bruger via `/setup`)
 
 `CC_PUBLIC_URL` styrer login-linket i `scripts/update.sh` og `scripts/user_create.py`, adressen i invitationsmailen og Host-tjekket på `/mcp`. Tjek med `bash scripts/update.sh --check`: står der `127.0.0.1` som login-adresse, er linjen tom eller skrevet forkert. Er `/mcp` utilgængelig med `421`, er det samme linje — værten skal matche ord for ord, og et sæt anførselstegn omkring værdien er nok til at ødelægge den.
@@ -9425,7 +9548,7 @@ Det skal med i proxy-blokken:
 - `proxy_set_header X-Forwarded-Proto $scheme;` — ellers tror appen den kører på http: session-cookien bliver ikke `Secure`, og der vises en HTTPS-advarsel
 - `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` — så login-låsen pr. IP rammer klienten i stedet for nginx
 - `proxy_read_timeout 300s;` — crawl, content gap og backlink-prospecting kan tage minutter (ellers 504 fra nginx)
-- Appen kan **ikke** ligge på en understi (`https://host/apps/cc/`): alle links er absolutte — brug et subdomæne eller en egen port
+- Understi (v7.28): appen kan ligge på `https://host/cc/`, når stien står i `CC_PUBLIC_URL` (eller `CC_BASE_PATH`). nginx skal sende stien videre uændret (`proxy_pass http://127.0.0.1:<port>;` uden `/` til sidst); appen fjerner den selv. Ultra.cc-blokken sætter `X-Forwarded-Proto https` fast, fordi usbx.me-adressen altid er https
 
 ## Opdatering fra GitHub
 

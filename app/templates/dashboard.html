@@ -1812,7 +1812,9 @@
     document.addEventListener('submit', function (e) {
         const form = e.target;
         if (!form || (form.getAttribute('method') || 'get').toLowerCase() !== 'post') return;
-        const meta = ccEstimate(new URL(form.getAttribute('action') || form.action, location.href).pathname);
+        let ccPath = new URL(form.getAttribute('action') || form.action, location.href).pathname;
+        if (window.CC_BASE && ccPath.indexOf(window.CC_BASE + '/') === 0) ccPath = ccPath.slice(window.CC_BASE.length);
+        const meta = ccEstimate(ccPath);
         if (!meta) return;
         setTimeout(function () {
             if (e.defaultPrevented || ccTask) return;

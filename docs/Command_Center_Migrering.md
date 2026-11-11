@@ -68,8 +68,10 @@ En `trycloudflare`-tunnel får **ny URL ved hver genstart**. `CC_PUBLIC_URL` sty
 i `scripts/update.sh` og `scripts/user_create.py`, adressen i invitationsmailen og Host-tjekket på `/mcp`
 (nøgler afvises med 421 ved forkert vært). Skiftende URL betyder derfor, at `.env` skal rettes hver gang.
 
-Brug den faste adresse serveren har (typisk Ultra.cc-panelet under *Network/Domains*). Sti som
-`/apps/cc` virker ikke — appen kan ikke ligge på en understi.
+Brug den faste adresse serveren har, med understi: `CC_PUBLIC_URL=https://<bruger>.<server>.usbx.me/cc`
+og `deploy/nginx-ultracc-proxy.conf` i `~/.apps/nginx/proxy.d/` (v7.28 — før kunne appen ikke ligge på en understi,
+og det var grunden til tunnellen). Tunnellen stoppes og fjernes som beskrevet i
+[Installation og udrulning §2e](Installation_og_udrulning.md#2e-ultracc-uden-cloudflare).
 
 ### 3.3 Stien er ikke valgfri
 

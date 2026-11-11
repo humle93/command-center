@@ -1716,6 +1716,70 @@ check("chat: samtalen kan slettes", ch.post("/chat/delete", data={"id": str(_con
       and ch.get(f"/api/chat/{_conv}").status_code == 404)
 _mcp_srv.shutdown()
 
+# --- v7.28.0: understi bag Ultra.cc's nginx (ingen Cloudflare-tunnel) ---
+check("understi: stien kommer fra CC_PUBLIC_URL", main.cc_base_path("https://u.server.usbx.me/cc/", "") == "/cc")
+check("understi: CC_BASE_PATH vinder over CC_PUBLIC_URL", main.cc_base_path("https://u.x/cc", "/cmd/") == "/cmd")
+check("understi: roden giver tom sti", main.cc_base_path("https://u.x/", "") == "" and main.cc_base_path("", "") == "")
+check("understi: ugyldige tegn og .. afvises", main.cc_base_path("", "/a b") == "" and main.cc_base_path("", "/../x") == "")
+_base_saved = main.CC_BASE_PATH
+main.CC_BASE_PATH = "/cc"
+main.create_user("understi@example.dk", "understi-pass")
+u = TestClient(main.app)
+r = u.get("/cc", follow_redirects=False)
+check("understi: /cc sender videre til /cc/", r.status_code == 307 and r.headers["location"] == "/cc/", r.headers.get("location"))
+r = u.get("/cc/", follow_redirects=False)
+check("understi: uden login sendes man til /cc/login", r.status_code in (302, 303, 307) and r.headers["location"].startswith("/cc/login"),
+      r.headers.get("location"))
+r = u.get("/cc/login")
+check("understi: login-siden faar praefiks paa formularen", 'action="/cc/login"' in r.text and 'action="/login"' not in r.text)
+check("understi: login-siden faar window.CC_BASE", 'window.CC_BASE="/cc"' in r.text)
+_raw = u.get("/cc/login", headers={"Accept-Encoding": "identity"})
+check("understi: content-length passer efter omskrivning", int(_raw.headers["content-length"]) == len(_raw.content),
+      (_raw.headers.get("content-length"), len(_raw.content)))
+r = u.post("/cc/login", data={"email": "understi@example.dk", "password": "understi-pass"}, follow_redirects=False)
+check("understi: login redirecter til /cc/", r.status_code == 303 and r.headers["location"] == "/cc/", r.headers.get("location"))
+_ck = r.headers.get("set-cookie", "")
+check("understi: session-cookien har Path=/cc", "cc_session=" in _ck and "path=/cc" in _ck.lower() and "path=/;" not in _ck.lower(), _ck)
+r = u.get("/cc/", cookies={"cc_session": r.cookies.get("cc_session")})
+check("understi: dashboardet svarer 200 med praefiks paa links og statiske filer",
+      r.status_code == 200 and 'src="/cc/static/' in r.text and 'src="/static/' not in r.text, r.status_code)
+check("understi: /health virker baade med og uden praefiks",
+      u.get("/cc/health").status_code == 200 and u.get("/health").status_code == 200)
+check("understi: /cc/static/vendor leveres", u.get("/cc/static/vendor/alpine.min.js").status_code == 200)
+_h = main.rewrite_html_for_base(b'<html><head></head><a href="/x">x</a><a href="//cdn/y">y</a><a href="https://z/">z</a></html>', "/cc")
+check("understi: omskrivning af HTML (kun absolutte stier)",
+      b'href="/cc/x"' in _h and b'href="//cdn/y"' in _h and b'href="https://z/"' in _h and _h.index(b"<head><script>") >= 0, _h)
+main.CC_BASE_PATH = ""
+r = TestClient(main.app).get("/login")
+check("understi: uden CC_BASE_PATH er siden uaendret", 'action="/login"' in r.text and "CC_BASE" not in r.text)
+main.CC_BASE_PATH = _base_saved
+
+# --- v7.28.0: scripts/ultracc_setup.sh - plan uden skrivning, argumenter, nginx-blok med egen sti ---
+import subprocess as _sp
+_ud = tempfile.mkdtemp()
+for _d in ("scripts", "deploy"):
+    shutil.copytree(os.path.join(ROOT, _d), os.path.join(_ud, _d))
+with open(os.path.join(_ud, ".env"), "w") as _f:
+    _f.write("SERPAPI_KEY=hemmelig\nCC_PORT=8000\nCC_PUBLIC_URL=https://gammel.trycloudflare.com\n")
+_uenv = dict(os.environ, HOME=_ud, ULTRACC_NGINX_DIR=os.path.join(_ud, "nginx"), CC_SETUP_RESTART_CMD="true")
+def _ucc(*a):
+    return _sp.run(["bash", os.path.join(_ud, "scripts", "ultracc_setup.sh"), *a], env=_uenv,
+                   capture_output=True, text=True, timeout=60)
+check("ultracc: http-adresse afvises (kode 2)", _ucc("--url", "http://x.usbx.me/cc", "--port", "12001").returncode == 2)
+check("ultracc: adresse uden understi afvises (kode 2)", _ucc("--url", "https://x.usbx.me", "--port", "12001").returncode == 2)
+check("ultracc: ukendt flag afvises (kode 2)", _ucc("--url", "https://x.usbx.me/cc", "--port", "12001", "--force").returncode == 2)
+check("ultracc: port udenfor 1024-65535 afvises", _ucc("--url", "https://x.usbx.me/cc", "--port", "80").returncode == 2)
+_r = _ucc("--url", "https://x.usbx.me/tools/cc/", "--port", "12001")
+check("ultracc: planen koerer (kode 0) og viser den nye adresse", _r.returncode == 0
+      and "CC_PUBLIC_URL: 'https://gammel.trycloudflare.com' -> 'https://x.usbx.me/tools/cc'" in _r.stdout, _r.stdout + _r.stderr)
+check("ultracc: nginx-blokken faar egen sti og port", "location /tools/cc/ {" in _r.stdout
+      and "proxy_pass http://127.0.0.1:12001;" in _r.stdout and "return 301 /tools/cc/;" in _r.stdout)
+check("ultracc: planen skriver intet (.env og nginx-mappe uroerte)",
+      open(os.path.join(_ud, ".env")).read().startswith("SERPAPI_KEY=hemmelig\nCC_PORT=8000")
+      and not os.path.exists(os.path.join(_ud, "nginx")))
+check("ultracc: noegler vises ikke i planen", "hemmelig" not in _r.stdout)
+shutil.rmtree(_ud, ignore_errors=True)
+
 srv.shutdown()
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)
 print("ALL PASS" if not FAILED else f"{len(FAILED)} FAILED")

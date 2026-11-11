@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 11. november 2026 · **Version:** 7.27.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 11. november 2026 · **Version:** 7.28.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,16 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Ultra.cc uden Cloudflare (v7.28.0) — implementeret
+- **Baggrund:** ønsket var "Fjern Cloudflare og lav almindelig login via Ultra cc serveren". Koden havde ingen Cloudflare-afhængighed; tunnellen (`trycloudflare`, ny URL ved hver genstart) fandtes kun fordi appen ikke kunne ligge på en understi, og Ultra.cc's nginx kun giver `location /<app>/` på `https://<bruger>.<server>.usbx.me` (filerne i `~/.apps/nginx/proxy.d/` er location-blokke, ikke `server { }` — den gamle vejledning var forkert der).
+- **Nyt:** `cc_base_path()` → `CC_BASE_PATH` (env, ellers stien fra `CC_PUBLIC_URL`). `BasePathMiddleware` (ren ASGI, mellem GZip og `auth_middleware`) stripper `/cc` ind, sætter det på `Location`, `Set-Cookie Path`, `href/action/src/formaction` i HTML og injicerer `window.CC_BASE` + en `fetch`-indpakning. `/cc` → 307 `/cc/`. Uden understi: intet ændret. `ccEstimate` i dashboardet stripper præfikset.
+- **Ny fil:** `deploy/nginx-ultracc-proxy.conf` (kun location-blokke, `X-Forwarded-Proto https` fast, ingen strip). Ikke indlejret i `install.sh` (kommer med self-update via `deploy/`).
+- **Docs:** `docs/Installation_og_udrulning.md` §2e (stop/fjern `cloudflared`: proces, systemd, cron, screen/tmux; port, `.env`, nginx, fejlfinding), README, manual, migreringsplan §3.2, arkitektur §7c2, roadmap.
+- **Script:** `scripts/ultracc_setup.sh --url … [--port N] [--keep-tunnel] [--apply]` gør §2e: stopper `cloudflared` (systemd `--user`, crontab fra backupfil, processer), retter fire `.env`-nøgler med backup, skriver nginx-blokken, `app-nginx restart`, `scripts/restart.sh`, tjekker `/health` og `<url>/login`. Uden `--apply` skrives intet. Ikke i `install.sh` (som `user_create.py`); kommer med self-update. Afprøvet end-to-end i en sandkasse med falske `systemctl`/`crontab`/`app-nginx`/`app-ports`, en rigtig `cloudflared`-navngivet proces og rigtig uvicorn bag en curl der efterligner nginx: alle skridt ok, anden crontab-linje bevaret, `.env`-mode bevaret, anden kørsel idempotent. Kapløbet `crontab -l | … | crontab -` blev fundet her og rettet.
+- **CI-rettelse (PR #8):** `[skip docs]`/`[skip screenshots]` læses fra `HEAD_SHA` (PR-head), ikke merge-committen.
+- **Test:** 16 `understi:`- og 8 `ultracc:`-checks i `tests/test_v8_features.py`; live afprøvet med uvicorn + `Host`/`X-Forwarded-Proto` som nginx sender (login → Secure-cookie `Path=/cc`, dashboard 200, alle absolutte stier præfikset, `/cc/api/*` og `/cc/static/*` 200).
+- **Ikke verificeret:** rigtig nginx på Ultra.cc (ingen nginx i containeren) og at `app-ports`/`app-nginx` hedder sådan på brugerens server; selve `cloudflared` på `laser` er ikke rørt herfra — det er en manuel trin i §2e.
 
 ### Samlet installationsmanual (11. november) — kun dokumentation
 - **Baggrund:** ønsket var "mangler installationsmanual eller script" for de tre dele, der hænger sammen efter v7.25-7.27.
@@ -543,6 +553,9 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
   kun en advarsel). Trinnet "Screenshots are not older than the dashboard" sammenligner
   commit-tidspunkter (ikke fil-mtimes, som checkout nulstiller), henviser til `scripts/screenshots.py`
   og springes over med `[skip screenshots]` i commit-beskeden - samme moenster som `[skip docs]`.
+- **PR-kørsler (11. november):** på `pull_request` er HEAD en merge-commit, så `[skip docs]`/`[skip screenshots]`
+  blev aldrig set dér (push-kørslen var grøn, PR-kørslen rød). Begge trin læser nu beskeden og tidspunkterne fra
+  `HEAD_SHA` = `github.event.pull_request.head.sha || github.sha`. Markøren skal stå i PR'ens **seneste** commit.
 
 ### Commits
 `d48854e` (v7.11: brugere, opdatering, nginx, rettelser) · `d47a920` (Juno fjernet) ·

@@ -116,10 +116,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.27.0"
+APP_VERSION = "7.28.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.28.0", "Almindeligt login paa Ultra.cc uden Cloudflare-tunnel: appen kan nu ligge paa en understi (https://bruger.server.usbx.me/cc) bag Ultra.cc's egen nginx"),
     ("7.27.0", "Log ind fra WordPress med et klik: knappen i Steamgears (7.76+) sender en signeret billet, der holder 1 minut og kun virker en gang - kun for en kendt e-mail"),
     ("7.26.0", "Ny fane Chat: tal med AI og giv den vaerktoejer fra MCP-connectors (GitHub, WordPress, Gmail, Google Drive m.fl.) - alt der aendrer noget kraever din godkendelse"),
     ("7.25.0", "AI via OpenRouter i stedet for aimlapi: OPENROUTER_API_KEY + AI_MODEL (OpenRouter-slug), et faelles AI-kald og en advarsel hvis kun den gamle AIMLAPI_KEY er sat"),
@@ -147,7 +148,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Log ind fra WordPress med et klik - kraever CC_PUBLIC_URL og Steamgears Autopilot 7.76+"
+NEWEST_LINE = "Login direkte via Ultra.cc's nginx paa en understi - ingen Cloudflare-tunnel"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -672,6 +673,25 @@ PBKDF2_ITERATIONS = 240_000
 MIN_PASSWORD_LEN = 8
 EMAIL_MAX_LEN = 254
 CC_PUBLIC_URL = os.environ.get("CC_PUBLIC_URL", "").strip()   # adressen der staar i invitationsmailen
+
+
+def cc_base_path(public_url: str = None, explicit: str = None) -> str:
+    """Understien appen ligger paa bag nginx (v7.28), fx '/cc' - eller '' naar den ligger paa roden.
+
+    CC_BASE_PATH vinder; ellers bruges stien fra CC_PUBLIC_URL (https://bruger.server.usbx.me/cc).
+    Kun bogstaver, tal og - _ . / accepteres: alt andet giver '' (roden) i stedet for et halvt praefiks.
+    """
+    explicit = os.environ.get("CC_BASE_PATH", "") if explicit is None else explicit
+    raw = explicit.strip()
+    if not raw:
+        raw = urlparse(CC_PUBLIC_URL if public_url is None else public_url).path or ""
+    raw = "/" + raw.strip().strip("/")
+    if raw == "/" or not re.fullmatch(r"(/[A-Za-z0-9._-]+)+", raw) or "/.." in raw:
+        return ""
+    return raw
+
+
+CC_BASE_PATH = cc_base_path()
 _USER_EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}")
 
 _LOGIN_FAILS: dict = {}  # IP -> (antal fejl, laas-til)
@@ -6840,5 +6860,98 @@ async def lifespan(app_: FastAPI):
     scheduler.shutdown()
 
 
+# ---------- Understi bag nginx (v7.28): Ultra.cc uden Cloudflare-tunnel ----------
+# Ultra.cc's egen nginx giver kun "location /<app>/" paa https://<bruger>.<server>.usbx.me - ikke et
+# eget domaene. Appens ruter, skabeloner og JS bruger absolutte stier ('/login', fetch('/api/...')),
+# saa i stedet for at roere 100+ steder goer dette lag tre ting, naar CC_BASE_PATH er sat:
+#   ind:  /cc/login -> /login (og /login virker stadig, fx fra 127.0.0.1 og scripts/update.sh)
+#   ud:   Location: /x -> /cc/x, Set-Cookie Path=/ -> Path=/cc, og i HTML href/action/src="/x" -> "/cc/x"
+#   JS:   window.CC_BASE + en fetch-indpakning, saa fetch('/api/...') rammer /cc/api/...
+# Laget ligger inden for GZip (ser ukomprimeret HTML) og uden for auth-middlewaren (ser strippet sti).
+_BASE_ATTR_RE = re.compile(rb'(\s(?:href|action|src|formaction)=["\'])/(?!/)')
+_BASE_COOKIE_RE = re.compile(rb'(?i)(;\s*path=)/(?=;|$)')
+
+
+def base_path_script(base: str) -> bytes:
+    return ("<script>window.CC_BASE=%s;(function(){var f=window.fetch;if(!f)return;"
+            "window.fetch=function(u,o){var b=window.CC_BASE;if(typeof u==='string'&&u.charAt(0)==='/'"
+            "&&u.charAt(1)!=='/'&&u!==b&&u.indexOf(b+'/')!==0){u=b+u;}return f.call(this,u,o);};})();</script>"
+            % jsonlib.dumps(base)).encode()
+
+
+def rewrite_html_for_base(body: bytes, base: str) -> bytes:
+    b = base.encode()
+    body = _BASE_ATTR_RE.sub(lambda m: m.group(1) + b + b"/", body)
+    script = base_path_script(base)
+    i = body.lower().find(b"<head>")
+    if i >= 0:
+        return body[:i + 6] + script + body[i + 6:]
+    return script + body
+
+
+class BasePathMiddleware:
+    def __init__(self, app, base: str = None):
+        self.app = app
+        self._base = base
+
+    @property
+    def base(self) -> str:
+        return CC_BASE_PATH if self._base is None else self._base
+
+    async def __call__(self, scope, receive, send):
+        base = self.base
+        if scope["type"] != "http" or not base:
+            return await self.app(scope, receive, send)
+        path = scope.get("path", "")
+        if path == base:
+            qs = scope.get("query_string", b"")
+            loc = (base + "/").encode() + (b"?" + qs if qs else b"")
+            await send({"type": "http.response.start", "status": 307,
+                        "headers": [(b"location", loc), (b"content-length", b"0")]})
+            await send({"type": "http.response.body", "body": b""})
+            return
+        if path.startswith(base + "/"):
+            scope = dict(scope)
+            scope["path"] = path[len(base):]
+            raw = scope.get("raw_path")
+            if raw and raw.startswith(base.encode() + b"/"):
+                scope["raw_path"] = raw[len(base):]
+        bb = base.encode()
+        state = {"start": None, "html": False, "chunks": []}
+
+        async def wrapped(message):
+            if message["type"] == "http.response.start":
+                headers = []
+                for k, v in message.get("headers", []):
+                    lk = k.lower()
+                    if lk == b"location" and v.startswith(b"/") and not v.startswith(b"//") \
+                            and v != bb and not v.startswith(bb + b"/"):
+                        v = bb + v
+                    elif lk == b"set-cookie":
+                        v = _BASE_COOKIE_RE.sub(lambda m: m.group(1) + bb, v)
+                    elif lk == b"content-type" and v.lower().startswith(b"text/html"):
+                        state["html"] = True
+                    headers.append((k, v))
+                message = dict(message, headers=headers)
+                if state["html"]:
+                    state["start"] = message
+                    return
+                return await send(message)
+            if message["type"] == "http.response.body" and state["html"]:
+                state["chunks"].append(message.get("body", b""))
+                if message.get("more_body"):
+                    return
+                body = rewrite_html_for_base(b"".join(state["chunks"]), base)
+                start = state["start"]
+                start["headers"] = [(k, v) for k, v in start["headers"] if k.lower() != b"content-length"]
+                start["headers"].append((b"content-length", str(len(body)).encode()))
+                await send(start)
+                return await send({"type": "http.response.body", "body": body})
+            return await send(message)
+
+        return await self.app(scope, receive, wrapped)
+
+
+app.add_middleware(BasePathMiddleware)
 app.add_middleware(GZipMiddleware, minimum_size=500)
 app.router.lifespan_context = lifespan

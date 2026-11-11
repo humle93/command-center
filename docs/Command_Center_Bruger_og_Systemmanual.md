@@ -317,14 +317,28 @@ Appen skal blive på `127.0.0.1`; nginx står for TLS:
 
 1. `.env`: `CC_HOST=127.0.0.1`, `CC_PUBLIC_URL=https://<din-adresse>`, `CC_FORWARDED_ALLOW_IPS=127.0.0.1`
 2. Start via `./run.sh` eller `deploy/command-center.user.service` (systemd --user, indlæser `.env` som `EnvironmentFile`)
-3. `deploy/nginx-command-center.conf` ind i den `server { }` du bruger, derefter genindlæs nginx
-4. Åbn `CC_PUBLIC_URL` — første besøg opretter din bruger
+3. VPS: `deploy/nginx-command-center.conf` ind i den `server { }` du bruger, derefter genindlæs nginx.
+   Ultra.cc: `deploy/nginx-ultracc-proxy.conf` til `~/.apps/nginx/proxy.d/command-center.conf` (ret porten), derefter `app-nginx restart`
+4. Åbn `CC_PUBLIC_URL` — log ind med e-mail og adgangskode (første besøg opretter din bruger, hvis der ingen standardbruger er)
+
+### Ultra.cc uden Cloudflare (v7.28)
+
+Ultra.cc giver ikke en egen app sit eget domæne — kun en understi på din faste adresse, fx `https://<bruger>.<server>.usbx.me/cc/`. Før v7.28 kunne appen kun ligge på roden, og derfor blev der brugt en `trycloudflare`-tunnel (ny URL ved hver genstart, så `CC_PUBLIC_URL` og login-knappen i WordPress gik i stykker). Nu:
+
+Hurtigst: `bash scripts/ultracc_setup.sh --url https://<bruger>.<server>.usbx.me/cc` viser planen, og `--apply` udfører skridt 1-4 (inkl. at stoppe `cloudflared`) og tjekker login-siden. Manuelt:
+
+1. `app-ports free` → vælg en port, og skriv den i `.env` som `CC_PORT=<port>` (`CC_HOST=127.0.0.1`)
+2. `.env`: `CC_PUBLIC_URL=https://<bruger>.<server>.usbx.me/cc`
+3. `cp deploy/nginx-ultracc-proxy.conf ~/.apps/nginx/proxy.d/command-center.conf`, ret `12345` til din port, og kør `app-nginx restart`
+4. `bash scripts/restart.sh` og åbn `https://<bruger>.<server>.usbx.me/cc/` — login-siden
+
+Appen fjerner selv `/cc` fra indgående kald (så `/login` på 127.0.0.1 og `scripts/update.sh` virker som før) og sætter det på redirects, session-cookien (`Path=/cc`), `href`/`action`/`src` i HTML og `fetch()`-kald. Selve tunnellen fjernes som beskrevet i [Installation og udrulning §2e](Installation_og_udrulning.md#2e-ultracc-uden-cloudflare).
 
 ### Hvorfor `CC_PUBLIC_URL` ofte er tom — og hvad den skal indeholde
 
 `install.sh` skriver kun `.env.example`; den kopierer aldrig til `.env` og spørger ikke om adressen. Opdateringer rører bevidst aldrig `.env`. Kopierer man skabelonen, står der derfor `CC_PUBLIC_URL=` fra dag ét, og den bliver tom, indtil man selv retter linjen. Det ses på tre måder: login-linket i `scripts/update.sh` og `scripts/user_create.py` viser `127.0.0.1`, invitationsmailen får en lokal adresse — og `/mcp` afviser med `421` (eller, når feltet er helt tomt, slår Host-tjekket slet ikke til).
 
-Rigtig form: `CC_PUBLIC_URL=https://humle91.ultra.cc` — med scheme, kun værten, **uden** anførselstegn og uden kommentar på samme linje. På Ultra.cc er det præcis den adresse, der står i panelet, og som du selv skriver i browseren; en sti som `/apps/cc` virker ikke.
+Rigtig form: `CC_PUBLIC_URL=https://humle91.ultra.cc` — med scheme, kun værten, **uden** anførselstegn og uden kommentar på samme linje. På Ultra.cc er det den faste adresse fra panelet + understien: `CC_PUBLIC_URL=https://<bruger>.<server>.usbx.me/cc` (v7.28).
 
 | Skrevet som | Resultat |
 |---|---|
@@ -332,11 +346,11 @@ Rigtig form: `CC_PUBLIC_URL=https://humle91.ultra.cc` — med scheme, kun værte
 | `CC_PUBLIC_URL="https://x.ultra.cc"` | `urlparse` finder ingen vært → `/mcp` svarer `421` på alle ikke-lokale værter |
 | `CC_PUBLIC_URL=x.ultra.cc` (uden scheme) | samme `421`, og login-linket bliver uden `https://` |
 | `CC_PUBLIC_URL=https://x.ultra.cc/` | virker; login-linket får ikke dobbelt `/` |
-| `CC_PUBLIC_URL=https://x.ultra.cc/app` | virker for `/mcp`, men login-linket peger på `/app/login` |
+| `CC_PUBLIC_URL=https://x.usbx.me/cc` | virker (v7.28): appen ligger på understien `/cc`, login-linket er `…/cc/login` |
 
 Tjek altid med `bash scripts/update.sh --check`: står der `127.0.0.1` som login-adresse, er linjen tom eller forkert skrevet.
 
-Proxy-blokken skal sende `X-Forwarded-Proto` (ellers bliver cookien ikke `Secure`, og der vises en HTTPS-advarsel), `X-Forwarded-For` (så login-låsen rammer klienten) og have `proxy_read_timeout 300s` (crawl/AI-kald tager minutter). Understi (`/apps/cc/`) virker ikke — brug subdomæne eller egen port.
+Proxy-blokken skal sende `X-Forwarded-Proto` (ellers bliver cookien ikke `Secure`, og der vises en HTTPS-advarsel), `X-Forwarded-For` (så login-låsen rammer klienten) og have `proxy_read_timeout 300s` (crawl/AI-kald tager minutter). Understi (`/cc/`) virker fra v7.28, når den står i `CC_PUBLIC_URL`; nginx må ikke strippe den.
 
 
 

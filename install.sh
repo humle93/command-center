@@ -28,7 +28,10 @@ cat << 'EOF_ENVDOT' > "$PROJECT_DIR/.env.example"
 # standardbrugeren ved opstart (efter deployment), og du logger ind med den med det samme.
 # Er de to linjer tomme, opretter foerste besoeg brugeren via /setup som reserve. Nye brugere
 # inviteres paa mail under fanen "Brugere" og kraever SMTP_HOST + SMTP_FROM nedenfor.
-# Hvor run.sh lytter. 127.0.0.1 = kun denne maskine; 0.0.0.0 = ogsaa fra netvaerket (kraever TLS/proxy).
+# Hvor appen lytter (run.sh og systemd-enhederne foelger begge linjer fra v7.28).
+# 127.0.0.1 = kun denne maskine (bag nginx). 0.0.0.0 = direkte paa serverens IP: http://<ip>:<port>,
+# ingen nginx/tunnel - saet saa CC_PUBLIC_URL=http://<ip>:<port>. Uden TLS sendes adgangskoden ukrypteret.
+# Enklest: bash scripts/ultracc_setup.sh --ip --apply
 CC_HOST=127.0.0.1
 CC_PORT=8000
 # SSRF: udgaaende kald afviser loopback, private net og sky-metadata (169.254.169.254).
@@ -254,7 +257,7 @@ APP_VERSION = "7.28.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
-    ("7.28.0", "Almindeligt login paa Ultra.cc uden Cloudflare-tunnel: appen kan nu ligge paa en understi (https://bruger.server.usbx.me/cc) bag Ultra.cc's egen nginx"),
+    ("7.28.0", "Login uden Cloudflare: direkte paa serverens IP (http://ip:port, CC_HOST=0.0.0.0) eller paa en understi bag Ultra.cc's nginx - login-laasen kan ikke laengere snydes med X-Forwarded-For"),
     ("7.27.0", "Log ind fra WordPress med et klik: knappen i Steamgears (7.76+) sender en signeret billet, der holder 1 minut og kun virker en gang - kun for en kendt e-mail"),
     ("7.26.0", "Ny fane Chat: tal med AI og giv den vaerktoejer fra MCP-connectors (GitHub, WordPress, Gmail, Google Drive m.fl.) - alt der aendrer noget kraever din godkendelse"),
     ("7.25.0", "AI via OpenRouter i stedet for aimlapi: OPENROUTER_API_KEY + AI_MODEL (OpenRouter-slug), et faelles AI-kald og en advarsel hvis kun den gamle AIMLAPI_KEY er sat"),
@@ -282,7 +285,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Login direkte via Ultra.cc's nginx paa en understi - ingen Cloudflare-tunnel"
+NEWEST_LINE = "Login med e-mail og adgangskode direkte paa serverens IP - ingen Cloudflare-tunnel"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -1367,12 +1370,31 @@ def api_audit_rows(limit: int = 8) -> list:
             "ORDER BY a.id DESC LIMIT ?", (limit,)).fetchall()]
 
 
+def trusted_proxies(raw: str = None) -> set:
+    """Hvem maa saette X-Forwarded-For: loopback + CC_FORWARDED_ALLOW_IPS (komma-adskilt, '*' = alle)."""
+    raw = os.environ.get("CC_FORWARDED_ALLOW_IPS", "127.0.0.1") if raw is None else raw
+    return {"127.0.0.1", "::1"} | {x.strip() for x in raw.split(",") if x.strip()}
+
+
+TRUSTED_PROXIES = trusted_proxies()
+
+
 def client_ip(request: Request) -> str:
-    """Klientens IP. uvicorn --proxy-headers saetter client.host ud fra X-Forwarded-For;
-    vi laeser headeren selv som reserve (foerste hop) og falder tilbage til socket-adressen."""
-    fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    """Klientens IP - til login-laasen og login-sporet.
+
+    X-Forwarded-For bruges KUN naar forbindelsen kommer fra en betroet proxy (v7.28). Staar appen direkte
+    paa en offentlig IP (CC_HOST=0.0.0.0, ingen nginx), kunne en angriber ellers skrive en ny IP i headeren
+    ved hvert forsoeg og slippe uden om laasen. Fra en betroet proxy tages den hoejre-mest adresse, der
+    ikke selv er en betroet proxy: venstre del af kaeden er hvad klienten paastaar, ikke hvad nginx saa.
+    """
     host = request.client.host if request.client else ""
-    return (fwd or host or "ukendt")[:64]
+    trusted = TRUSTED_PROXIES
+    if host and ("*" in trusted or host in trusted):
+        hops = [h.strip() for h in (request.headers.get("x-forwarded-for") or "").split(",") if h.strip()]
+        for hop in reversed(hops):
+            if "*" in trusted or hop not in trusted:
+                return hop[:64]
+    return (host or "ukendt")[:64]
 
 
 def record_login(ip: str, username: str, ok: bool):
@@ -9323,8 +9345,9 @@ User=%i
 WorkingDirectory=/home/%i/command-center
 # Goer .env-vaerdier (GITHUB_TOKEN m.fl.) til rigtige miljoevariabler; "-" = ok hvis filen mangler.
 EnvironmentFile=-/home/%i/command-center/.env
-# proxy-headers + forwarded-allow-ips: nginx paa 127.0.0.1 sender X-Forwarded-Proto/For.
-ExecStart=/home/%i/command-center/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1
+# Vaert/port/proxyer foelger .env (v7.28): CC_HOST=0.0.0.0 = direkte paa serverens IP uden nginx.
+# sh -c + $${X:-std}: en manglende eller tom linje i .env giver standarden ($$ = et bogstaveligt $).
+ExecStart=/bin/sh -c 'exec /home/%i/command-center/venv/bin/uvicorn app.main:app --host "$${CC_HOST:-127.0.0.1}" --port "$${CC_PORT:-8000}" --proxy-headers --forwarded-allow-ips="$${CC_FORWARDED_ALLOW_IPS:-127.0.0.1}"'
 Restart=on-failure
 RestartSec=5
 
@@ -9396,8 +9419,9 @@ WorkingDirectory=%h/command-center
 # Lader .env-vaerdier som GITHUB_TOKEN og OPENROUTER_API_KEY blive rigtige miljoevariabler
 # (appen laeser selv de fleste, men dette er den paalidelige vej). "-" = ok hvis filen mangler.
 EnvironmentFile=-%h/command-center/.env
-# 127.0.0.1 + proxy-headers: nginx paa samme maskine sender X-Forwarded-Proto/For.
-ExecStart=%h/command-center/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1
+# Vaert/port/proxyer foelger .env (v7.28): CC_HOST=0.0.0.0 = direkte paa serverens IP uden nginx.
+# sh -c + $${X:-std}: en manglende eller tom linje i .env giver standarden ($$ = et bogstaveligt $).
+ExecStart=/bin/sh -c 'exec %h/command-center/venv/bin/uvicorn app.main:app --host "$${CC_HOST:-127.0.0.1}" --port "$${CC_PORT:-8000}" --proxy-headers --forwarded-allow-ips="$${CC_FORWARDED_ALLOW_IPS:-127.0.0.1}"'
 Restart=on-failure
 RestartSec=5
 
@@ -9416,6 +9440,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 
 ## Nyheder i v7.28
 
+- **Eget domæne eller offentlig IP — ingen Cloudflare, ingen token, ingen nginx (v7.28.0)** — `bash scripts/ultracc_setup.sh --domain www.ditdomaene.dk` (eller `--ip`) viser planen; localhost og lokalnet afvises, og `--apply` udfører den: stopper `cloudflared`, sætter `CC_HOST=0.0.0.0`, `CC_PORT` og `CC_PUBLIC_URL=http://<ip>:<port>` i `.env`, skifter en gammel systemd-enhed ud (den havde `--host 127.0.0.1 --port 8000` skrevet fast og ignorerede `.env`), genstarter og tjekker at `http://<ip>:<port>/login` svarer. Derefter logger du ind med e-mail og adgangskode på `http://<ip>:<port>/`. **Obs:** uden TLS sendes adgangskoden ukrypteret — brug en stærk, unik kode. Samtidig lukket: `client_ip()` stolede på `X-Forwarded-For` fra alle, så en klient direkte på IP'en kunne omgå login-låsen ved at skifte header; nu bruges headeren kun fra en betroet proxy (127.0.0.1 + `CC_FORWARDED_ALLOW_IPS`)
 - **Almindeligt login via Ultra.cc — ingen Cloudflare-tunnel (v7.28.0)** — Ultra.cc's egen nginx giver kun en understi på din faste adresse (`https://<bruger>.<server>.usbx.me/cc/`), og appen kunne før kun ligge på roden af et domæne; derfor blev der brugt en `trycloudflare`-tunnel, hvis URL skiftede ved hver genstart. Nu kan appen ligge på en understi: sæt `CC_PUBLIC_URL=https://<bruger>.<server>.usbx.me/cc`, læg `deploy/nginx-ultracc-proxy.conf` i `~/.apps/nginx/proxy.d/` og log ind på `…/cc/` med e-mail og adgangskode som altid. `bash scripts/ultracc_setup.sh --url https://<bruger>.<server>.usbx.me/cc` viser planen (tunnel, `.env`, nginx-blok), og med `--apply` stopper den `cloudflared`, retter `.env`, lægger blokken ind, genstarter og tjekker at `…/cc/login` svarer 200. Et ASGI-lag (`BasePathMiddleware`) fjerner `/cc` fra indgående kald og sætter det på redirects, session-cookien (`Path=/cc`), links/formularer/scripts i HTML og på `fetch()`-kald; uden understi er alt som før. Se [Installation og udrulning §2e](docs/Installation_og_udrulning.md#2e-ultracc-uden-cloudflare) for skridtene og hvordan tunnellen fjernes
 
 ## Nyheder i v7.27
@@ -9533,6 +9558,19 @@ curl -s https://<din-adresse>/mcp -H "Authorization: Bearer cc_..." \
 - `python3 scripts/api_key.py list` viser nøglerne (kun halen), `revoke <id>` slår dem fra med det samme, og `audit [antal]` viser de seneste kald pr. nøgle.
 - Læse-værktøjer: `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes`, `history`.
 - Skrive-værktøjer (`write`): `start_crawl` (afvises hvis et crawl kører), `add_monitor` (samme url+type oprettes ikke to gange), `resolve_alarm`, `add_note`.
+
+## Offentlig adresse: eget domæne eller offentlig IP (enklest)
+
+```bash
+bash scripts/ultracc_setup.sh --domain www.ditdomaene.dk                     # plan - skriver intet
+bash scripts/ultracc_setup.sh --domain www.ditdomaene.dk --apply             # http://www.ditdomaene.dk:<port>
+bash scripts/ultracc_setup.sh --domain www.ditdomaene.dk --port 80 --apply   # uden :port (kræver root)
+bash scripts/ultracc_setup.sh --ip --apply                                   # uden domæne: http://<offentlig-ip>:<port>
+```
+
+Kun **offentlige** adresser: localhost og lokalnet (10.x, 192.168.x, 172.16-31.x, 100.64-127.x, 169.254.x) afvises, fordi de ikke kan nås fra internettet. Et domæne skal have en A-post, der peger på serverens offentlige IP; scriptet slår den op og stopper med en forklaring, hvis den mangler eller peger på lokalnet. Port 80 (adressen uden `:port`) kræver root — det har man ikke på Ultra.cc, så dér bliver adressen `http://www.ditdomaene.dk:<port>`.
+
+Med `--ip` findes IP'en selv (kun offentlige; angiv den med `--ip 203.0.113.5`), porten tages fra `--port`, `CC_PORT` eller `app-ports free`. Åbn `http://<ip>:<port>/` og log ind med e-mail og adgangskode. Svarer adressen fra serveren selv, men ikke fra din computer, blokerer en firewall porten. Uden TLS sendes koden ukrypteret; vil du have https, så brug nginx-vejen nedenfor.
 
 ## Ultra.cc / nginx (reverse proxy)
 

@@ -282,9 +282,11 @@ check("startup: NEWEST_LINE er én linje scripts kan laese",
 
 with main.get_db() as db:
     db.execute("DELETE FROM login_attempts"); db.execute("DELETE FROM sessions"); db.execute("DELETE FROM users")
+_proxies_saved = main.TRUSTED_PROXIES
+main.TRUSTED_PROXIES = main.trusted_proxies("testclient")   # TestClient = "nginx" i disse checks
 b = TestClient(main.app)
 b.post("/setup", data={"email": "iptest@example.dk", "password": "iptest-pass", "confirm": "iptest-pass"},
-       follow_redirects=False, headers={"x-forwarded-for": "203.0.113.9, 10.0.0.1"})
+       follow_redirects=False, headers={"x-forwarded-for": "6.6.6.6, 203.0.113.9"})
 with main.get_db() as db:
     usr = db.execute("SELECT last_login_ip FROM users WHERE email='iptest@example.dk'").fetchone()
     ses = db.execute("SELECT ip FROM sessions ORDER BY rowid DESC LIMIT 1").fetchone()
@@ -319,6 +321,25 @@ r = b.get("/login", headers={"x-forwarded-for": "203.0.113.9"})
 check("login-side: viser version, IP og koerselsrapport",
       r.status_code == 200 and main.APP_VERSION in r.text and "Din IP" in r.text
       and "Seneste opstart" in r.text and "203.0.113.9" in r.text, r.text[:160])
+
+check("login: fra betroet proxy bruges hoejre-mest hop (venstre del er klientens paastand)",
+      "6.6.6.6" not in r.text)
+main.TRUSTED_PROXIES = main.trusted_proxies("127.0.0.1")    # appen direkte paa en IP, ingen nginx
+r = TestClient(main.app).get("/login", headers={"x-forwarded-for": "203.0.113.77"})
+check("login: X-Forwarded-For fra en ubetroet klient ignoreres (IP-mode)",
+      "203.0.113.77" not in r.text and "testclient" in r.text, r.text[:120])
+main._LOGIN_FAILS.clear()
+_spoof = TestClient(main.app)
+for _i in range(main._LOGIN_MAX_FAILS):
+    _spoof.post("/login", data={"email": "iptest@example.dk", "password": "forkert"}, follow_redirects=False,
+                headers={"x-forwarded-for": f"198.51.100.{_i + 10}"})
+r = _spoof.post("/login", data={"email": "iptest@example.dk", "password": "iptest-pass"}, follow_redirects=False,
+                headers={"x-forwarded-for": "198.51.100.99"})
+check("login: laasen kan ikke omgaas ved at skifte X-Forwarded-For", r.status_code != 303 or "cc_session" not in r.headers.get("set-cookie", ""),
+      (r.status_code, r.headers.get("location")))
+main._LOGIN_FAILS.clear()
+check("login: trusted_proxies indeholder altid loopback", {"127.0.0.1", "::1"} <= main.trusted_proxies(""))
+main.TRUSTED_PROXIES = _proxies_saved
 
 # --- v7.15: e-mail er login-id, og nye brugere inviteres paa mail (ingen tokens) ---
 try:
@@ -1778,6 +1799,61 @@ check("ultracc: planen skriver intet (.env og nginx-mappe uroerte)",
       open(os.path.join(_ud, ".env")).read().startswith("SERPAPI_KEY=hemmelig\nCC_PORT=8000")
       and not os.path.exists(os.path.join(_ud, "nginx")))
 check("ultracc: noegler vises ikke i planen", "hemmelig" not in _r.stdout)
+_uenv["CC_SETUP_IPS"] = "127.0.0.1 10.1.2.3 203.0.113.5"
+_uenv["CC_SETUP_UNIT_DIR"] = os.path.join(_ud, "units")
+os.makedirs(_uenv["CC_SETUP_UNIT_DIR"])
+with open(os.path.join(_uenv["CC_SETUP_UNIT_DIR"], "command-center.service"), "w") as _f:
+    _f.write("ExecStart=/x/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers\n")
+_r = _ucc("--ip", "--port", "12002")
+check("ultracc --ip: vaelger den offentlige adresse frem for loopback og privat net",
+      _r.returncode == 0 and "CC_PUBLIC_URL: 'https://gammel.trycloudflare.com' -> 'http://203.0.113.5:12002'" in _r.stdout,
+      _r.stdout + _r.stderr)
+check("ultracc --ip: lytter paa 0.0.0.0 og bruger ikke nginx",
+      "CC_HOST: '' -> '0.0.0.0'" in _r.stdout and "nginx: bruges ikke (--ip)" in _r.stdout and "location" not in _r.stdout)
+check("ultracc --ip: en gammel systemd-enhed med fast vaert/port bliver fundet",
+      "har fast --host 127.0.0.1 --port 8000" in _r.stdout)
+_uenv["CC_SETUP_IPS"] = "10.1.2.3 192.168.1.20"
+_r = _ucc("--ip", "--port", "12002")
+check("ultracc --ip: kun lokalnet paa netkortene afvises (kode 2) med forklaring",
+      _r.returncode == 2 and "ingen offentlig IP" in _r.stderr, _r.stderr)
+check("ultracc --ip: angivet offentlig adresse bruges", "http://198.51.100.4:12002" in _ucc("--ip", "198.51.100.4", "--port", "12002").stdout)
+for _bad in ("127.0.0.1", "10.0.0.5", "192.168.1.20", "172.20.0.4", "100.64.1.1", "169.254.169.254"):
+    check(f"ultracc --ip: {_bad} afvises (ikke offentlig)", _ucc("--ip", _bad, "--port", "12002").returncode == 2)
+_uenv["CC_SETUP_IPS"] = "203.0.113.5"
+_uenv["CC_SETUP_RESOLVE"] = "203.0.113.5"
+_r = _ucc("--domain", "WWW.DitDomaene.dk", "--port", "12002")
+check("ultracc --domain: adressen bliver http://<domaene>:<port> og lytter paa 0.0.0.0",
+      _r.returncode == 0 and "'http://www.ditdomaene.dk:12002'" in _r.stdout and "CC_HOST: '' -> '0.0.0.0'" in _r.stdout
+      and "nginx: bruges ikke (--domain)" in _r.stdout, _r.stdout + _r.stderr)
+_uenv["CC_SETUP_UID"] = "0"
+check("ultracc --domain: port 80 som root giver adressen uden :port",
+      "'http://www.ditdomaene.dk'" in _ucc("--domain", "www.ditdomaene.dk", "--port", "80").stdout)
+_uenv["CC_SETUP_UID"] = "1000"
+_r = _ucc("--domain", "www.ditdomaene.dk", "--port", "80")
+check("ultracc --domain: port 80 uden root afvises med forklaring", _r.returncode == 2 and "kraever root" in _r.stderr, _r.stderr)
+_uenv["CC_SETUP_RESOLVE"] = "192.168.1.20"
+_r = _ucc("--domain", "www.ditdomaene.dk", "--port", "12002")
+check("ultracc --domain: domaene der peger paa lokalnet afvises", _r.returncode == 2 and "lokal/privat" in _r.stderr, _r.stderr)
+_uenv["CC_SETUP_RESOLVE"] = ""
+_r = _ucc("--domain", "www.ditdomaene.dk", "--port", "12002")
+check("ultracc --domain: domaene uden A-post afvises og forklarer A-posten", _r.returncode == 2 and "A-post" in _r.stderr, _r.stderr)
+_uenv["CC_SETUP_RESOLVE"] = "198.51.100.9"
+check("ultracc --domain: anden offentlig IP end netkortet giver en NAT-bemaerkning",
+      "portviderestilling" in _ucc("--domain", "www.ditdomaene.dk", "--port", "12002").stdout)
+check("ultracc --domain: ugyldigt navn afvises",
+      _ucc("--domain", "http://www.ditdomaene.dk/cc", "--port", "12002").returncode == 2)
+check("ultracc: --domain og --ip sammen afvises", _ucc("--domain", "a.dk", "--ip", "--port", "12002").returncode == 2)
+for _k in ("CC_SETUP_RESOLVE", "CC_SETUP_UID"):
+    _uenv.pop(_k, None)
+_uenv["CC_SETUP_IPS"] = "127.0.0.1 10.1.2.3 203.0.113.5"
+check("ultracc: --ip og --url sammen afvises", _ucc("--ip", "--url", "https://x.usbx.me/cc", "--port", "12002").returncode == 2)
+check("ultracc: uden --ip/--url afvises", _ucc("--port", "12002").returncode == 2)
+_usrc = open(os.path.join(ROOT, "scripts", "ultracc_setup.sh")).read()
+check("ultracc: cloudflared findes paa procesnavn, ikke kommandolinje", "pgrep -f" not in _usrc and "pkill -f" not in _usrc)
+check("systemd: enhederne foelger CC_HOST/CC_PORT fra .env med standard",
+      all("$${CC_HOST:-127.0.0.1}" in open(os.path.join(ROOT, "deploy", _u)).read()
+          and "$${CC_PORT:-8000}" in open(os.path.join(ROOT, "deploy", _u)).read()
+          for _u in ("command-center.user.service", "command-center.service")))
 shutil.rmtree(_ud, ignore_errors=True)
 
 srv.shutdown()

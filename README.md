@@ -7,6 +7,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 
 ## Nyheder i v7.28
 
+- **Eget domæne eller offentlig IP — ingen Cloudflare, ingen token, ingen nginx (v7.28.0)** — `bash scripts/ultracc_setup.sh --domain www.ditdomaene.dk` (eller `--ip`) viser planen; localhost og lokalnet afvises, og `--apply` udfører den: stopper `cloudflared`, sætter `CC_HOST=0.0.0.0`, `CC_PORT` og `CC_PUBLIC_URL=http://<ip>:<port>` i `.env`, skifter en gammel systemd-enhed ud (den havde `--host 127.0.0.1 --port 8000` skrevet fast og ignorerede `.env`), genstarter og tjekker at `http://<ip>:<port>/login` svarer. Derefter logger du ind med e-mail og adgangskode på `http://<ip>:<port>/`. **Obs:** uden TLS sendes adgangskoden ukrypteret — brug en stærk, unik kode. Samtidig lukket: `client_ip()` stolede på `X-Forwarded-For` fra alle, så en klient direkte på IP'en kunne omgå login-låsen ved at skifte header; nu bruges headeren kun fra en betroet proxy (127.0.0.1 + `CC_FORWARDED_ALLOW_IPS`)
 - **Almindeligt login via Ultra.cc — ingen Cloudflare-tunnel (v7.28.0)** — Ultra.cc's egen nginx giver kun en understi på din faste adresse (`https://<bruger>.<server>.usbx.me/cc/`), og appen kunne før kun ligge på roden af et domæne; derfor blev der brugt en `trycloudflare`-tunnel, hvis URL skiftede ved hver genstart. Nu kan appen ligge på en understi: sæt `CC_PUBLIC_URL=https://<bruger>.<server>.usbx.me/cc`, læg `deploy/nginx-ultracc-proxy.conf` i `~/.apps/nginx/proxy.d/` og log ind på `…/cc/` med e-mail og adgangskode som altid. `bash scripts/ultracc_setup.sh --url https://<bruger>.<server>.usbx.me/cc` viser planen (tunnel, `.env`, nginx-blok), og med `--apply` stopper den `cloudflared`, retter `.env`, lægger blokken ind, genstarter og tjekker at `…/cc/login` svarer 200. Et ASGI-lag (`BasePathMiddleware`) fjerner `/cc` fra indgående kald og sætter det på redirects, session-cookien (`Path=/cc`), links/formularer/scripts i HTML og på `fetch()`-kald; uden understi er alt som før. Se [Installation og udrulning §2e](docs/Installation_og_udrulning.md#2e-ultracc-uden-cloudflare) for skridtene og hvordan tunnellen fjernes
 
 ## Nyheder i v7.27
@@ -124,6 +125,19 @@ curl -s https://<din-adresse>/mcp -H "Authorization: Bearer cc_..." \
 - `python3 scripts/api_key.py list` viser nøglerne (kun halen), `revoke <id>` slår dem fra med det samme, og `audit [antal]` viser de seneste kald pr. nøgle.
 - Læse-værktøjer: `health`, `crawl_summary`, `keywords`, `monitors`, `alarms_open`, `notes`, `history`.
 - Skrive-værktøjer (`write`): `start_crawl` (afvises hvis et crawl kører), `add_monitor` (samme url+type oprettes ikke to gange), `resolve_alarm`, `add_note`.
+
+## Offentlig adresse: eget domæne eller offentlig IP (enklest)
+
+```bash
+bash scripts/ultracc_setup.sh --domain www.ditdomaene.dk                     # plan - skriver intet
+bash scripts/ultracc_setup.sh --domain www.ditdomaene.dk --apply             # http://www.ditdomaene.dk:<port>
+bash scripts/ultracc_setup.sh --domain www.ditdomaene.dk --port 80 --apply   # uden :port (kræver root)
+bash scripts/ultracc_setup.sh --ip --apply                                   # uden domæne: http://<offentlig-ip>:<port>
+```
+
+Kun **offentlige** adresser: localhost og lokalnet (10.x, 192.168.x, 172.16-31.x, 100.64-127.x, 169.254.x) afvises, fordi de ikke kan nås fra internettet. Et domæne skal have en A-post, der peger på serverens offentlige IP; scriptet slår den op og stopper med en forklaring, hvis den mangler eller peger på lokalnet. Port 80 (adressen uden `:port`) kræver root — det har man ikke på Ultra.cc, så dér bliver adressen `http://www.ditdomaene.dk:<port>`.
+
+Med `--ip` findes IP'en selv (kun offentlige; angiv den med `--ip 203.0.113.5`), porten tages fra `--port`, `CC_PORT` eller `app-ports free`. Åbn `http://<ip>:<port>/` og log ind med e-mail og adgangskode. Svarer adressen fra serveren selv, men ikke fra din computer, blokerer en firewall porten. Uden TLS sendes koden ukrypteret; vil du have https, så brug nginx-vejen nedenfor.
 
 ## Ultra.cc / nginx (reverse proxy)
 

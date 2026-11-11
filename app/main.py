@@ -120,7 +120,7 @@ APP_VERSION = "7.28.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
-    ("7.28.0", "Almindeligt login paa Ultra.cc uden Cloudflare-tunnel: appen kan nu ligge paa en understi (https://bruger.server.usbx.me/cc) bag Ultra.cc's egen nginx"),
+    ("7.28.0", "Login uden Cloudflare: direkte paa serverens IP (http://ip:port, CC_HOST=0.0.0.0) eller paa en understi bag Ultra.cc's nginx - login-laasen kan ikke laengere snydes med X-Forwarded-For"),
     ("7.27.0", "Log ind fra WordPress med et klik: knappen i Steamgears (7.76+) sender en signeret billet, der holder 1 minut og kun virker en gang - kun for en kendt e-mail"),
     ("7.26.0", "Ny fane Chat: tal med AI og giv den vaerktoejer fra MCP-connectors (GitHub, WordPress, Gmail, Google Drive m.fl.) - alt der aendrer noget kraever din godkendelse"),
     ("7.25.0", "AI via OpenRouter i stedet for aimlapi: OPENROUTER_API_KEY + AI_MODEL (OpenRouter-slug), et faelles AI-kald og en advarsel hvis kun den gamle AIMLAPI_KEY er sat"),
@@ -148,7 +148,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Login direkte via Ultra.cc's nginx paa en understi - ingen Cloudflare-tunnel"
+NEWEST_LINE = "Login med e-mail og adgangskode direkte paa serverens IP - ingen Cloudflare-tunnel"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -1233,12 +1233,31 @@ def api_audit_rows(limit: int = 8) -> list:
             "ORDER BY a.id DESC LIMIT ?", (limit,)).fetchall()]
 
 
+def trusted_proxies(raw: str = None) -> set:
+    """Hvem maa saette X-Forwarded-For: loopback + CC_FORWARDED_ALLOW_IPS (komma-adskilt, '*' = alle)."""
+    raw = os.environ.get("CC_FORWARDED_ALLOW_IPS", "127.0.0.1") if raw is None else raw
+    return {"127.0.0.1", "::1"} | {x.strip() for x in raw.split(",") if x.strip()}
+
+
+TRUSTED_PROXIES = trusted_proxies()
+
+
 def client_ip(request: Request) -> str:
-    """Klientens IP. uvicorn --proxy-headers saetter client.host ud fra X-Forwarded-For;
-    vi laeser headeren selv som reserve (foerste hop) og falder tilbage til socket-adressen."""
-    fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    """Klientens IP - til login-laasen og login-sporet.
+
+    X-Forwarded-For bruges KUN naar forbindelsen kommer fra en betroet proxy (v7.28). Staar appen direkte
+    paa en offentlig IP (CC_HOST=0.0.0.0, ingen nginx), kunne en angriber ellers skrive en ny IP i headeren
+    ved hvert forsoeg og slippe uden om laasen. Fra en betroet proxy tages den hoejre-mest adresse, der
+    ikke selv er en betroet proxy: venstre del af kaeden er hvad klienten paastaar, ikke hvad nginx saa.
+    """
     host = request.client.host if request.client else ""
-    return (fwd or host or "ukendt")[:64]
+    trusted = TRUSTED_PROXIES
+    if host and ("*" in trusted or host in trusted):
+        hops = [h.strip() for h in (request.headers.get("x-forwarded-for") or "").split(",") if h.strip()]
+        for hop in reversed(hops):
+            if "*" in trusted or hop not in trusted:
+                return hop[:64]
+    return (host or "ukendt")[:64]
 
 
 def record_login(ip: str, username: str, ok: bool):

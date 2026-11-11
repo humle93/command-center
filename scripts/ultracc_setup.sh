@@ -1,30 +1,44 @@
 #!/usr/bin/env bash
-# ultracc_setup.sh - flytter Command Center fra en Cloudflare-tunnel til almindeligt login via Ultra.cc's
-# egen nginx paa en understi (https://<bruger>.<server>.usbx.me/cc). Samme skridt som
-# docs/Installation_og_udrulning.md afsnit 2e - bare samlet.
+# ultracc_setup.sh - flytter Command Center fra en Cloudflare-tunnel til almindeligt login med e-mail og
+# adgangskode paa en OFFENTLIG adresse (aldrig localhost eller lokalnet). Tre maader:
+#   --domain  eget domaene:            http://www.ditdomaene.dk[:port]   (A-post -> serverens offentlige IP)
+#   --ip      serverens offentlige IP: http://<ip>:<port>                (ingen nginx, ingen tunnel, ingen token)
+#   --url     bag Ultra.cc's nginx:    https://<bruger>.<server>.usbx.me/cc   (understi, https)
 #
 # Brug:
-#   bash scripts/ultracc_setup.sh --url https://<bruger>.<server>.usbx.me/cc            # vis planen, skriv intet
-#   bash scripts/ultracc_setup.sh --url https://<bruger>.<server>.usbx.me/cc --apply    # udfoer planen
-#   bash scripts/ultracc_setup.sh --url ... --port 12345 --apply    # fast port (ellers .env / app-ports free)
-#   bash scripts/ultracc_setup.sh --url ... --keep-tunnel --apply   # lad cloudflared vaere (fx under test)
+#   bash scripts/ultracc_setup.sh --domain www.ditdomaene.dk      # vis planen, skriv intet
+#   bash scripts/ultracc_setup.sh --domain www.ditdomaene.dk --port 80 --apply   # uden :port (kraever root)
+#   bash scripts/ultracc_setup.sh --ip --apply                    # offentlig IP findes selv
+#   bash scripts/ultracc_setup.sh --ip 203.0.113.5 --port 12345 --apply
+#   bash scripts/ultracc_setup.sh --url https://<bruger>.<server>.usbx.me/cc --apply
+#   ... --keep-tunnel                                             # lad cloudflared vaere
 #
-# Skridt: 1) find og stop cloudflared (proces, systemd --user, crontab)  2) .env: CC_HOST, CC_PORT,
-# CC_PUBLIC_URL, CC_FORWARDED_ALLOW_IPS (backup foerst, andre linjer uroerte)  3) nginx-blokken fra
-# deploy/nginx-ultracc-proxy.conf med din port og sti  4) app-nginx restart  5) scripts/restart.sh
-# 6) tjek /health lokalt og <url>/login udefra.
+# Private adresser (10.x, 192.168.x, 172.16-31.x, 100.64-127.x, 127.x, 169.254.x) afvises altid: de kan
+# ikke naas fra internettet. Et domaene skal pege paa en offentlig IP, foer det kan bruges.
+#
+# Skridt: 1) stop cloudflared (proces, systemd --user, crontab)  2) .env: CC_HOST (0.0.0.0 ved --ip/--domain),
+# CC_PORT, CC_PUBLIC_URL, CC_FORWARDED_ALLOW_IPS - backup foerst, andre linjer uroerte  3) en installeret
+# systemd-enhed med fast "--host 127.0.0.1 --port 8000" skiftes til deploy/-udgaven, der foelger .env
+# 4) kun --url: nginx-blok + app-nginx restart  5) scripts/restart.sh  6) tjek /health og <adresse>/login.
 # Kode: 0 = ok (eller kun plan), 2 = forkerte argumenter, 3 = et skridt fejlede, 4 = tjekket fejlede.
 # Kraever: bash, sed, awk og curl. app-ports/app-nginx er Ultra.cc's egne - mangler de, siger scriptet til.
-# Miljoe (til test): ULTRACC_NGINX_DIR (standard ~/.apps/nginx/proxy.d), CC_SETUP_RESTART_CMD.
+# Miljoe (til test): ULTRACC_NGINX_DIR, CC_SETUP_UNIT_DIR, CC_SETUP_RESTART_CMD, CC_SETUP_IPS,
+# CC_SETUP_RESOLVE (domaenets IP'er i stedet for DNS-opslag), CC_SETUP_UID.
 # Sidst aendret: 11. november 2026
 set -u
 cd "$(dirname "$0")/.."
 
-URL="" PORT="" APPLY=0 KEEP_TUNNEL=0
+MODE="" URL="" IP="" DOMAIN="" PORT="" APPLY=0 KEEP_TUNNEL=0
 usage() { awk 'NR>1 && /^#/{sub(/^# ?/,""); print; next} NR>1{exit}' "$0"; }
+is_ipv4() { printf '%s' "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' && \
+    [ "$(printf '%s' "$1" | tr '.' '\n' | awk '$1>255' | wc -l)" -eq 0 ]; }
+setmode() { [ -n "$MODE" ] && { echo "brug kun en af --domain, --ip og --url" >&2; exit 2; }; MODE="$1"; }
 while [ $# -gt 0 ]; do
     case "$1" in
-        --url) URL="${2:-}"; shift 2 ;;
+        --url) setmode url; URL="${2:-}"; shift 2 ;;
+        --domain) setmode domain; DOMAIN="$(printf '%s' "${2:-}" | tr 'A-Z' 'a-z')"; shift 2 ;;
+        --ip) setmode ip
+              if [ $# -ge 2 ] && is_ipv4 "$2"; then IP="$2"; shift 2; else shift; fi ;;
         --port) PORT="${2:-}"; shift 2 ;;
         --apply) APPLY=1; shift ;;
         --keep-tunnel) KEEP_TUNNEL=1; shift ;;
@@ -32,51 +46,106 @@ while [ $# -gt 0 ]; do
         *) echo "ukendt argument: $1 (se --help)" >&2; exit 2 ;;
     esac
 done
-
-# --- adressen: https://vaert/sti, stien er appens understi ---
-URL="${URL%/}"
-if ! printf '%s' "$URL" | grep -Eq '^https://[A-Za-z0-9.-]+(/[A-Za-z0-9._-]+)+$'; then
-    echo "--url skal vaere https://<bruger>.<server>.usbx.me/<sti>, fx https://humle.lw123.usbx.me/cc" >&2
-    echo "  (https, ingen anfoerselstegn, en understi - Ultra.cc giver ikke en app sit eget domaene)" >&2
-    exit 2
-fi
-BASE="/${URL#https://*/}"
-case "$BASE" in */..*|*/.) echo "stien maa ikke indeholde .. eller ." >&2; exit 2 ;; esac
+[ -n "$MODE" ] || { echo "angiv --domain www.ditdomaene.dk, --ip eller --url https://... (se --help)" >&2; exit 2; }
 
 envget() { [ -f .env ] && sed -n "s/^$1=//p" .env | tail -1 | tr -d '"'"'"; }
+# Ikke naaelig fra internettet: privat net (RFC 1918), CGNAT, loopback, link-local, 0.x og multicast/reserveret.
+is_private() { case "$1" in 10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*|127.*|169.254.*|0.*|22[4-9].*|2[3-5][0-9].*) return 0 ;; esac; return 1; }
+is_public() { is_ipv4 "$1" && ! is_private "$1"; }
+local_ips() { printf '%s\n' ${CC_SETUP_IPS:-$( { hostname -I 2>/dev/null; ip -4 -o addr show 2>/dev/null | awk '{sub(/\/.*/,"",$4); print $4}'; } | tr ' ' '\n')} | grep -v '^$' | awk '!s[$0]++'; }
+DIRECT=0; [ "$MODE" != url ] && DIRECT=1
 
-# --- porten: --port, ellers CC_PORT fra .env (hvis ikke standarden 8000), ellers app-ports free ---
+# --- porten: --port, ellers CC_PORT fra .env, ellers app-ports free ---
 if [ -z "$PORT" ]; then
     cur="$(envget CC_PORT)"
-    if [ -n "$cur" ] && [ "$cur" != "8000" ]; then
+    if [ -n "$cur" ] && { [ "$cur" != "8000" ] || [ $DIRECT = 1 ]; }; then
         PORT="$cur"
     elif command -v app-ports >/dev/null 2>&1; then
         PORT="$(app-ports free 2>/dev/null | grep -oE '\b[0-9]{4,5}\b' | head -1)"
     fi
+    [ -z "$PORT" ] && [ $DIRECT = 1 ] && PORT=8000
 fi
 case "$PORT" in
     ''|*[!0-9]*) echo "ingen port: angiv --port <nr> (find en ledig med: app-ports free)" >&2; exit 2 ;;
 esac
-if [ "$PORT" -lt 1024 ] || [ "$PORT" -gt 65535 ]; then echo "porten skal vaere 1024-65535" >&2; exit 2; fi
+if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then echo "porten skal vaere 1-65535" >&2; exit 2; fi
+if [ "$PORT" -lt 1024 ]; then
+    if [ $DIRECT = 0 ]; then echo "bag nginx skal appen have en port over 1024" >&2; exit 2; fi
+    if [ "${CC_SETUP_UID:-$(id -u)}" != 0 ]; then
+        echo "port $PORT (adressen uden :port) kraever root - det har du ikke paa Ultra.cc." >&2
+        echo "  Vaelg en port fra 'app-ports free'; adressen bliver saa http://<adresse>:<port>." >&2
+        exit 2
+    fi
+fi
+SUFFIX=":$PORT"; [ "$PORT" = 80 ] && SUFFIX=""
+
+IP_NOTE=""
+if [ "$MODE" = ip ]; then
+    if [ -n "$IP" ]; then
+        is_public "$IP" || { echo "$IP er en lokal/privat adresse - den kan ikke naas fra internettet. Angiv serverens offentlige IP." >&2; exit 2; }
+    else
+        for c in $(local_ips); do is_public "$c" && { IP="$c"; break; }; done
+        if [ -z "$IP" ]; then
+            echo "serveren har ingen offentlig IP paa sine netkort (kun: $(local_ips | tr '\n' ' '))." >&2
+            echo "  Staar den bag en router/NAT: angiv den offentlige IP med --ip <adresse> og viderestil porten," >&2
+            echo "  eller brug --domain med et domaene, der peger paa den offentlige IP." >&2
+            exit 2
+        fi
+    fi
+    URL="http://$IP$SUFFIX"; BASE=""; HOST_VALUE="0.0.0.0"
+elif [ "$MODE" = domain ]; then
+    if ! printf '%s' "$DOMAIN" | grep -Eq '^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$'; then
+        echo "--domain skal vaere et domaenenavn som www.ditdomaene.dk (uden http:// og uden sti)" >&2; exit 2
+    fi
+    resolved="${CC_SETUP_RESOLVE-$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk '{print $1}' | sort -u)}"
+    resolved="$(printf '%s\n' $resolved | grep -v '^$' | sort -u)"
+    if [ -z "$resolved" ]; then
+        echo "$DOMAIN peger ikke paa nogen IP endnu. Opret en A-post hos din DNS-udbyder:" >&2
+        echo "  $DOMAIN  ->  <serverens offentlige IP>   (og vent til den er slaaet igennem)" >&2
+        exit 2
+    fi
+    for r in $resolved; do
+        is_public "$r" || { echo "$DOMAIN peger paa $r, som er en lokal/privat adresse - ret A-posten til serverens offentlige IP" >&2; exit 2; }
+    done
+    if ! printf '%s\n' $resolved | grep -qxF -f <(local_ips); then
+        IP_NOTE="$DOMAIN peger paa $(echo $resolved), men serverens netkort har $(local_ips | tr '\n' ' ')- ok bag en router med portviderestilling, ellers ret A-posten"
+    fi
+    URL="http://$DOMAIN$SUFFIX"; BASE=""; HOST_VALUE="0.0.0.0"
+else
+    URL="${URL%/}"
+    if ! printf '%s' "$URL" | grep -Eq '^https://[A-Za-z0-9.-]+(/[A-Za-z0-9._-]+)+$'; then
+        echo "--url skal vaere https://<bruger>.<server>.usbx.me/<sti>, fx https://humle.lw123.usbx.me/cc" >&2
+        echo "  (https, ingen anfoerselstegn, en understi) - eller brug --ip for http://<ip>:<port>" >&2
+        exit 2
+    fi
+    BASE="/${URL#https://*/}"
+    case "$BASE" in */..*|*/.) echo "stien maa ikke indeholde .. eller ." >&2; exit 2 ;; esac
+    HOST_VALUE="127.0.0.1"
+fi
 
 NGINX_DIR="${ULTRACC_NGINX_DIR:-$HOME/.apps/nginx/proxy.d}"
 NGINX_FILE="$NGINX_DIR/command-center.conf"
 TEMPLATE="deploy/nginx-ultracc-proxy.conf"
+UNIT_FILE="${CC_SETUP_UNIT_DIR:-$HOME/.config/systemd/user}/command-center.service"
+UNIT_SRC="deploy/command-center.user.service"
 RESTART_CMD="${CC_SETUP_RESTART_CMD:-bash scripts/restart.sh}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-[ -f "$TEMPLATE" ] || { echo "mangler $TEMPLATE - koer fra en opdateret installation (v7.28+)" >&2; exit 3; }
-
+if [ "$MODE" = url ]; then
+    [ -f "$TEMPLATE" ] || { echo "mangler $TEMPLATE - koer fra en opdateret installation (v7.28+)" >&2; exit 3; }
+fi
 render_nginx() {   # kun ikke-kommentarlinjer faar ny sti/port
     sed -e "/^[[:space:]]*#/!s#/cc#${BASE}#g" -e "/^[[:space:]]*#/!s#12345#${PORT}#g" "$TEMPLATE"
 }
+# En enhed fra foer v7.28 har vaert/port skrevet fast og ignorerer .env - den skal skiftes ud.
+unit_is_old() { [ -f "$UNIT_FILE" ] && grep -q -- '--host 127.0.0.1 --port 8000' "$UNIT_FILE" && ! grep -q 'CC_HOST' "$UNIT_FILE"; }
 
-# --- 1) tunnellen ---
-TUN_PIDS="$(pgrep -f cloudflared 2>/dev/null | grep -v "^$$\$" || true)"
+TUN_PIDS="$(pgrep -x cloudflared 2>/dev/null | grep -v "^$$\$" || true)"
 TUN_UNITS="$(systemctl --user list-units --all --no-legend 2>/dev/null | grep -oiE '[^[:space:]]*cloudflared[^[:space:]]*\.service' | sort -u || true)"
 TUN_CRON="$(crontab -l 2>/dev/null | grep -i cloudflared || true)"
 
-echo "== Command Center -> Ultra.cc uden Cloudflare =="
-echo "   adresse:  $URL/   (understi $BASE, port $PORT)"
+echo "== Command Center: login med e-mail og adgangskode, uden Cloudflare =="
+echo "   adresse:  $URL/   ($([ $DIRECT = 1 ] && echo "offentlig adresse, lytter paa 0.0.0.0:$PORT" || echo "understi $BASE bag nginx, port $PORT"))"
+[ -n "$IP_NOTE" ] && echo "   OBS:      $IP_NOTE"
 echo "   tilstand: $([ $APPLY = 1 ] && echo 'UDFOERER' || echo 'kun plan - tilfoej --apply for at udfoere')"
 echo
 echo "1) Cloudflare-tunnel"
@@ -91,21 +160,29 @@ else
 fi
 echo
 echo "2) .env  (backup .env.bak-$STAMP)"
-for kv in "CC_HOST=127.0.0.1" "CC_PORT=$PORT" "CC_PUBLIC_URL=$URL" "CC_FORWARDED_ALLOW_IPS=127.0.0.1"; do
+for kv in "CC_HOST=$HOST_VALUE" "CC_PORT=$PORT" "CC_PUBLIC_URL=$URL" "CC_FORWARDED_ALLOW_IPS=127.0.0.1"; do
     k="${kv%%=*}"; old="$(envget "$k")"
     if [ "$old" = "${kv#*=}" ]; then echo "   $kv (uaendret)"; else echo "   $k: '${old}' -> '${kv#*=}'"; fi
 done
-[ -n "$(envget CC_BASE_PATH)" ] && echo "   CC_BASE_PATH: '$(envget CC_BASE_PATH)' -> '' (stien kommer fra CC_PUBLIC_URL)"
+[ -n "$(envget CC_BASE_PATH)" ] && echo "   CC_BASE_PATH: '$(envget CC_BASE_PATH)' -> ''"
 echo
-echo "3) nginx: $NGINX_FILE"
-if [ -f "$NGINX_FILE" ] && render_nginx | cmp -s - "$NGINX_FILE"; then
-    echo "   findes allerede og er identisk"
+echo "3) systemd-enhed: $UNIT_FILE"
+if unit_is_old; then echo "   har fast --host 127.0.0.1 --port 8000 (ignorerer .env) -> skiftes til $UNIT_SRC (backup)"
+elif [ -f "$UNIT_FILE" ]; then echo "   foelger allerede .env"
+else echo "   ingen installeret (appen startes med run.sh/pidfile)"; fi
+echo
+if [ "$MODE" = url ]; then
+    echo "4) nginx: $NGINX_FILE"
+    if [ -f "$NGINX_FILE" ] && render_nginx | cmp -s - "$NGINX_FILE"; then
+        echo "   findes allerede og er identisk"
+    else
+        [ -f "$NGINX_FILE" ] && echo "   findes og afviger -> backup $NGINX_FILE.bak-$STAMP"
+        render_nginx | grep -vE '^[[:space:]]*(#|$)' | sed 's/^/   | /'
+    fi
+    echo "   + app-nginx restart$(command -v app-nginx >/dev/null 2>&1 || echo '   (kommandoen findes ikke her - genindlaes nginx selv)')"
 else
-    [ -f "$NGINX_FILE" ] && echo "   findes og afviger -> backup $NGINX_FILE.bak-$STAMP"
-    render_nginx | grep -vE '^[[:space:]]*(#|$)' | sed 's/^/   | /'
+    echo "4) nginx: bruges ikke (--$MODE)"
 fi
-echo
-echo "4) app-nginx restart$(command -v app-nginx >/dev/null 2>&1 || echo '   (kommandoen findes ikke her - genindlaes nginx selv)')"
 echo "5) genstart: $RESTART_CMD"
 echo "6) tjek: http://127.0.0.1:$PORT/health og $URL/login"
 
@@ -124,13 +201,13 @@ if [ $KEEP_TUNNEL = 0 ]; then
             || fail "crontab kunne ikke skrives - den gamle ligger i $cronbak"
     fi
     if [ -n "$TUN_PIDS" ]; then
-        pkill -f cloudflared 2>/dev/null; sleep 1
-        pgrep -f cloudflared >/dev/null 2>&1 && pkill -9 -f cloudflared 2>/dev/null
+        pkill -x cloudflared 2>/dev/null; sleep 1
+        pgrep -x cloudflared >/dev/null 2>&1 && pkill -9 -x cloudflared 2>/dev/null
         echo "ok   cloudflared-processer stoppet"
     fi
 fi
 
-# 2) .env - kun de fire noegler (og en tom CC_BASE_PATH) aendres; filmode bevares
+# 2) .env - kun de fire noegler (og en sat CC_BASE_PATH) aendres; filmode bevares
 if [ ! -f .env ]; then
     [ -f .env.example ] || fail ".env og .env.example mangler"
     cp .env.example .env && chmod 600 .env && echo "ok   .env oprettet fra .env.example"
@@ -145,23 +222,31 @@ setenv() {
     fi
     chmod --reference=.env .env.tmp 2>/dev/null; mv .env.tmp .env
 }
-setenv CC_HOST 127.0.0.1; setenv CC_PORT "$PORT"; setenv CC_PUBLIC_URL "$URL"; setenv CC_FORWARDED_ALLOW_IPS 127.0.0.1
+setenv CC_HOST "$HOST_VALUE"; setenv CC_PORT "$PORT"; setenv CC_PUBLIC_URL "$URL"; setenv CC_FORWARDED_ALLOW_IPS 127.0.0.1
 [ -n "$(envget CC_BASE_PATH)" ] && setenv CC_BASE_PATH ""
 echo "ok   .env opdateret"
 
-# 3) nginx
-mkdir -p "$NGINX_DIR" || fail "kan ikke oprette $NGINX_DIR"
-if ! { [ -f "$NGINX_FILE" ] && render_nginx | cmp -s - "$NGINX_FILE"; }; then
-    [ -f "$NGINX_FILE" ] && cp -p "$NGINX_FILE" "$NGINX_FILE.bak-$STAMP"
-    render_nginx > "$NGINX_FILE" || fail "kunne ikke skrive $NGINX_FILE"
+# 3) systemd-enheden
+if unit_is_old; then
+    [ -f "$UNIT_SRC" ] || fail "mangler $UNIT_SRC"
+    cp -p "$UNIT_FILE" "$UNIT_FILE.bak-$STAMP" && cp "$UNIT_SRC" "$UNIT_FILE" || fail "kunne ikke skrive $UNIT_FILE"
+    systemctl --user daemon-reload 2>/dev/null
+    echo "ok   $UNIT_FILE foelger nu .env (backup .bak-$STAMP)"
 fi
-echo "ok   $NGINX_FILE"
 
-# 4) nginx genindlaes
-if command -v app-nginx >/dev/null 2>&1; then
-    app-nginx restart >/dev/null 2>&1 && echo "ok   app-nginx restart" || fail "app-nginx restart fejlede"
-else
-    echo "obs  app-nginx findes ikke - genindlaes nginx selv"
+# 4) nginx (kun --url)
+if [ "$MODE" = url ]; then
+    mkdir -p "$NGINX_DIR" || fail "kan ikke oprette $NGINX_DIR"
+    if ! { [ -f "$NGINX_FILE" ] && render_nginx | cmp -s - "$NGINX_FILE"; }; then
+        [ -f "$NGINX_FILE" ] && cp -p "$NGINX_FILE" "$NGINX_FILE.bak-$STAMP"
+        render_nginx > "$NGINX_FILE" || fail "kunne ikke skrive $NGINX_FILE"
+    fi
+    echo "ok   $NGINX_FILE"
+    if command -v app-nginx >/dev/null 2>&1; then
+        app-nginx restart >/dev/null 2>&1 && echo "ok   app-nginx restart" || fail "app-nginx restart fejlede"
+    else
+        echo "obs  app-nginx findes ikke - genindlaes nginx selv"
+    fi
 fi
 
 # 5) appen
@@ -179,9 +264,17 @@ echo "ok   /health svarer paa 127.0.0.1:$PORT"
 code="$(curl -s -o /dev/null --max-time 10 -w '%{http_code}' "$URL/login" 2>/dev/null || true)"
 case "$code" in
     200) echo "ok   $URL/login svarer 200 - log ind med e-mail og adgangskode" ;;
+    000|"") if [ $DIRECT = 1 ]; then
+                echo "FEJL: $URL svarer ikke - lytter appen paa 0.0.0.0 (ss -ltnp | grep :$PORT), og er porten aaben?" >&2
+            else echo "FEJL: $URL/login svarer ikke - tjek DNS/certifikat og nginx" >&2; fi; exit 4 ;;
     502|504) echo "FEJL: $URL/login svarer $code - nginx naar ikke appen (port i $NGINX_FILE?)" >&2; exit 4 ;;
     404) echo "FEJL: $URL/login svarer 404 - er nginx genindlaest, og er stien $BASE den samme i blokken?" >&2; exit 4 ;;
-    *) echo "FEJL: $URL/login svarer '${code:-intet}' - tjek DNS/certifikat og nginx" >&2; exit 4 ;;
+    *) echo "FEJL: $URL/login svarer '$code'" >&2; exit 4 ;;
 esac
+if [ $DIRECT = 1 ]; then
+    echo
+    echo "Aabn $URL/ fra din egen computer. Svarer den ikke dér, men her, blokerer en firewall porten."
+    echo "OBS: http uden TLS - adgangskoden sendes ukrypteret. Brug en staerk, unik kode."
+fi
 echo
-echo "Faerdig. WordPress-knappen faar den nye adresse ved naeste sync (eller: Social -> Forbind login-knappen nu)."
+echo "Faerdig."

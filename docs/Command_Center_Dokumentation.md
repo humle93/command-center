@@ -235,7 +235,7 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 
 ## 12. Versionshistorik (kort)
 
-- **v7.28.0** — Understi bag nginx (Ultra.cc uden Cloudflare-tunnel): `cc_base_path()`/`CC_BASE_PATH`, `BasePathMiddleware` (pure ASGI, mellem GZip og `auth_middleware`), `rewrite_html_for_base()` og `base_path_script()` (fetch-indpakning + `window.CC_BASE`), `deploy/nginx-ultracc-proxy.conf`
+- **v7.28.0** — Direkte på IP: `scripts/ultracc_setup.sh --ip` (`CC_HOST=0.0.0.0`, `http://<ip>:<port>`), systemd-enhederne følger `CC_HOST`/`CC_PORT`/`CC_FORWARDED_ALLOW_IPS` (`sh -c` med standardværdier), `client_ip()` stoler kun på `X-Forwarded-For` fra `TRUSTED_PROXIES`. Understi bag nginx (Ultra.cc uden Cloudflare-tunnel): `cc_base_path()`/`CC_BASE_PATH`, `BasePathMiddleware` (pure ASGI, mellem GZip og `auth_middleware`), `rewrite_html_for_base()` og `base_path_script()` (fetch-indpakning + `window.CC_BASE`), `deploy/nginx-ultracc-proxy.conf`
 - **v7.27.0** — Log ind fra WordPress med ét klik: `cc_sso_secret()`, `cc_sso_push()` (POST `/cc-link` i sync, kun ved ændring), `GET /cc-sso` med `cc_sso_verify()` (HMAC, udløb ±30 s, maks. 120 s levetid, `jti` én gang, kendt e-mail). Det døde `/cc-login`-flow fra v7.17.5 er fjernet
 - **v7.26.0** — Chat-fanen med MCP-connectors (GitHub, WordPress, Gmail, Google Drive m.fl.): MCP-klient (JSON + SSE, sessioner, sider), godkendelse af skrivende værktøjer (`chat_pending`), nøgler kun som hint i UI'et
 - **v7.25.0** — AI via OpenRouter i stedet for aimlapi: `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`, fælles `ai_chat()` med `AIError` for OpenRouters fejlsvar, budget på `openrouter.ai` og advarsel ved en tilbageblevet `AIMLAPI_KEY`
@@ -292,8 +292,11 @@ Status findes på `GET /api/alerts/status` (kanaler, kø, problemer) og test på
   `GET /health` udstiller `newest` + `started_at`. Scripts læser `APP_VERSION` og `NEWEST_LINE` med
   `sed`, saa de ikke kan komme ud af sync med koden.
 - Login-spor: `users.last_login_ip`/`last_login_at`, `sessions.ip` (migreres med `ALTER TABLE`) og
-  `login_attempts(username, ip, ok, created_at)` med 30 dages oprydning. `client_ip()` tager første
-  hop af `X-Forwarded-For` og falder tilbage til socket-adressen.
+  `login_attempts(username, ip, ok, created_at)` med 30 dages oprydning. `client_ip()` bruger
+  `X-Forwarded-For` kun når socket-adressen er en betroet proxy (`TRUSTED_PROXIES` = 127.0.0.1, ::1 +
+  `CC_FORWARDED_ALLOW_IPS`, `*` = alle), og tager så den højre-mest adresse, der ikke selv er en betroet proxy.
+  Ellers socket-adressen. Før v7.28 blev første hop brugt fra alle, så en klient direkte på IP'en kunne omgå
+  login-låsen ved at skifte header.
 - `last_run_report()` giver login-siden et bevidst minimalt overblik (ingen alarmtekster eller
   brugernavne, fordi `/login` er offentlig).
 

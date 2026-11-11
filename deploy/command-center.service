@@ -8,8 +8,9 @@ User=%i
 WorkingDirectory=/home/%i/command-center
 # Goer .env-vaerdier (GITHUB_TOKEN m.fl.) til rigtige miljoevariabler; "-" = ok hvis filen mangler.
 EnvironmentFile=-/home/%i/command-center/.env
-# proxy-headers + forwarded-allow-ips: nginx paa 127.0.0.1 sender X-Forwarded-Proto/For.
-ExecStart=/home/%i/command-center/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1
+# Vaert/port/proxyer foelger .env (v7.28): CC_HOST=0.0.0.0 = direkte paa serverens IP uden nginx.
+# sh -c + $${X:-std}: en manglende eller tom linje i .env giver standarden ($$ = et bogstaveligt $).
+ExecStart=/bin/sh -c 'exec /home/%i/command-center/venv/bin/uvicorn app.main:app --host "$${CC_HOST:-127.0.0.1}" --port "$${CC_PORT:-8000}" --proxy-headers --forwarded-allow-ips="$${CC_FORWARDED_ALLOW_IPS:-127.0.0.1}"'
 Restart=on-failure
 RestartSec=5
 

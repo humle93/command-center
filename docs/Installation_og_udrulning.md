@@ -129,6 +129,24 @@ MCP-server/gateway; et OAuth-login direkte fra Command Center findes ikke endnu.
 
 ---
 
+### 2e0. Direkte på serverens IP (enklest — ingen nginx, ingen tunnel)
+
+```bash
+cd ~/command-center
+bash scripts/ultracc_setup.sh --ip            # viser planen - skriver intet
+bash scripts/ultracc_setup.sh --ip --apply    # udfører den
+```
+
+Scriptet stopper `cloudflared`, sætter `CC_HOST=0.0.0.0`, `CC_PORT` og `CC_PUBLIC_URL=http://<ip>:<port>` i `.env`
+(backup først), skifter en gammel systemd-enhed ud og genstarter. Til sidst tjekker det, at `http://<ip>:<port>/login`
+svarer 200. Så åbner du `http://<ip>:<port>/` og logger ind med e-mail og adgangskode.
+
+- **IP'en:** findes selv (`hostname -I`), offentlig frem for privat. Forkert? Angiv den: `--ip 203.0.113.5`.
+- **Porten:** `--port`, ellers `CC_PORT` i `.env`, ellers `app-ports free`.
+- **Svarer den fra serveren, men ikke fra din computer:** porten er blokeret af en firewall hos udbyderen.
+- **Ingen TLS:** adgangskoden sendes ukrypteret over nettet. Brug en stærk, unik kode — eller nginx-vejen i §2e for https.
+- **systemd:** enheder fra før v7.28 havde `--host 127.0.0.1 --port 8000` skrevet fast og ignorerede `.env`; scriptet skifter dem ud (backup `.bak-<tid>`) og kører `systemctl --user daemon-reload`.
+
 ### 2e. Ultra.cc uden Cloudflare
 
 Fra v7.28 logger man ind direkte på Ultra.cc-serverens faste adresse — ingen `cloudflared`/`trycloudflare`-tunnel.
@@ -159,7 +177,7 @@ screen -ls; tmux ls 2>/dev/null                               # i en screen/tmux
 
 systemctl --user disable --now cloudflared                    # ret navnet til enheden fra listen
 crontab -e                                                    # slet cloudflared-linjen, hvis der er en
-pkill -f cloudflared                                          # stop det, der stadig kører
+pkill -x cloudflared                                          # stop det, der stadig kører (-x: kun procesnavnet)
 ```
 
 Står `cloudflared` i en enhed eller et script, du selv har lavet (fx `~/.config/systemd/user/cloudflared.service`
@@ -207,7 +225,7 @@ bash scripts/update.sh --check       # "login:" skal vise https://<bruger>.<serv
 
 | Symptom | Årsag | Løsning |
 | --- | --- | --- |
-| 502 Bad Gateway på `/cc/` | Appen kører ikke, eller porten i nginx-blokken ≠ `CC_PORT` | `bash scripts/update.sh --version`, ret porten, `app-nginx restart` |
+| 502 Bad Gateway på `/cc/` | Appen kører ikke, eller porten i nginx-blokken ≠ `CC_PORT` (før v7.28 ignorerede systemd-enheden `CC_PORT` — scriptet skifter den ud) | `bash scripts/update.sh --version`, ret porten, `app-nginx restart` |
 | 404 fra appen på alle sider | `CC_PUBLIC_URL` uden `/cc` (appen kender ikke understien) | Tilføj `/cc`, genstart |
 | Siden uden layout, knapper gør intet | nginx stripper stien (`proxy_pass …/;`) **og** et ældre CC end 7.28 | Opdatér til 7.28; fjern `/` efter porten |
 | Login lykkes, men man sendes tilbage til login | Cookien er `Secure`, men siden er åbnet på `http://` | Brug `https://`-adressen |

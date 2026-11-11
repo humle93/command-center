@@ -536,8 +536,8 @@ main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD = _wp_env
 _resp404 = type("R", (), {"status_code": 404})()
 main.sgap_api = lambda method, path, **kw: (_ for _ in ()).throw(main.requests.HTTPError(response=_resp404))
 r = d.post("/autopilot/login-link", follow_redirects=False)
-check("sso: et plugin uden /cc-link (før 7.72) forklares med versionen",
-      "cc_link=fejl" in (r.headers.get("location") or "") and "7.72" in urllib.parse.unquote(r.headers.get("location") or ""),
+check("sso: et plugin uden /cc-link (før 7.76) forklares med versionen",
+      "cc_link=fejl" in (r.headers.get("location") or "") and "7.76" in urllib.parse.unquote(r.headers.get("location") or ""),
       r.headers.get("location"))
 check("sso: nøglen står aldrig i en alarm eller i settings-svaret til UI'et",
       _sso_secret not in json.dumps(main.cc_sso_state()))

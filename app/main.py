@@ -120,7 +120,7 @@ APP_VERSION = "7.27.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
-    ("7.27.0", "Log ind fra WordPress med et klik: knappen i Steamgears (7.72+) sender en signeret billet, der holder 1 minut og kun virker en gang - kun for en kendt e-mail"),
+    ("7.27.0", "Log ind fra WordPress med et klik: knappen i Steamgears (7.76+) sender en signeret billet, der holder 1 minut og kun virker en gang - kun for en kendt e-mail"),
     ("7.26.0", "Ny fane Chat: tal med AI og giv den vaerktoejer fra MCP-connectors (GitHub, WordPress, Gmail, Google Drive m.fl.) - alt der aendrer noget kraever din godkendelse"),
     ("7.25.0", "AI via OpenRouter i stedet for aimlapi: OPENROUTER_API_KEY + AI_MODEL (OpenRouter-slug), et faelles AI-kald og en advarsel hvis kun den gamle AIMLAPI_KEY er sat"),
     ("7.24.0", "Vaekst-fanen: lokal indholdsoptimerer, konkurrent-sammenligning, indholdsplan og linkliste - uden API-noegle"),
@@ -147,7 +147,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Log ind fra WordPress med et klik - kraever CC_PUBLIC_URL og Steamgears Autopilot 7.72+"
+NEWEST_LINE = "Log ind fra WordPress med et klik - kraever CC_PUBLIC_URL og Steamgears Autopilot 7.76+"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -3275,7 +3275,7 @@ def sgap_error_text(exc: Exception) -> str:
 
 # ---------- Log ind fra WordPress med ét klik (v7.27.0) ----------
 # Broen er stadig envejs (CC -> site): CC lægger sin offentlige adresse og en fælles nøgle i pluginnet
-# (POST /sgap/v1/cc-link, Steamgears Autopilot 7.72+) ved hver sync. Knappen "Log ind i Command Center"
+# (POST /sgap/v1/cc-link, Steamgears Autopilot 7.76+) ved hver sync. Knappen "Log ind i Command Center"
 # i WordPress signerer en billet med nøglen (HMAC-SHA256, 60 s, tilfældig jti), og browseren åbner
 # GET /cc-sso?t=<billet>. CC tjekker signatur, udløb og engangsbrug og logger KUN ind som en bruger,
 # der allerede findes med samme e-mail - en WordPress-admin kan ikke oprette en CC-konto med et klik.
@@ -3336,7 +3336,7 @@ def cc_sso_push(force: bool = False, plugin_ready=None) -> tuple:
     except requests.HTTPError as e:
         code = getattr(e.response, "status_code", None)
         ok = False
-        message = ("Pluginnet kender ikke /cc-link (404) - opdatér Steamgears Autopilot til 7.72.0 eller nyere"
+        message = ("Pluginnet kender ikke /cc-link (404) - opdatér Steamgears Autopilot til 7.76.0 eller nyere"
                    if code == 404 else sgap_error_text(e))
     except Exception as e:
         ok, message = False, sgap_error_text(e)
@@ -3519,7 +3519,7 @@ def sgap_sync() -> dict:
             snap.update(sgap_from_snapshot(doc))
             # Samme svar fortæller, hvornaar WordPress sidst hørte fra CC (SGAP_CC::status()).
             cc_seen = ((doc or {}).get("status") or {}).get("command_center") or {}
-            # 7.72+: om knappen "Log ind i Command Center" er forbundet (aldrig nøglen selv).
+            # 7.76+: om knappen "Log ind i Command Center" er forbundet (aldrig nøglen selv).
             snap["cc_sso"] = bool(cc_seen.get("sso")) if isinstance(cc_seen, dict) and "sso" in cc_seen else None
             if isinstance(cc_seen, dict) and cc_seen.get("ts"):
                 snap["command_center"] = {k: cc_seen.get(k) for k in

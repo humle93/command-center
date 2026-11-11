@@ -209,7 +209,7 @@ Fanen **🚀 Vækst** er Command Centers egen udgave af det, Surfer, Ahrefs, Sem
 Knappen **Log ind i Command Center** på Steamgears-dashboardet i WordPress logger dig direkte ind her — uden adgangskode. Det kræver tre ting:
 
 1. `CC_PUBLIC_URL` i `.env` er den adresse, browseren når Command Center på, med `https://` (fx `https://cc.steamgears.eu`).
-2. Steamgears Autopilot 7.72 eller nyere på sitet, og Autopilot-broen slået til (`WP_URL`/`WP_USER`/`WP_APP_PASSWORD`).
+2. Steamgears Autopilot 7.76 eller nyere på sitet, og Autopilot-broen slået til (`WP_URL`/`WP_USER`/`WP_APP_PASSWORD`).
 3. Din WordPress-bruger har **samme e-mail** som din bruger her. Knappen opretter aldrig en ny konto.
 
 Ved hver sync (hver 30. min.) sender Command Center sin adresse og en hemmelig nøgle til pluginnet — kun når noget har ændret sig, eller pluginnet siger at knappen ikke er forbundet. **🔑 Forbind login-knappen nu** i fanen Social gør det med det samme, og kortet viser om knappen er forbundet. Et klik i WordPress laver en billet, der holder **1 minut** og kun virker **én gang**. Afviste billetter tæller som fejlede logins (5 = 10 minutters lås), og hvert login fra WordPress står under Alarmer.

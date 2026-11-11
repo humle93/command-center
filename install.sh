@@ -250,7 +250,7 @@ APP_VERSION = "7.27.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
-    ("7.27.0", "Log ind fra WordPress med et klik: knappen i Steamgears (7.72+) sender en signeret billet, der holder 1 minut og kun virker en gang - kun for en kendt e-mail"),
+    ("7.27.0", "Log ind fra WordPress med et klik: knappen i Steamgears (7.76+) sender en signeret billet, der holder 1 minut og kun virker en gang - kun for en kendt e-mail"),
     ("7.26.0", "Ny fane Chat: tal med AI og giv den vaerktoejer fra MCP-connectors (GitHub, WordPress, Gmail, Google Drive m.fl.) - alt der aendrer noget kraever din godkendelse"),
     ("7.25.0", "AI via OpenRouter i stedet for aimlapi: OPENROUTER_API_KEY + AI_MODEL (OpenRouter-slug), et faelles AI-kald og en advarsel hvis kun den gamle AIMLAPI_KEY er sat"),
     ("7.24.0", "Vaekst-fanen: lokal indholdsoptimerer, konkurrent-sammenligning, indholdsplan og linkliste - uden API-noegle"),
@@ -277,7 +277,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Log ind fra WordPress med et klik - kraever CC_PUBLIC_URL og Steamgears Autopilot 7.72+"
+NEWEST_LINE = "Log ind fra WordPress med et klik - kraever CC_PUBLIC_URL og Steamgears Autopilot 7.76+"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -3405,7 +3405,7 @@ def sgap_error_text(exc: Exception) -> str:
 
 # ---------- Log ind fra WordPress med ét klik (v7.27.0) ----------
 # Broen er stadig envejs (CC -> site): CC lægger sin offentlige adresse og en fælles nøgle i pluginnet
-# (POST /sgap/v1/cc-link, Steamgears Autopilot 7.72+) ved hver sync. Knappen "Log ind i Command Center"
+# (POST /sgap/v1/cc-link, Steamgears Autopilot 7.76+) ved hver sync. Knappen "Log ind i Command Center"
 # i WordPress signerer en billet med nøglen (HMAC-SHA256, 60 s, tilfældig jti), og browseren åbner
 # GET /cc-sso?t=<billet>. CC tjekker signatur, udløb og engangsbrug og logger KUN ind som en bruger,
 # der allerede findes med samme e-mail - en WordPress-admin kan ikke oprette en CC-konto med et klik.
@@ -3466,7 +3466,7 @@ def cc_sso_push(force: bool = False, plugin_ready=None) -> tuple:
     except requests.HTTPError as e:
         code = getattr(e.response, "status_code", None)
         ok = False
-        message = ("Pluginnet kender ikke /cc-link (404) - opdatér Steamgears Autopilot til 7.72.0 eller nyere"
+        message = ("Pluginnet kender ikke /cc-link (404) - opdatér Steamgears Autopilot til 7.76.0 eller nyere"
                    if code == 404 else sgap_error_text(e))
     except Exception as e:
         ok, message = False, sgap_error_text(e)
@@ -3649,7 +3649,7 @@ def sgap_sync() -> dict:
             snap.update(sgap_from_snapshot(doc))
             # Samme svar fortæller, hvornaar WordPress sidst hørte fra CC (SGAP_CC::status()).
             cc_seen = ((doc or {}).get("status") or {}).get("command_center") or {}
-            # 7.72+: om knappen "Log ind i Command Center" er forbundet (aldrig nøglen selv).
+            # 7.76+: om knappen "Log ind i Command Center" er forbundet (aldrig nøglen selv).
             snap["cc_sso"] = bool(cc_seen.get("sso")) if isinstance(cc_seen, dict) and "sso" in cc_seen else None
             if isinstance(cc_seen, dict) and cc_seen.get("ts"):
                 snap["command_center"] = {k: cc_seen.get(k) for k in
@@ -8079,7 +8079,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                     <form action="/autopilot/login-link" method="POST">
                         <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-2 rounded-xl text-xs">🔑 Forbind login-knappen nu</button>
                     </form>
-                    <span class="text-[10px] text-zinc-500">Giver knappen „Log ind i Command Center" i Steamgears (7.72+) adressen og en hemmelig nøgle. Et klik i WordPress logger dig ind her med en billet, der holder 1 minut og kun virker én gang — kun som en bruger med samme e-mail. Sker også automatisk ved hver sync.</span>
+                    <span class="text-[10px] text-zinc-500">Giver knappen „Log ind i Command Center" i Steamgears (7.76+) adressen og en hemmelig nøgle. Et klik i WordPress logger dig ind her med en billet, der holder 1 minut og kun virker én gang — kun som en bruger med samme e-mail. Sker også automatisk ved hver sync.</span>
                 </div>
             </div>
             {% endif %}
@@ -9297,7 +9297,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 
 ## Nyheder i v7.27
 
-- **Log ind fra WordPress med ét klik (v7.27.0)** — knappen **Log ind i Command Center** i Steamgears Autopilot (7.72+) logger nu direkte ind. Command Center sender sin adresse (`CC_PUBLIC_URL`) og en hemmelig nøgle til pluginnet (`POST /sgap/v1/cc-link`) ved hver sync; knappen signerer en billet (HMAC-SHA256, 60 sekunder, tilfældigt `jti`), og `GET /cc-sso` tjekker signatur, udløb og engangsbrug og logger kun ind som en bruger, der allerede findes med samme e-mail. Afviste billetter tæller med i login-låsen (5 fejl = 10 min.), og hvert login fra WordPress står under Alarmer. Det gamle engangslink (v7.17.5) er fjernet: det sendte til `/sgap/v1/login-link`, en rute pluginnet aldrig har haft, så det kunne ikke virke. Knappen **🔑 Forbind login-knappen nu** i fanen Social forbinder med det samme i stedet for at vente på næste sync
+- **Log ind fra WordPress med ét klik (v7.27.0)** — knappen **Log ind i Command Center** i Steamgears Autopilot (7.76+) logger nu direkte ind. Command Center sender sin adresse (`CC_PUBLIC_URL`) og en hemmelig nøgle til pluginnet (`POST /sgap/v1/cc-link`) ved hver sync; knappen signerer en billet (HMAC-SHA256, 60 sekunder, tilfældigt `jti`), og `GET /cc-sso` tjekker signatur, udløb og engangsbrug og logger kun ind som en bruger, der allerede findes med samme e-mail. Afviste billetter tæller med i login-låsen (5 fejl = 10 min.), og hvert login fra WordPress står under Alarmer. Det gamle engangslink (v7.17.5) er fjernet: det sendte til `/sgap/v1/login-link`, en rute pluginnet aldrig har haft, så det kunne ikke virke. Knappen **🔑 Forbind login-knappen nu** i fanen Social forbinder med det samme i stedet for at vente på næste sync
 
 ## Nyheder i v7.26
 
@@ -9448,7 +9448,7 @@ Command Center og WordPress-pluginnet **Steamgears Autopilot** snakker sammen vi
 - **WP-Cron holdes i gang**: CC kalder `wp-cron.php` hvert 5. min, så pluginnets job (udgivelse, selvtjek) kører til tiden, selvom sitet har få besøg
 - **Pluginnet ser CC**: hvert kald sender `X-Command-Center: <version>`; Steamgears Autopilot 7.33+ viser "Command Center connected" i sit selvtjek og melder et problem, hvis CC har været tavs i over 2 timer
 - **"→ Autopilot"** sender et opslag som kladde til pluginnet (godkendes i WordPress under Steamgears → AI Drafts). Opslaget sendes **kun én gang**: rækken låses før kaldet, så et dobbeltklik eller et genforsøg ikke giver to kladder. Svarer WordPress ikke (timeout), bliver status "sendt? (svar udeblev)" — tjek AI Drafts, før du sender igen
-- **Log ind fra WordPress med ét klik (v7.27)** — Command Center sender sin adresse (`CC_PUBLIC_URL`) og en hemmelig nøgle til pluginnet (`POST /cc-link` på `sgap/v1`, Steamgears Autopilot 7.72+) ved hver sync, kun når noget har ændret sig. Knappen **Log ind i Command Center** i WordPress signerer en billet (HMAC-SHA256, 60 s, `jti`), og `GET /cc-sso` logger ind som brugeren med samme e-mail. **🔑 Forbind login-knappen nu** i fanen Social forbinder med det samme. Uden `CC_PUBLIC_URL` (https) forbindes intet, og fanen siger hvorfor
+- **Log ind fra WordPress med ét klik (v7.27)** — Command Center sender sin adresse (`CC_PUBLIC_URL`) og en hemmelig nøgle til pluginnet (`POST /cc-link` på `sgap/v1`, Steamgears Autopilot 7.76+) ved hver sync, kun når noget har ændret sig. Knappen **Log ind i Command Center** i WordPress signerer en billet (HMAC-SHA256, 60 s, `jti`), og `GET /cc-sso` logger ind som brugeren med samme e-mail. **🔑 Forbind login-knappen nu** i fanen Social forbinder med det samme. Uden `CC_PUBLIC_URL` (https) forbindes intet, og fanen siger hvorfor
 - Slå til/fra under Moduler ("Autopilot-bro"). Retningen er altid CC → site, så CC kan blive på 127.0.0.1
 - **Begge sider viser, hvornår CC sidst kaldte**: hvert kald har `X-Command-Center`-headeren, så WordPress noterer tid, version, rute og bruger (`sgap_cc_seen`). Pluginnets kort viser alderen (`live` / `late` / `silent`), og fanen Social viser **WordPress' eget svar** — samme tal, regnet ud ved visning. Er broen brudt, siger begge sider det i stedet for at se stille ud
 

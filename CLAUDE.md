@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 10. november 2026 · **Version:** 7.24.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 11. november 2026 · **Version:** 7.25.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,17 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### AI via OpenRouter i stedet for aimlapi (v7.25.0) — implementeret
+- **Baggrund:** ønsket var "Tilføj openrouter api i stedet for aimlapi". aimlapi er fjernet; der er ingen fallback til den gamle nøgle (den virker ikke mod OpenRouter).
+- **Konfiguration:** `OPENROUTER_API_KEY` (erstatter `AIMLAPI_KEY`), `AI_MODEL` (nu en OpenRouter-slug, default uændret `google/gemini-3-8-flash`) og valgfri `OPENROUTER_BASE_URL` (default `https://openrouter.ai/api/v1`).
+- **Ét kald:** `ai_chat(prompt, max_tokens, timeout)` er eneste vej til modellen; `generate_article_ai()` og outreach-draften brugte før hver sin kopi af `HTTP.post`. Den sender `X-Title: Command Center` og `HTTP-Referer: CC_PUBLIC_URL` (når sat), læser OpenRouters `error`-objekt før `choices` og kaster `AIError` (en `RequestException`), så de eksisterende `except`-grene fanger den.
+- **Budget:** `API_BUDGETS["ai"]` tæller værtsnavnet fra `OPENROUTER_BASE_URL` (`openrouter.ai`), ikke `aimlapi.com`.
+- **Gammel nøgle:** `warn_legacy_aimlapi()` i lifespan giver `[cc] advarsel:` + alarm (`ai`), når kun `AIMLAPI_KEY` er sat.
+- **Test:** 15 `openrouter:`-checks i `tests/test_v8_features.py` (URL, headers, model/max_tokens/timeout, budget, fejl i 200-svar, 401 uden nøgle i teksten, tomt choices, tom besked, ikke-JSON, ingen Referer uden `CC_PUBLIC_URL`, advarsel, ingen `aimlapi.com` i koden).
+- **Ikke verificeret her:** et rigtigt kald til openrouter.ai (containerens proxy afviser værten), og om slug'en `google/gemini-3-8-flash` findes hos OpenRouter — tjek den på openrouter.ai/models og sæt `AI_MODEL` efter behov.
+- **Screenshots:** dashboardets AI-tekster er ændret, men `docs/img/` er ikke fotograferet om (commit med `[skip screenshots]`).
+- **Lokal testkørsel i en container uden DNS:** `NO_PROXY=127.0.0.1,localhost,testserver` og en `sitecustomize.py`, der giver ukendte navne en offentlig IP; ellers fejler SSRF-tjekkene på `example.com`/`example.dk` (det sker også på main).
 
 ### Vækst uden API-nøgle + moderniseret UI (v7.24.0) — implementeret
 - **Baggrund:** ønsket var "Surfer SEO, Ahrefs, Semrush og BabyLoveGrowth — vores egen version uden API-nøgle". Svaret er en lokal motor, ikke en kopi: vi kan måle tekst, men ikke genskabe deres webindekser.
@@ -584,5 +595,5 @@ MCP-hærdning (v7.17.1). De står nu under "Færdigt" i roadmappen i stedet for 
   Cloudflare svarer 403 ("Just a moment…") og reader-proxyen afviser IP'en. Afvent at brugeren
   paster indholdet (diff/plan) — og mind dem om at fjerne tokens fra teksten.
 - Ingen secrets i repoet: brug `.env` (gitignored) eller miljøvariabler. `GITHUB_TOKEN`,
-  `SERPAPI_KEY`, `AIMLAPI_KEY`, `WP_APP_PASSWORD` og `TELEGRAM_*` må ikke committes.
+  `SERPAPI_KEY`, `OPENROUTER_API_KEY`, `WP_APP_PASSWORD` og `TELEGRAM_*` må ikke committes.
 - Vue: hold UI-tekster på dansk, og opdater README + manual + roadmap i samme ændring som koden.

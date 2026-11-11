@@ -9,7 +9,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 os.chdir(ROOT)
-os.environ.setdefault("AIMLAPI_KEY", "")
+os.environ.setdefault("OPENROUTER_API_KEY", "")
 
 from app import main  # noqa: E402
 

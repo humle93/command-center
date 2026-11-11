@@ -104,7 +104,7 @@ Navigationen er delt i grupper — **overblik**, **analyse** (SEO, Keywords, Væ
 
 - **Opdatering fra GitHub**: installeret commit vs. seneste commit på `main`, "Tjek for nye commits" og "Opdater" (se nedenfor)
 - Domæneovervågning: uptime, svartid, SSL-udløb (historik + graf via 📈)
-- **💳 API-budget denne måned**: forbrug og loft for SerpAPI og AI (aimlapi). Ved 80 % kommer en advarsel, ved 100 % stoppes de betalte kald
+- **💳 API-budget denne måned**: forbrug og loft for SerpAPI og AI (OpenRouter). Ved 80 % kommer en advarsel, ved 100 % stoppes de betalte kald
 - **⏱️ Planlagte jobs (heartbeat)**: hvornår hvert job sidst kørte OK. Et job der er forsinket eller fejlet giver en alarm (én gang pr. tilstand), og alarmen forsvinder når jobbet kører igen
 - **"Sådan bruger du Command Center"**: 4 klikbare trin gennem workflowet
 - Alarmer og noter
@@ -134,7 +134,7 @@ Crawleren gemmer de **to seneste** crawls, så diffen har noget at sammenligne m
 
 **SEO-strategi-vælger** (øverst): *AdSense-indkomst*, *Affiliate* eller *Backlink-vækst*. Valget styrer AI-artiklernes stil og længde (manuel generering OG autopilot) og hvad autopiloten gør (artikel vs. prospecting). Efter hvert valg kører CC et **pre-flight-tjek** af nøgler, WordPress-creds, moduler, cron og DB — vist som grøn/rød-checkliste med kritisk alarm ved mangler.
 
-- **Generér artikel**: emne/keyword → AI-artikel (Gemini via aimlapi). Prompten henter top 5 Google-resultater (SerpAPI) og kræver fakta-baseret indhold, der dækker deres content gap
+- **Generér artikel**: emne/keyword → AI-artikel (via OpenRouter). Prompten henter top 5 Google-resultater (SerpAPI) og kræver fakta-baseret indhold, der dækker deres content gap
 - **Kladde-liste**: hver artikel har *Score vs SERP*, *Meta/social*, *Push til WP (kladde)* og slet
 - **Autopilot**: én knap kører hele cyklussen (idé → artikel → WP-kladde). Kører også automatisk kl. 05:15 (modulet *Growth*)
 - **Kvalitetsgate**: artikler under `QUALITY_MIN_WORDS` (eller 80 % af SERP-gennemsnittet), uden fokus-keyword eller med under 2 H2 sendes **ikke** til WordPress som autopilot — status bliver "Stoppet af kvalitetsgate" + alarm. Manuel push er tilladt men giver en info-alarm
@@ -159,7 +159,7 @@ Fanen **🚀 Vækst** er Command Centers egen udgave af det, Surfer, Ahrefs, Sem
 ### 5. Links
 
 - Tjek eksterne links på en side: status (ok/brudt/timeout) med historik. Brudte links = hurtige fixes
-- **AI interne link-forslag** (AI Tools): kræver et crawl og `AIMLAPI_KEY`
+- **AI interne link-forslag** (AI Tools): kræver et crawl og `OPENROUTER_API_KEY`
 
 ![Links](img/cc-links.png)
 
@@ -212,9 +212,9 @@ Fanen **🚀 Vækst** er Command Centers egen udgave af det, Surfer, Ahrefs, Sem
 
 ## AI Tools
 
-Samlede AI-værktøjer: titel/meta-rewrites, outreach-drafts, artikel-meta, interne link-forslag og AI-synlighed. Bruger `AIMLAPI_KEY` + `AI_MODEL` (default `google/gemini-3-8-flash`, max_tokens 3000 pga. reasoning-tokens). Månedens forbrug tælles og stoppes ved `AI_MONTHLY_LIMIT`.
+Samlede AI-værktøjer: titel/meta-rewrites, outreach-drafts, artikel-meta, interne link-forslag og AI-synlighed. Bruger OpenRouter: `OPENROUTER_API_KEY` + `AI_MODEL` (en OpenRouter-slug, default `google/gemini-3-8-flash`; max_tokens 3000 pga. reasoning-tokens). Nøglen laves på openrouter.ai/keys, og modellerne står på openrouter.ai/models. `OPENROUTER_BASE_URL` kan pege på en anden OpenAI-kompatibel adresse. Står kun den gamle `AIMLAPI_KEY` i `.env` (før v7.25.0), bruges den ikke: opstarten skriver en advarsel, og der kommer en alarm under Alarmer. Månedens forbrug tælles og stoppes ved `AI_MONTHLY_LIMIT`.
 
-**AI-synlighed** (fanen *AI*, `/ai/visibility`): stil det spørgsmål en kunde ville stille en AI-assistent (fx "hvor køber jeg steampunk-goggles?"). CC beder modellen om at nævne konkrete butikker og registrerer, om `TRACK_DOMAIN` optræder i svaret — med et uddrag af svaret som dokumentation. Hvert tjek gemmes i `ai_visibility`, så du kan følge, om sitet bliver nævnt i AI-svar over tid. Kræver `AIMLAPI_KEY`.
+**AI-synlighed** (fanen *AI*, `/ai/visibility`): stil det spørgsmål en kunde ville stille en AI-assistent (fx "hvor køber jeg steampunk-goggles?"). CC beder modellen om at nævne konkrete butikker og registrerer, om `TRACK_DOMAIN` optræder i svaret — med et uddrag af svaret som dokumentation. Hvert tjek gemmes i `ai_visibility`, så du kan følge, om sitet bliver nævnt i AI-svar over tid. Kræver `OPENROUTER_API_KEY`.
 
 ## Pro
 
@@ -358,7 +358,7 @@ Alle routes kræver en indlogget bruger (cookie) - samme session som UI'et. Vigt
 
 ## Environment-variabler (.env)
 
-`CC_HOST`, `CC_PORT`, `CC_PUBLIC_URL`, `CC_FORWARDED_ALLOW_IPS`, `GITHUB_TOKEN`, `GITHUB_REPO`, `UPDATE_AUTO_RESTART`, `UPDATE_RESTART_CMD`, `AIMLAPI_KEY`, `AI_MODEL`, `WP_URL/USER/APP_PASSWORD`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_TO`, `SMTP_TLS`, `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN`, `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_SECRET`, `ALERT_MIN_SEVERITY`, `ALERT_QUIET_HOURS`, `ALERT_DEDUPE_MINUTES`, `SERPAPI_KEY`, `TRACK_DOMAIN`, `PSI_API_KEY`, `SSL_WARN_DAYS`, `LINKCHECK_LIMIT`, `SERPAPI_MONTHLY_LIMIT`, `AI_MONTHLY_LIMIT`, `QUALITY_MIN_WORDS`.
+`CC_HOST`, `CC_PORT`, `CC_PUBLIC_URL`, `CC_FORWARDED_ALLOW_IPS`, `GITHUB_TOKEN`, `GITHUB_REPO`, `UPDATE_AUTO_RESTART`, `UPDATE_RESTART_CMD`, `OPENROUTER_API_KEY`, `AI_MODEL`, `OPENROUTER_BASE_URL`, `WP_URL/USER/APP_PASSWORD`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_TO`, `SMTP_TLS`, `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN`, `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_SECRET`, `ALERT_MIN_SEVERITY`, `ALERT_QUIET_HOURS`, `ALERT_DEDUPE_MINUTES`, `SERPAPI_KEY`, `TRACK_DOMAIN`, `PSI_API_KEY`, `SSL_WARN_DAYS`, `LINKCHECK_LIMIT`, `SERPAPI_MONTHLY_LIMIT`, `AI_MONTHLY_LIMIT`, `QUALITY_MIN_WORDS`.
 
 Rigtige miljøvariabler vinder over `.env`. `.env` læses før appens konfiguration, og inline-kommentarer (`KEY=  # note`) fjernes.
 

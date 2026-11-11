@@ -69,9 +69,13 @@ CC_TZ=Europe/Copenhagen
 UPDATE_AUTO_RESTART=1
 # Overstyr genstartskommandoen (fx din egen supervisor); tom = brug systemd-unit eller scripts/restart.sh.
 UPDATE_RESTART_CMD=
-# AI-artikler: din aimlapi-noegle
-AIMLAPI_KEY=
+# AI (artikler, outreach-drafts, interne links, meta) via OpenRouter: https://openrouter.ai/keys
+# AI_MODEL er en OpenRouter-slug (udbyder/model), se https://openrouter.ai/models.
+# AIMLAPI_KEY bruges ikke laengere (v7.25.0); staar den alene, kommer der en advarsel ved opstart.
+OPENROUTER_API_KEY=
 AI_MODEL=google/gemini-3-8-flash
+# Valgfri: anden OpenAI-kompatibel adresse (budget-loftet AI_MONTHLY_LIMIT foelger vaertsnavnet).
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 # WordPress-push + Steamgears Autopilot-bro (Application Password for en ADMINISTRATOR: WP Admin > Users > Profile)
 WP_URL=https://steamgears.eu
 WP_USER=
@@ -198,8 +202,13 @@ load_dotenv()
 # --- Konfiguration via miljoevariabler / .env ---
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()     # GitHub-token: opdatering fra GitHub
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "humle93/command-center").strip()
-AIMLAPI_KEY = os.environ.get("AIMLAPI_KEY", "").strip()      # AI-artikelgenerator (gemini via aimlapi)
+# AI via OpenRouter (v7.25.0): OpenAI-kompatibel /chat/completions; AI_MODEL er en OpenRouter-slug.
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_BASE_URL = (os.environ.get("OPENROUTER_BASE_URL", "").strip()
+                       or "https://openrouter.ai/api/v1").rstrip("/")
 AI_MODEL = os.environ.get("AI_MODEL", "google/gemini-3-8-flash")
+# aimlapi er udfaset: en tilbagebleven noegle bruges ikke, men giver en advarsel ved opstart.
+LEGACY_AIMLAPI_KEY_SET = bool(os.environ.get("AIMLAPI_KEY", "").strip())
 WP_URL = os.environ.get("WP_URL", "").strip()                # fx https://steamgears.eu
 WP_USER = os.environ.get("WP_USER", "").strip()
 WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "").strip()
@@ -231,10 +240,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.24.0"
+APP_VERSION = "7.25.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.25.0", "AI via OpenRouter i stedet for aimlapi: OPENROUTER_API_KEY + AI_MODEL (OpenRouter-slug), et faelles AI-kald og en advarsel hvis kun den gamle AIMLAPI_KEY er sat"),
     ("7.24.0", "Vaekst-fanen: lokal indholdsoptimerer, konkurrent-sammenligning, indholdsplan og linkliste - uden API-noegle"),
     ("7.23.0", "Backup i UI: tag en backup nu og gendan en gemt backup med bekraeftelse - der tages altid en pre-restore-kopi foerst"),
     ("7.22.0", "Offline dashboard: Tailwind, Alpine og Chart.js ligger lokalt under /static/vendor - ingen CDN-afhaengighed"),
@@ -259,7 +269,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Vaekst-fanen maaler indhold, sammenligner med konkurrenter og holder planen - helt lokalt"
+NEWEST_LINE = "AI-kald gaar nu gennem OpenRouter - saet OPENROUTER_API_KEY"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -1639,11 +1649,11 @@ def normalize_url(url: str) -> str:
 
 
 # ---------- API-budget (v8-plan): maanedligt loft for betalte API'er ----------
-# Taeller hvert kald til SerpAPI og AI (aimlapi) pr. kalendermaaned og stopper dem ved loftet,
+# Taeller hvert kald til SerpAPI og AI (OpenRouter) pr. kalendermaaned og stopper dem ved loftet,
 # saa en loekke eller fejl aldrig kan braende kreditter af. 0 = intet loft.
 API_BUDGETS = {
     "serpapi": ("serpapi.com", int(os.environ.get("SERPAPI_MONTHLY_LIMIT", "1000") or 0)),
-    "ai": ("aimlapi.com", int(os.environ.get("AI_MONTHLY_LIMIT", "3000") or 0)),
+    "ai": ((urlparse(OPENROUTER_BASE_URL).hostname or "openrouter.ai").lower(), int(os.environ.get("AI_MONTHLY_LIMIT", "3000") or 0)),
 }
 
 
@@ -2915,18 +2925,7 @@ def generate_article_ai(keyword: str, strategy: dict = None):
         f"STRATEGI ({st['label']}): {st['style']}\n\n"
         f"{comp_block}"
     )
-    resp = HTTP.post(
-        "https://api.aimlapi.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {AIMLAPI_KEY}", "Content-Type": "application/json"},
-        json={
-            "model": AI_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 3000,
-        },
-        timeout=120,
-    )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
+    return ai_chat(prompt, max_tokens=3000)
 
 
 @app.post("/articles/generate")
@@ -2938,7 +2937,7 @@ async def create_article(keyword: str = Form(...)):
     title = f"Guide: {keyword} i 2027"
     content = TEMPLATE_ARTICLE.format(keyword=keyword)
     err = None
-    if AIMLAPI_KEY:
+    if OPENROUTER_API_KEY:
         try:
             loop = asyncio.get_running_loop()
             st_active = get_active_strategy()
@@ -3042,9 +3041,9 @@ def wp_push_draft(title: str, content: str):
 
 def autopilot_sync():
     """Growth-autopilot: vaelg aeldste ubrugte keyword-idee -> AI-artikel -> (valgfrit) WP-kladde."""
-    if not AIMLAPI_KEY:
+    if not OPENROUTER_API_KEY:
         with get_db() as db:
-            add_alarm(db, "growth", "Autopilot sprang over: AIMLAPI_KEY mangler", "advarsel")
+            add_alarm(db, "growth", "Autopilot sprang over: OPENROUTER_API_KEY mangler", "advarsel")
         return "no-ai"
     with get_db() as db:
         row = db.execute(
@@ -3181,7 +3180,7 @@ def prospect_sync(keyword: str):
             email = next((e for e in found if not any(x in e.lower() for x in (".png", ".jpg", ".webp", ".svg", "example.com", "sentry"))), None)
         except Exception:
             pass
-        if AIMLAPI_KEY and email:
+        if OPENROUTER_API_KEY and email:
             try:
                 prompt = (
                     f"Write a short (max 120 words) friendly outreach email in English to {email} "
@@ -3189,18 +3188,12 @@ def prospect_sync(keyword: str):
                     f"their page about '{keyword}' as a reason to add a link to our site {TRACK_DOMAIN}. "
                     f"Output only the email body."
                 )
-                resp2 = HTTP.post(
-                    "https://api.aimlapi.com/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {AIMLAPI_KEY}", "Content-Type": "application/json"},
-                    json={"model": AI_MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": 3000},
-                    timeout=60,
-                )
-                draft = resp2.json()["choices"][0]["message"]["content"]
+                draft = ai_chat(prompt, max_tokens=3000, timeout=60)
             except Exception:
                 draft = None
         if not draft:
             draft = (f"Hej! Vi har lavet en guide om '{keyword}' paa {TRACK_DOMAIN}, som dine laesere "
-                     f"maaske kan bruge. Maa vi linke den ind? (Skabelon-draft - saet AIMLAPI_KEY for AI-drafts)")
+                     f"maaske kan bruge. Maa vi linke den ind? (Skabelon-draft - saet OPENROUTER_API_KEY for AI-drafts)")
         with get_db() as db:
             db.execute(
                 "INSERT INTO backlink_prospects (keyword, site, url, type, email, draft, created_at) VALUES (?,?,?,?,?,?,?)",
@@ -3894,8 +3887,8 @@ def startup_selftest_sync():
             db.execute("DELETE FROM _selftest")
     except Exception as e:
         fejl.append("DB-skrivetest: " + str(e)[:80])
-    if user_count() and not AIMLAPI_KEY:
-        fejl.append("AIMLAPI_KEY mangler - AI-artikler vil fejle")
+    if user_count() and not OPENROUTER_API_KEY:
+        fejl.append("OPENROUTER_API_KEY mangler - AI-artikler vil fejle")
     if ruter < 40:
         fejl.append("Kun " + str(ruter) + " ruter registreret (forventet 50+)")
     try:
@@ -4325,21 +4318,69 @@ async def get_duplicates():
 
 
 # ---------- AI: interne links, meta/social, synlighed ----------
-def ai_chat(prompt: str, max_tokens: int = 1500):
+class AIError(requests.RequestException):
+    """OpenRouter svarede, men uden brugbart indhold (fejl i svaret eller tom besked)."""
+
+
+def openrouter_headers() -> dict:
+    """Bearer-noegle + OpenRouters valgfri attribution (HTTP-Referer/X-Title). Noeglen logges aldrig."""
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "X-Title": "Command Center",
+    }
+    if CC_PUBLIC_URL:
+        headers["HTTP-Referer"] = CC_PUBLIC_URL
+    return headers
+
+
+def ai_chat(prompt: str, max_tokens: int = 1500, timeout: int = 120) -> str:
+    """Eneste vej til sprogmodellen: OpenRouter /chat/completions gennem budget-sessionen HTTP.
+
+    OpenRouter kan svare 200 med et ``error``-objekt (fx naar udbyderen bag modellen fejler), saa
+    svaret tjekkes, foer ``choices`` laeses - ellers ender en KeyError som "AI-fejl: 'choices'".
+    """
     resp = HTTP.post(
-        "https://api.aimlapi.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {AIMLAPI_KEY}", "Content-Type": "application/json"},
+        f"{OPENROUTER_BASE_URL}/chat/completions",
+        headers=openrouter_headers(),
         json={"model": AI_MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens},
-        timeout=120,
+        timeout=timeout,
     )
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {}
+    err = data.get("error") if isinstance(data, dict) else None
+    if err:
+        msg = err.get("message") if isinstance(err, dict) else str(err)
+        raise AIError(f"OpenRouter ({resp.status_code}): {str(msg)[:200]}")
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        raise AIError("OpenRouter svarede uden indhold")
+    if not content:
+        raise AIError("OpenRouter svarede med en tom besked")
+    return content
+
+
+def warn_legacy_aimlapi() -> str:
+    """Advarer ved opstart, naar .env stadig kun har AIMLAPI_KEY (bruges ikke efter v7.25.0)."""
+    if not LEGACY_AIMLAPI_KEY_SET or OPENROUTER_API_KEY:
+        return ""
+    msg = "AIMLAPI_KEY bruges ikke laengere - saet OPENROUTER_API_KEY i .env for at faa AI tilbage"
+    try:
+        with get_db() as db:
+            add_alarm(db, "ai", msg, "advarsel")
+    except Exception:
+        pass
+    return msg
 
 
 @app.post("/seo/linksuggest")
 async def suggest_internal_links():
-    if not AIMLAPI_KEY:
-        return JSONResponse({"ok": False, "error": "AIMLAPI_KEY ikke sat"})
+    if not OPENROUTER_API_KEY:
+        return JSONResponse({"ok": False, "error": "OPENROUTER_API_KEY ikke sat"})
     with get_db() as db:
         pages = db.execute(
             "SELECT url, title, h1, words FROM seopages "
@@ -4372,8 +4413,8 @@ async def suggest_internal_links():
 
 
 def rewrite_meta_sync(url: str, title: str, desc: str, keyword: str):
-    if not AIMLAPI_KEY:
-        return {"error": "AIMLAPI_KEY ikke sat"}
+    if not OPENROUTER_API_KEY:
+        return {"error": "OPENROUTER_API_KEY ikke sat"}
     prompt = (
         "Du er en SEO-ekspert for " + TRACK_DOMAIN + ". Optimer denne side:\n"
         "URL: " + url + "\n"
@@ -4415,7 +4456,7 @@ async def seo_rewrite(request: Request):
 
 @app.post("/articles/meta")
 async def generate_meta(id: int = Form(...)):
-    if not AIMLAPI_KEY:
+    if not OPENROUTER_API_KEY:
         return RedirectResponse("/", status_code=303)
     with get_db() as db:
         art = db.execute("SELECT * FROM articles WHERE id=?", (id,)).fetchone()
@@ -4448,7 +4489,7 @@ async def generate_meta(id: int = Form(...)):
 
 @app.post("/ai/visibility")
 async def ai_visibility(question: str = Form(...)):
-    if not AIMLAPI_KEY:
+    if not OPENROUTER_API_KEY:
         return RedirectResponse("/", status_code=303)
     question = question.strip()
     if not question:
@@ -5371,7 +5412,7 @@ async def dashboard(request: Request):
             for s, (u, l) in budget_usage().items()
         ],
         "job_rows": job_status(),
-        "ai_enabled": bool(AIMLAPI_KEY),
+        "ai_enabled": bool(OPENROUTER_API_KEY),
         "wp_enabled": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "serpapi_enabled": bool(SERPAPI_KEY),
         "telegram_enabled": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
@@ -5466,9 +5507,9 @@ def strategy_check_sync(key: str):
     # AI-noegle (artikel-strategier: kritisk; backlink: til AI-drafts)
     if is_backlink:
         add(bool(SERPAPI_KEY), "SERPAPI_KEY: " + ("OK" if SERPAPI_KEY else "MANGLER (prospecting kan ikke kore)"), kritisk=True)
-        add(bool(AIMLAPI_KEY), "AIMLAPI_KEY (AI-outreach-drafts): " + ("OK" if AIMLAPI_KEY else "mangler - drafts skrives manuelt"))
+        add(bool(OPENROUTER_API_KEY), "OPENROUTER_API_KEY (AI-outreach-drafts): " + ("OK" if OPENROUTER_API_KEY else "mangler - drafts skrives manuelt"))
     else:
-        add(bool(AIMLAPI_KEY), "AIMLAPI_KEY (AI-artikler): " + ("OK" if AIMLAPI_KEY else "MANGLER (generering falder tilbage til skabelon)"), kritisk=True)
+        add(bool(OPENROUTER_API_KEY), "OPENROUTER_API_KEY (AI-artikler): " + ("OK" if OPENROUTER_API_KEY else "MANGLER (generering falder tilbage til skabelon)"), kritisk=True)
         add(bool(SERPAPI_KEY), "SERPAPI_KEY (konkurrent-analyse): " + ("OK" if SERPAPI_KEY else "mangler - prompten kobrer uden SERP-kontekst"))
 
     # WordPress-push
@@ -5566,7 +5607,7 @@ async def health():
         "disk_used_pct": disk_used_pct,
         "budget": {s: {"used": u, "limit": l} for s, (u, l) in budget_usage().items()},
         "version": APP_VERSION,
-        "ai": bool(AIMLAPI_KEY),
+        "ai": bool(OPENROUTER_API_KEY),
         "wordpress": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "serpapi": bool(SERPAPI_KEY),
         "telegram": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
@@ -6061,6 +6102,12 @@ async def lifespan(app_: FastAPI):
     except Exception as e:
         print("[cc] standardbruger kunne ikke oprettes:", repr(e), flush=True)
     try:
+        legacy_ai = warn_legacy_aimlapi()
+        if legacy_ai:
+            print(f"[cc] advarsel: {legacy_ai}", flush=True)
+    except Exception as e:
+        print("[cc] AI-noeglen kunne ikke tjekkes:", repr(e), flush=True)
+    try:
         stale = warn_stale_env_password()
         if stale:
             print(f"[cc] advarsel: {stale}", flush=True)
@@ -6292,7 +6339,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 
     {% if not ai_enabled or not wp_enabled %}
     <div class="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-3 text-xs text-amber-300">
-        Setup: AI {{ '✅' if ai_enabled else '❌ (AIMLAPI_KEY)' }} · WordPress {{ '✅' if wp_enabled else '❌ (WP_URL/WP_USER/WP_APP_PASSWORD)' }} · SerpAPI {{ '✅' if serpapi_enabled else '❌ (SERPAPI_KEY)' }} · Telegram {{ '✅' if telegram_enabled else '— (valgfrit)' }} — se .env.example
+        Setup: AI {{ '✅' if ai_enabled else '❌ (OPENROUTER_API_KEY)' }} · WordPress {{ '✅' if wp_enabled else '❌ (WP_URL/WP_USER/WP_APP_PASSWORD)' }} · SerpAPI {{ '✅' if serpapi_enabled else '❌ (SERPAPI_KEY)' }} · Telegram {{ '✅' if telegram_enabled else '— (valgfrit)' }} — se .env.example
     </div>
     {% endif %}
 
@@ -6642,7 +6689,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             {% endif %}
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
-            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Generér artikel {{ '(AI: Gemini via aimlapi)' if ai_enabled else '(skabelon — sæt AIMLAPI_KEY for AI)' }}</h2>
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Generér artikel {{ '(AI via OpenRouter)' if ai_enabled else '(skabelon — sæt OPENROUTER_API_KEY for AI)' }}</h2>
             <form action="/articles/generate" method="POST" class="flex gap-2">
                 <input type="text" name="keyword" placeholder="Emne / søgeord..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Generér</button>
@@ -6692,7 +6739,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">🔗 Backlink-prospector</h2>
-            <p class="text-xs text-zinc-500 mb-3">Søg keyword → top 10 i Google → type + kontakt-mail + AI-outreach-draft. Kræver SERPAPI_KEY (AIMLAPI_KEY for AI-drafts).</p>
+            <p class="text-xs text-zinc-500 mb-3">Søg keyword → top 10 i Google → type + kontakt-mail + AI-outreach-draft. Kræver SERPAPI_KEY (OPENROUTER_API_KEY for AI-drafts).</p>
             <form action="/backlinks/prospect" method="POST" class="flex gap-2 mb-4">
                 <input type="text" name="keyword" placeholder="Keyword at finde links til..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Find muligheder</button>
@@ -7311,7 +7358,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                     <div class="text-zinc-500 truncate">{{ l.from_url }} → <span class="text-emerald-400">{{ l.to_url }}</span></div>
                 </div>
                 {% else %}
-                <p class="text-xs text-zinc-500">Ingen forslag endnu. Kør site-crawl først, og kræver AIMLAPI_KEY.</p>
+                <p class="text-xs text-zinc-500">Ingen forslag endnu. Kør site-crawl først, og kræver OPENROUTER_API_KEY.</p>
                 {% endfor %}
             </div>
         </div>
@@ -8173,7 +8220,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=%h/command-center
-# Lader .env-vaerdier som GITHUB_TOKEN og AIMLAPI_KEY blive rigtige miljoevariabler
+# Lader .env-vaerdier som GITHUB_TOKEN og OPENROUTER_API_KEY blive rigtige miljoevariabler
 # (appen laeser selv de fleste, men dette er den paalidelige vej). "-" = ok hvis filen mangler.
 EnvironmentFile=-%h/command-center/.env
 # 127.0.0.1 + proxy-headers: nginx paa samme maskine sender X-Forwarded-Proto/For.
@@ -8187,12 +8234,16 @@ EOF_USERSVC
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.24 PRO
+# Command Center v7.25 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
+
+## Nyheder i v7.25
+
+- **AI via OpenRouter (v7.25.0)** — alle AI-funktioner (artikler, outreach-drafts, interne link-forslag, meta-rewrites og AI-synlighed) kalder nu OpenRouter i stedet for aimlapi. Sæt `OPENROUTER_API_KEY` (fra openrouter.ai/keys) og vælg model med `AI_MODEL` som OpenRouter-slug (`udbyder/model`). De tre kaldesteder er samlet i én `ai_chat()`, som også forstår OpenRouters fejlsvar, og månedsloftet `AI_MONTHLY_LIMIT` tæller nu kald til `openrouter.ai`. Står kun den gamle `AIMLAPI_KEY` i `.env`, bruges den ikke, men opstarten skriver en advarsel og lægger en alarm, så AI ikke forsvinder i stilhed
 
 ## Nyheder i v7.24
 
@@ -8241,7 +8292,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 
 - 🎛️ **Cockpit** — domæneovervågning (uptime, svartid, SSL), opdaterings-panel og alarmer
 - 🔍 **SEO Scanner** — deep audit af enkelt side (20+ vægtede kontroller inkl. focus keyword, læsbarhed, mixed content, schema, OG/Twitter) + **site-crawl** med score per side, robots.txt/sitemap-tjek og crawl-diff mod forrige crawl
-- ✍️ **Artikler** — AI-generering (Gemini via aimlapi) eller skabelon, **push til WordPress som udkast**, **fakta-prompt med SerpAPI-konkurrentanalyse**, autopilot (idé → artikel → WP-kladde) og **kvalitetsgate** før publicering
+- ✍️ **Artikler** — AI-generering (via OpenRouter, model i `AI_MODEL`) eller skabelon, **push til WordPress som udkast**, **fakta-prompt med SerpAPI-konkurrentanalyse**, autopilot (idé → artikel → WP-kladde) og **kvalitetsgate** før publicering
 - 🎯 **SEO-strategi** — AdSense / Affiliate / Backlink-vækst styrer AI-artiklernes stil + længde og autopilotens arbejde, med automatisk pre-flight-checkliste
 - 🌱 **Growth Pack** — backlink-prospector (SerpAPI top 10 → sitetype + kontakt-e-mail + AI-outreach-draft), keyword-ideer via Google/DDG-autocomplete, visibility-index
 - 🎯 **Keywords** — Google-positioner via SerpAPI (dagligt kl. 06:00), sværhedsgrads-heuristik, content gap mod top 10
@@ -8420,7 +8471,7 @@ og handoff, `AGENTS.md` er de korte regler for agenter.
 
 - **Brugere**: PBKDF2-SHA256 med salt pr. bruger; sessioner er HttpOnly-cookies (30 dage) gemt som `sha256(id)` i databasen, så en DB-kopi ikke giver adgang. Skift af adgangskode logger dine andre sessioner ud.
 - **Cookie/HTTPS**: cookien sættes `Secure` når appen ser https (kræver `X-Forwarded-Proto` bag proxy — se nginx-afsnittet).
-- **API-budget**: SerpAPI og aimlapi tælles pr. måned og stoppes ved loftet (`SERPAPI_MONTHLY_LIMIT`, `AI_MONTHLY_LIMIT`), med alarm ved 80 % og 100 %. Forbruget vises på Cockpit.
+- **API-budget**: SerpAPI og AI-kald til OpenRouter tælles pr. måned og stoppes ved loftet (`SERPAPI_MONTHLY_LIMIT`, `AI_MONTHLY_LIMIT`), med alarm ved 80 % og 100 %. Forbruget vises på Cockpit.
 - **Job-heartbeat**: hvert planlagt job skriver sin sidste kørsel; forsinkede eller fejlede jobs alarmeres (v7.20).
 - Default binding er 127.0.0.1 — sæt aldrig `0.0.0.0` uden reverse proxy + TLS.
 - **SSRF**: alle udgående kald med en URL fra et felt går gennem `safe_request()`. Loopback, private net, link-local (`169.254.169.254` = sky-metadata), reserverede adresser og navne som `.local`/`.internal` afvises, og en viderestilling tjekkes hop for hop — så en 302 ikke kan føre ind i det lokale net. Afvisningen forklares i formularen. Skal CC måle en intern side, åbner `CC_SSRF_ALLOW=vaert.ditdomaene` for netop den værtsadresse.

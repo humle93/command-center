@@ -113,7 +113,7 @@ skal læses først.
    tjekker paritet. Ret kilderne og regenerér installeren bagefter.
 3. **Test før commit:** `python3 tests/test_v8_features.py` og `bash tests/ci_check.sh` skal begge
    slutte med `ALL PASS`. `python3 tests/check_paths.py` fanger knapper/links uden rute.
-4. **Ingen secrets i repoet.** `GITHUB_TOKEN`, `SERPAPI_KEY`, `AIMLAPI_KEY`, `WP_APP_PASSWORD`,
+4. **Ingen secrets i repoet.** `GITHUB_TOKEN`, `SERPAPI_KEY`, `OPENROUTER_API_KEY`, `WP_APP_PASSWORD`,
    `TELEGRAM_*` og SMTP-oplysninger hører i `.env`.
 5. **Dansk UI og dansk dokumentation.**
 6. **Push kun når brugeren beder om det**, og vent på at GitHub Actions er grøn på commiten.

@@ -31,7 +31,7 @@ install.sh                 # selvstændig installer (indeholder kopier af filern
 2. `init_db()` → `migrate_db()` → `create_indexes()` køres i `_safe()`, så en fejl ikke kan crashe importen (ét retry, derefter videre)
 3. `seed_standard_user()` kaldes i lifespan **før** scheduler og selvtest: er `users` tom, og har `.env` både `CC_ADMIN_EMAIL` og `CC_ADMIN_PASSWORD`, oprettes standardbrugeren med `must_change_password`. Status skrives til opstartsloggen (`oprettet`, `findes`, `mangler`, `fejl: …`), og en afvist linje giver en advarsel i `alarms`. Derefter kaldes `warn_stale_env_password()`: passer `CC_ADMIN_PASSWORD` ikke til den gemte hash (fordi koden er skiftet i UI'et), skrives `[cc] advarsel: …` og en advarsel i `alarms`, og dashboardet viser en rød bjælke via `env_password_warning`
 4. Lifespan registrerer APScheduler-jobs og starter en selvtest i en worker-tråd (DB-skrivetest, nøgler, ruteantal → kritisk alarm ved fejl)
-5. Alt netværk går gennem én `requests.Session` med **BudgetAdapter**, der tæller kald til SerpAPI/aimlapi
+5. Alt netværk går gennem én `requests.Session` med **BudgetAdapter**, der tæller kald til SerpAPI/OpenRouter
 
 ## 3. Auth-model (v7.15–v7.18)
 
@@ -77,7 +77,7 @@ Alle queries er parameteriserede. `settings` bruges til små tilstande (JSON), s
 | --- | --- | --- |
 | Domæne-tjek | hvert 6. time | modul `domains` |
 | Keyword-positioner | 06:00 | modul `keywords` + `SERPAPI_KEY` |
-| Growth-autopilot | 05:15 | modul `growth` + `AIMLAPI_KEY` |
+| Growth-autopilot | 05:15 | modul `growth` + `OPENROUTER_API_KEY` |
 | Oprydning | 04:30 | — (lokale ISO-cutoffs) |
 | DB-backup | 04:40 | 14 kopier pr. tag |
 | GitHub-opdaterings-tjek | 05:00 | `GITHUB_TOKEN` |
@@ -129,6 +129,20 @@ mindst 2 H2 — ellers blokeres autopilot-push til WordPress (manuel push giver 
 Artikel-HTML, der vises i dashboardet, kører gennem `sanitize_article_html()` (allow-list af tags; ingen scripts,
 handlers, `javascript:`-links eller billeder), fordi indholdet kommer fra en ekstern AI-model.
 
+### 7b. AI-kald via OpenRouter (v7.25.0)
+
+Alle AI-kald går gennem `ai_chat(prompt, max_tokens, timeout)`: `POST {OPENROUTER_BASE_URL}/chat/completions`
+(standard `https://openrouter.ai/api/v1`) med `Authorization: Bearer OPENROUTER_API_KEY`, `X-Title: Command Center`
+og `HTTP-Referer: CC_PUBLIC_URL`, når den er sat (OpenRouters valgfri app-attribution). Kaldet går gennem den fælles
+`HTTP`-session, så `BudgetAdapter` tæller det som `ai`, og budgettets værtsnavn læses af `OPENROUTER_BASE_URL`.
+
+OpenRouter kan svare 200 med et `error`-objekt, når udbyderen bag modellen fejler. `ai_chat()` læser derfor `error`
+før `choices` og kaster `AIError` (en `requests.RequestException`) med OpenRouters besked, også ved tomt `choices` eller
+en tom besked. Eksisterende `except`-grene fanger den uændret, og nøglen indgår aldrig i fejlteksten.
+
+`AIMLAPI_KEY` bruges ikke længere. `warn_legacy_aimlapi()` kaldes i lifespan og giver en advarsel i opstartsloggen og en
+alarm (`ai`), når kun den gamle nøgle er sat.
+
 ## 8. API-budget
 
 `budget_spend()` tælles pr. kalendermåned i `settings` og kaster `BudgetExceeded` **før** kaldet sendes, når loftet er nået.
@@ -178,6 +192,7 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 
 ## 12. Versionshistorik (kort)
 
+- **v7.25.0** — AI via OpenRouter i stedet for aimlapi: `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`, fælles `ai_chat()` med `AIError` for OpenRouters fejlsvar, budget på `openrouter.ai` og advarsel ved en tilbageblevet `AIMLAPI_KEY`
 - **v7.24.0** — Vækst-fanen: lokal indholdsoptimerer (`local_content_optimizer`, vægtet score + termdækning), konkurrent-sammenligning mod brugerangivne URL'er, indholdsplan (`content_briefs`) og manuel linkliste (`link_targets`) — ingen API-nøgle. UI'et er samtidig moderniseret: grupperet navigation, fanebeskrivelser og fælles visuel rytme for kort, felter og knapper
 - **v7.23.0** — Backup i UI: `POST /backup/now` og `POST /backup/restore` (kræver `GENDAN`), kort i fanen Moduler, `pre-restore`-backup før hver gendannelse
 - **v7.22.0** — Offline dashboard: Tailwind, Alpine og Chart.js serveres fra `app/static/vendor/` i stedet for CDN

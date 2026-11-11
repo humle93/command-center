@@ -8,7 +8,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)
-os.environ.update(AIMLAPI_KEY="test-key", WP_URL="", WP_USER="", WP_APP_PASSWORD="")
+os.environ.update(OPENROUTER_API_KEY="test-key", WP_URL="", WP_USER="", WP_APP_PASSWORD="")
 
 __import__("os").environ.setdefault("CC_SSRF_ALLOW", "127.0.0.1")  # lokale testservere
 from app import main  # noqa: E402
@@ -1092,8 +1092,8 @@ check("vækst: toptermer ignorerer funktionsord og korte ord",
 _gw = TestClient(main.app)
 check("vækst: login til rutetest", _gw.post("/login", data={"email": "iptest@example.dk", "password": "iptest-pass"},
                                            follow_redirects=False).status_code == 303)
-_serp_before, _ai_before = main.SERPAPI_KEY, main.AIMLAPI_KEY
-main.SERPAPI_KEY, main.AIMLAPI_KEY = "", ""      # vækst må ikke kræve nogen af dem
+_serp_before, _ai_before = main.SERPAPI_KEY, main.OPENROUTER_API_KEY
+main.SERPAPI_KEY, main.OPENROUTER_API_KEY = "", ""      # vækst må ikke kræve nogen af dem
 _opt = _gw.post("/growth/optimize", data={"content": _good_html, "keyword": _kw, "terms": ", ".join(_terms),
                                          "target_words": "500"})
 check("vækst: /growth/optimize svarer med score uden API-nøgler",
@@ -1120,7 +1120,7 @@ check("vækst: sammenligningen giver råd om længde eller H2",
 check("vækst: en side der ikke kan hentes rapporteres pr. URL",
       _gw.post("/growth/compare", data={"url": _page_a, "competitors": "http://127.0.0.1:1/nej"}).json()
       ["competitors"][0]["ok"] is False)
-main.SERPAPI_KEY, main.AIMLAPI_KEY = _serp_before, _ai_before
+main.SERPAPI_KEY, main.OPENROUTER_API_KEY = _serp_before, _ai_before
 
 # Indholdsplan: brief bygges lokalt, kan skiftes og slettes
 _br = _gw.post("/growth/brief", data={"keyword": "steampunk goggles", "intent": "transaktionel",
@@ -1322,6 +1322,89 @@ with main.get_db() as db:
 check("standardbruger: ugyldig .env-linje giver ingen konto, men en alarm",
       broken.startswith("fejl:") and main.user_count() == 0 and warned >= 1, (broken, warned))
 os.environ.update(CC_ADMIN_EMAIL="", CC_ADMIN_PASSWORD="")
+
+# ---------- AI via OpenRouter (v7.25.0) ----------
+class _FakeAIResp:
+    def __init__(self, status, payload):
+        self.status_code, self._payload = status, payload
+    def json(self):
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise main.requests.HTTPError(f"HTTP {self.status_code}")
+
+_ai_calls = []
+_ai_queue = []
+_real_http_post = main.HTTP.post
+def _fake_http_post(url, **kw):
+    _ai_calls.append((url, kw))
+    return _ai_queue.pop(0)
+main.HTTP.post = _fake_http_post
+_ai_before = (main.OPENROUTER_API_KEY, main.CC_PUBLIC_URL)
+main.OPENROUTER_API_KEY, main.CC_PUBLIC_URL = "sk-or-test-hemmelig", "https://cc.example.dk"
+
+_ai_queue.append(_FakeAIResp(200, {"choices": [{"message": {"content": "Hej fra OpenRouter"}}]}))
+_out = main.ai_chat("Sig hej", max_tokens=42, timeout=7)
+_url, _kw = _ai_calls[-1]
+check("openrouter: svaret laeses fra choices", _out == "Hej fra OpenRouter", _out)
+check("openrouter: kaldet gaar til /api/v1/chat/completions",
+      _url == "https://openrouter.ai/api/v1/chat/completions", _url)
+check("openrouter: Bearer-noegle, X-Title og HTTP-Referer sendes",
+      _kw["headers"]["Authorization"] == "Bearer sk-or-test-hemmelig"
+      and _kw["headers"]["X-Title"] == "Command Center"
+      and _kw["headers"]["HTTP-Referer"] == "https://cc.example.dk", _kw["headers"])
+check("openrouter: model, max_tokens og timeout sendes videre",
+      _kw["json"]["model"] == main.AI_MODEL and _kw["json"]["max_tokens"] == 42 and _kw["timeout"] == 7,
+      _kw["json"])
+check("openrouter: AI-budgettet taeller openrouter.ai (ikke aimlapi.com)",
+      main.budget_service("https://openrouter.ai/api/v1/chat/completions") == "ai"
+      and main.budget_service("https://api.aimlapi.com/v1/chat/completions") == "", main.API_BUDGETS["ai"])
+
+def _ai_error(resp):
+    _ai_queue.append(resp)
+    try:
+        main.ai_chat("x")
+    except Exception as e:  # noqa: BLE001
+        return e
+    return None
+
+_e = _ai_error(_FakeAIResp(200, {"error": {"code": 502, "message": "Provider returned error"}}))
+check("openrouter: error-objekt i et 200-svar bliver en AIError med beskeden",
+      isinstance(_e, main.AIError) and "Provider returned error" in str(_e), repr(_e))
+_e = _ai_error(_FakeAIResp(401, {"error": {"message": "No auth credentials found"}}))
+check("openrouter: 401 giver en forstaaelig fejl uden noeglen",
+      isinstance(_e, main.AIError) and "401" in str(_e) and "sk-or-test" not in str(_e), repr(_e))
+_e = _ai_error(_FakeAIResp(200, {"choices": []}))
+check("openrouter: tomt choices giver AIError (ikke IndexError)", isinstance(_e, main.AIError), repr(_e))
+_e = _ai_error(_FakeAIResp(200, {"choices": [{"message": {"content": ""}}]}))
+check("openrouter: tom besked giver AIError", isinstance(_e, main.AIError), repr(_e))
+_e = _ai_error(_FakeAIResp(502, ValueError("ikke json")))
+check("openrouter: HTML-fejlside (ikke JSON) giver HTTPError", isinstance(_e, main.requests.HTTPError), repr(_e))
+check("openrouter: AIError fanges af de eksisterende RequestException-grene",
+      issubclass(main.AIError, main.requests.RequestException))
+
+main.CC_PUBLIC_URL = ""
+_ai_queue.append(_FakeAIResp(200, {"choices": [{"message": {"content": "ok"}}]}))
+main.ai_chat("x")
+check("openrouter: ingen HTTP-Referer uden CC_PUBLIC_URL", "HTTP-Referer" not in _ai_calls[-1][1]["headers"])
+
+_legacy_before = main.LEGACY_AIMLAPI_KEY_SET
+main.LEGACY_AIMLAPI_KEY_SET, main.OPENROUTER_API_KEY = True, ""
+_legacy_msg = main.warn_legacy_aimlapi()
+with main.get_db() as db:
+    _legacy_alarm = db.execute("SELECT COUNT(*) FROM alarms WHERE message LIKE '%AIMLAPI_KEY bruges ikke%'").fetchone()[0]
+check("openrouter: kun AIMLAPI_KEY i .env giver advarsel + alarm",
+      "OPENROUTER_API_KEY" in _legacy_msg and _legacy_alarm >= 1, (_legacy_msg, _legacy_alarm))
+main.OPENROUTER_API_KEY = "sk-or-test-hemmelig"
+check("openrouter: ingen advarsel naar OPENROUTER_API_KEY er sat", main.warn_legacy_aimlapi() == "")
+main.LEGACY_AIMLAPI_KEY_SET = _legacy_before
+check("openrouter: ingen aimlapi-adresser tilbage i koden",
+      "aimlapi.com" not in open(os.path.join(ROOT, "app", "main.py"), encoding="utf-8").read())
+
+main.HTTP.post = _real_http_post
+main.OPENROUTER_API_KEY, main.CC_PUBLIC_URL = _ai_before
 
 srv.shutdown()
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)

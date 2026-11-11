@@ -196,7 +196,7 @@
 
     {% if not ai_enabled or not wp_enabled %}
     <div class="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-3 text-xs text-amber-300">
-        Setup: AI {{ '✅' if ai_enabled else '❌ (AIMLAPI_KEY)' }} · WordPress {{ '✅' if wp_enabled else '❌ (WP_URL/WP_USER/WP_APP_PASSWORD)' }} · SerpAPI {{ '✅' if serpapi_enabled else '❌ (SERPAPI_KEY)' }} · Telegram {{ '✅' if telegram_enabled else '— (valgfrit)' }} — se .env.example
+        Setup: AI {{ '✅' if ai_enabled else '❌ (OPENROUTER_API_KEY)' }} · WordPress {{ '✅' if wp_enabled else '❌ (WP_URL/WP_USER/WP_APP_PASSWORD)' }} · SerpAPI {{ '✅' if serpapi_enabled else '❌ (SERPAPI_KEY)' }} · Telegram {{ '✅' if telegram_enabled else '— (valgfrit)' }} — se .env.example
     </div>
     {% endif %}
 
@@ -546,7 +546,7 @@
             {% endif %}
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
-            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Generér artikel {{ '(AI: Gemini via aimlapi)' if ai_enabled else '(skabelon — sæt AIMLAPI_KEY for AI)' }}</h2>
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Generér artikel {{ '(AI via OpenRouter)' if ai_enabled else '(skabelon — sæt OPENROUTER_API_KEY for AI)' }}</h2>
             <form action="/articles/generate" method="POST" class="flex gap-2">
                 <input type="text" name="keyword" placeholder="Emne / søgeord..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Generér</button>
@@ -596,7 +596,7 @@
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">🔗 Backlink-prospector</h2>
-            <p class="text-xs text-zinc-500 mb-3">Søg keyword → top 10 i Google → type + kontakt-mail + AI-outreach-draft. Kræver SERPAPI_KEY (AIMLAPI_KEY for AI-drafts).</p>
+            <p class="text-xs text-zinc-500 mb-3">Søg keyword → top 10 i Google → type + kontakt-mail + AI-outreach-draft. Kræver SERPAPI_KEY (OPENROUTER_API_KEY for AI-drafts).</p>
             <form action="/backlinks/prospect" method="POST" class="flex gap-2 mb-4">
                 <input type="text" name="keyword" placeholder="Keyword at finde links til..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Find muligheder</button>
@@ -1215,7 +1215,7 @@
                     <div class="text-zinc-500 truncate">{{ l.from_url }} → <span class="text-emerald-400">{{ l.to_url }}</span></div>
                 </div>
                 {% else %}
-                <p class="text-xs text-zinc-500">Ingen forslag endnu. Kør site-crawl først, og kræver AIMLAPI_KEY.</p>
+                <p class="text-xs text-zinc-500">Ingen forslag endnu. Kør site-crawl først, og kræver OPENROUTER_API_KEY.</p>
                 {% endfor %}
             </div>
         </div>

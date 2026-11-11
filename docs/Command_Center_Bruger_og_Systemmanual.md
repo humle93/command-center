@@ -98,13 +98,13 @@ Hvert login giver en ny session, og den gamle session slettes. Ændringer, der s
 
 ## Guidet fanerækkefølge
 
-Navigationen er delt i grupper — **overblik**, **analyse** (SEO, Keywords, Vækst), **produktion** (Indhold, Links, Spy), **drift** (Social, Monitors, Alarmer) og **system** (AI, Pro, Moduler, Brugere, Noter) — og hver fane har en kort beskrivelse øverst. Afsnittene nedenfor følger samme rækkefølge som et normalt arbejdsflow.
+Navigationen er delt i grupper — **overblik** (Cockpit og Chat), **analyse** (SEO, Keywords, Vækst), **produktion** (Indhold, Links, Spy), **drift** (Social, Monitors, Alarmer) og **system** (AI, Pro, Moduler, Brugere, Noter) — og hver fane har en kort beskrivelse øverst. Afsnittene nedenfor følger samme rækkefølge som et normalt arbejdsflow.
 
 ### 1. Cockpit — dit daglige overblik
 
 - **Opdatering fra GitHub**: installeret commit vs. seneste commit på `main`, "Tjek for nye commits" og "Opdater" (se nedenfor)
 - Domæneovervågning: uptime, svartid, SSL-udløb (historik + graf via 📈)
-- **💳 API-budget denne måned**: forbrug og loft for SerpAPI og AI (aimlapi). Ved 80 % kommer en advarsel, ved 100 % stoppes de betalte kald
+- **💳 API-budget denne måned**: forbrug og loft for SerpAPI og AI (OpenRouter). Ved 80 % kommer en advarsel, ved 100 % stoppes de betalte kald
 - **⏱️ Planlagte jobs (heartbeat)**: hvornår hvert job sidst kørte OK. Et job der er forsinket eller fejlet giver en alarm (én gang pr. tilstand), og alarmen forsvinder når jobbet kører igen
 - **"Sådan bruger du Command Center"**: 4 klikbare trin gennem workflowet
 - Alarmer og noter
@@ -134,7 +134,7 @@ Crawleren gemmer de **to seneste** crawls, så diffen har noget at sammenligne m
 
 **SEO-strategi-vælger** (øverst): *AdSense-indkomst*, *Affiliate* eller *Backlink-vækst*. Valget styrer AI-artiklernes stil og længde (manuel generering OG autopilot) og hvad autopiloten gør (artikel vs. prospecting). Efter hvert valg kører CC et **pre-flight-tjek** af nøgler, WordPress-creds, moduler, cron og DB — vist som grøn/rød-checkliste med kritisk alarm ved mangler.
 
-- **Generér artikel**: emne/keyword → AI-artikel (Gemini via aimlapi). Prompten henter top 5 Google-resultater (SerpAPI) og kræver fakta-baseret indhold, der dækker deres content gap
+- **Generér artikel**: emne/keyword → AI-artikel (via OpenRouter). Prompten henter top 5 Google-resultater (SerpAPI) og kræver fakta-baseret indhold, der dækker deres content gap
 - **Kladde-liste**: hver artikel har *Score vs SERP*, *Meta/social*, *Push til WP (kladde)* og slet
 - **Autopilot**: én knap kører hele cyklussen (idé → artikel → WP-kladde). Kører også automatisk kl. 05:15 (modulet *Growth*)
 - **Kvalitetsgate**: artikler under `QUALITY_MIN_WORDS` (eller 80 % af SERP-gennemsnittet), uden fokus-keyword eller med under 2 H2 sendes **ikke** til WordPress som autopilot — status bliver "Stoppet af kvalitetsgate" + alarm. Manuel push er tilladt men giver en info-alarm
@@ -159,7 +159,7 @@ Fanen **🚀 Vækst** er Command Centers egen udgave af det, Surfer, Ahrefs, Sem
 ### 5. Links
 
 - Tjek eksterne links på en side: status (ok/brudt/timeout) med historik. Brudte links = hurtige fixes
-- **AI interne link-forslag** (AI Tools): kræver et crawl og `AIMLAPI_KEY`
+- **AI interne link-forslag** (AI Tools): kræver et crawl og `OPENROUTER_API_KEY`
 
 ![Links](img/cc-links.png)
 
@@ -204,6 +204,51 @@ Fanen **🚀 Vækst** er Command Centers egen udgave af det, Surfer, Ahrefs, Sem
 
 - Hurtige workflow-noter: skriv en note, se de nyeste og slet enkelte (`/notes/add`, `/notes/delete`). Gemmes i tabellen `notes`
 
+### Log ind fra WordPress med ét klik (v7.27)
+
+Knappen **Log ind i Command Center** på Steamgears-dashboardet i WordPress logger dig direkte ind her — uden adgangskode. Det kræver tre ting:
+
+1. `CC_PUBLIC_URL` i `.env` er den adresse, browseren når Command Center på, med `https://` (fx `https://cc.steamgears.eu`).
+2. Steamgears Autopilot 7.76 eller nyere på sitet, og Autopilot-broen slået til (`WP_URL`/`WP_USER`/`WP_APP_PASSWORD`).
+3. Din WordPress-bruger har **samme e-mail** som din bruger her. Knappen opretter aldrig en ny konto.
+
+Ved hver sync (hver 30. min.) sender Command Center sin adresse og en hemmelig nøgle til pluginnet — kun når noget har ændret sig, eller pluginnet siger at knappen ikke er forbundet. **🔑 Forbind login-knappen nu** i fanen Social gør det med det samme, og kortet viser om knappen er forbundet. Et klik i WordPress laver en billet, der holder **1 minut** og kun virker **én gang**. Afviste billetter tæller som fejlede logins (5 = 10 minutters lås), og hvert login fra WordPress står under Alarmer.
+
+| Login-siden siger | Årsag |
+| --- | --- |
+| billetten er udløbet | mere end 1 minut gik, eller urene på de to servere er langt fra hinanden |
+| allerede brugt | browseren åbnede samme billet to gange — tryk på knappen igen |
+| e-mailen findes ikke | din WordPress-e-mail har ingen bruger her — invitér den under Brugere |
+| ikke forbundet endnu | ingen sync siden opdateringen — tryk **Forbind login-knappen nu** |
+
+Det gamle engangslink fra v7.17.5 er fjernet: det sendte til en rute, pluginnet aldrig har haft.
+
+### Chat og connectors (v7.26)
+
+![Chat](img/cc-chat.png)
+
+Fanen **💬 Chat** er en samtale med AI'en (OpenRouter, `CHAT_MODEL` eller `AI_MODEL`), hvor modellen kan bruge værktøjer fra de **connectors**, du vælger i venstre side. En connector er en ekstern MCP-server; Command Center forbinder sig som klient (Streamable HTTP).
+
+**Tilføj en connector** nederst på fanen: vælg en skabelon, ret navn/adresse, vælg login og indsæt nøglen. Ved "Tilføj og hent værktøjer" henter Command Center værktøjslisten med det samme og viser antallet — 🔒 markerer værktøjer, der ændrer noget.
+
+| Skabelon | Adresse | Login |
+| --- | --- | --- |
+| GitHub | `https://api.githubcopilot.com/mcp/` | Personal access token (Bearer) fra github.com/settings/tokens. Brug værktøjsfilteret (fx `list_*, get_*, search_*`), serveren har mange værktøjer |
+| Steamgears (WordPress) | `WP_URL` + `/wp-json/mcp/novamira` | `WP_USER` + `WP_APP_PASSWORD` fra `.env` — ingen nøgle i formularen |
+| WordPress-site (MCP Adapter) | `https://ditsite.dk/wp-json/mcp/mcp-adapter-default-server` | Brugernavn + Application Password. Kræver pluginnet WordPress MCP Adapter |
+| WordPress.com, Gmail, Google Drive | URL fra din MCP-server/gateway | Token fra samme sted. Udbyderne kræver OAuth; login med OAuth direkte fra Command Center er ikke bygget endnu |
+| Anden MCP-server | enhver `https://…` | Bearer, Basic, nøgle i egen header eller intet login |
+
+**Sådan virker en samtale**
+
+- Værktøjer med `readOnlyHint` kører automatisk; svaret ses under "↩︎ svar fra …".
+- Alle andre værktøjer (også dem uden annotation) stopper chatten med et gult kort: **Godkend** kører kaldet, **Afvis** fortæller AI'en, at du sagde nej. Mens et kald venter, kan der ikke sendes nye beskeder i samtalen, og hvert kald kan kun besluttes én gang. Godkendte kald logges under Alarmer (info).
+- Indhold fra værktøjer (mails, sider, issues) er data: AI'en får besked på ikke at følge instruktioner i det.
+- Højst 8 værktøjsrunder pr. besked (`CHAT_MAX_STEPS`) og 80 værktøjer i alt pr. samtale; skriv videre for at fortsætte.
+- Samtaler er personlige: andre brugere kan hverken se dem eller godkende dine kald.
+
+**Sikkerhed:** nøglen gemmes i `mcp_connectors.secret` og sendes aldrig til browseren igen — kun de sidste fire tegn. Database-backups indeholder derfor nøglerne. Adresser skal bruge `https://` og går gennem SSRF-guarden (`CC_SSRF_ALLOW` åbner for en intern vært), og viderestillinger følges ikke. Chatten tæller med i `AI_MONTHLY_LIMIT` (ét kald pr. runde).
+
 ### 12. Moduler
 
 - Slå de 11 funktionsområder fra/til med det samme (se "Moduler" nedenfor)
@@ -212,9 +257,9 @@ Fanen **🚀 Vækst** er Command Centers egen udgave af det, Surfer, Ahrefs, Sem
 
 ## AI Tools
 
-Samlede AI-værktøjer: titel/meta-rewrites, outreach-drafts, artikel-meta, interne link-forslag og AI-synlighed. Bruger `AIMLAPI_KEY` + `AI_MODEL` (default `google/gemini-3-8-flash`, max_tokens 3000 pga. reasoning-tokens). Månedens forbrug tælles og stoppes ved `AI_MONTHLY_LIMIT`.
+Samlede AI-værktøjer: titel/meta-rewrites, outreach-drafts, artikel-meta, interne link-forslag og AI-synlighed. Bruger OpenRouter: `OPENROUTER_API_KEY` + `AI_MODEL` (en OpenRouter-slug, default `google/gemini-3-8-flash`; max_tokens 3000 pga. reasoning-tokens). Nøglen laves på openrouter.ai/keys, og modellerne står på openrouter.ai/models. `OPENROUTER_BASE_URL` kan pege på en anden OpenAI-kompatibel adresse. Står kun den gamle `AIMLAPI_KEY` i `.env` (før v7.25.0), bruges den ikke: opstarten skriver en advarsel, og der kommer en alarm under Alarmer. Månedens forbrug tælles og stoppes ved `AI_MONTHLY_LIMIT`.
 
-**AI-synlighed** (fanen *AI*, `/ai/visibility`): stil det spørgsmål en kunde ville stille en AI-assistent (fx "hvor køber jeg steampunk-goggles?"). CC beder modellen om at nævne konkrete butikker og registrerer, om `TRACK_DOMAIN` optræder i svaret — med et uddrag af svaret som dokumentation. Hvert tjek gemmes i `ai_visibility`, så du kan følge, om sitet bliver nævnt i AI-svar over tid. Kræver `AIMLAPI_KEY`.
+**AI-synlighed** (fanen *AI*, `/ai/visibility`): stil det spørgsmål en kunde ville stille en AI-assistent (fx "hvor køber jeg steampunk-goggles?"). CC beder modellen om at nævne konkrete butikker og registrerer, om `TRACK_DOMAIN` optræder i svaret — med et uddrag af svaret som dokumentation. Hvert tjek gemmes i `ai_visibility`, så du kan følge, om sitet bliver nævnt i AI-svar over tid. Kræver `OPENROUTER_API_KEY`.
 
 ## Pro
 
@@ -245,7 +290,7 @@ pip install playwright && python3 -m playwright install chromium   # kun foerste
 python3 scripts/screenshots.py --base http://127.0.0.1:8000 --user din@mail.dk --password 'din-adgangskode'
 ```
 
-Scriptet logger ind, tager `cc-login.png` og skifter derefter gennem alle 15 faner og gemmer
+Scriptet logger ind, tager `cc-login.png` og skifter derefter gennem alle 16 faner og gemmer
 `cc-cockpit.png` … `cc-notes.png`. Vil du kun opdatere enkelte faner, så brug `--only alarms,notes`,
 og vil du kun have det synlige omraade i stedet for hele siden, så tilføj `--viewport`.
 Brug `--base`, `--user` og `--password` (eller `CC_BASE`, `CC_USER`, `CC_PASSWORD`).
@@ -358,7 +403,7 @@ Alle routes kræver en indlogget bruger (cookie) - samme session som UI'et. Vigt
 
 ## Environment-variabler (.env)
 
-`CC_HOST`, `CC_PORT`, `CC_PUBLIC_URL`, `CC_FORWARDED_ALLOW_IPS`, `GITHUB_TOKEN`, `GITHUB_REPO`, `UPDATE_AUTO_RESTART`, `UPDATE_RESTART_CMD`, `AIMLAPI_KEY`, `AI_MODEL`, `WP_URL/USER/APP_PASSWORD`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_TO`, `SMTP_TLS`, `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN`, `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_SECRET`, `ALERT_MIN_SEVERITY`, `ALERT_QUIET_HOURS`, `ALERT_DEDUPE_MINUTES`, `SERPAPI_KEY`, `TRACK_DOMAIN`, `PSI_API_KEY`, `SSL_WARN_DAYS`, `LINKCHECK_LIMIT`, `SERPAPI_MONTHLY_LIMIT`, `AI_MONTHLY_LIMIT`, `QUALITY_MIN_WORDS`.
+`CC_HOST`, `CC_PORT`, `CC_PUBLIC_URL`, `CC_FORWARDED_ALLOW_IPS`, `GITHUB_TOKEN`, `GITHUB_REPO`, `UPDATE_AUTO_RESTART`, `UPDATE_RESTART_CMD`, `OPENROUTER_API_KEY`, `AI_MODEL`, `OPENROUTER_BASE_URL`, `CHAT_MODEL`, `CHAT_MAX_TOKENS`, `MCP_TIMEOUT`, `WP_URL/USER/APP_PASSWORD`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_TO`, `SMTP_TLS`, `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN`, `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_SECRET`, `ALERT_MIN_SEVERITY`, `ALERT_QUIET_HOURS`, `ALERT_DEDUPE_MINUTES`, `SERPAPI_KEY`, `TRACK_DOMAIN`, `PSI_API_KEY`, `SSL_WARN_DAYS`, `LINKCHECK_LIMIT`, `SERPAPI_MONTHLY_LIMIT`, `AI_MONTHLY_LIMIT`, `QUALITY_MIN_WORDS`.
 
 Rigtige miljøvariabler vinder over `.env`. `.env` læses før appens konfiguration, og inline-kommentarer (`KEY=  # note`) fjernes.
 

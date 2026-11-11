@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 10. november 2026 · **Version:** 7.24.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 11. november 2026 · **Version:** 7.27.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,39 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Log ind fra WordPress med ét klik (v7.27.0) — implementeret
+- **Baggrund:** ønsket var "en log ind i Command Center-knap i Steamgears-pluginnet". Fundet: det gamle engangslink (v7.17.5) sendte til `POST /sgap/v1/login-link`, en rute pluginnet **aldrig** har haft (`git log -S login-link -- plugins` er tom i steamgears-site), så knappen kunne aldrig virke.
+- **Nyt flow:** `cc_sso_secret()` (settings `cc_sso_secret`, `token_urlsafe(48)`), `cc_sso_push()` sender `{url: CC_PUBLIC_URL, secret, version}` til `POST /sgap/v1/cc-link` — i `sgap_sync()` kun når fingerprint (sha256 af url+nøgle) har ændret sig eller snapshottet siger `command_center.sso = false`, og med `force=True` fra knappen i Social (`/autopilot/login-link`, samme rute som før). `GET /cc-sso?t=` → `cc_sso_verify()`: HMAC først, `v=1`, levetid ≤ 120 s, ±30 s ur-forskel, `jti` i tabellen `sso_used`, kendt e-mail. Ingen ny konto oprettes.
+- **Låsen:** afviste billetter tæller i `_LOGIN_FAILS` (5 = 10 min.), og `/login?sso=<årsag>` forklarer (tekster i `CC_SSO_REASONS`). Login fra WordPress logges som info-alarm.
+- **Fjernet:** `cc_login_issue`, `cc_login_consume`, `CC_LOGIN_*`, `GET /cc-login` og `/cc-login` i middlewarens undtagelser; `fake_wp.py` har `/cc-link` i stedet for `/login-link`.
+- **Pluginnet:** Steamgears Autopilot 7.76.0 (`beaffa1` på steamgears-site; bygget som 7.72.0 og flyttet oven på main's 7.75.0) har ruten, billetten og knappen, og P10 flytter samtidig pluginnet til OpenRouter som standard.
+- **Test:** 25 `sso:`-checks i `tests/test_v8_features.py`, 7 i `tests/ci_check.sh`, og et interop-tjek kørt i sessionen: en billet lavet af pluginnets egen `SGAP_CC::ticket()` (PHP) blev godkendt af `cc_sso_verify()`, og anden gang afvist som `brugt`. Interop-tjekket ligger ikke i CI (repoet har ikke pluginnet).
+- **Ikke verificeret:** et klik på det levende site — kræver at 7.76.0 er installeret og `CC_PUBLIC_URL` er sat på serveren.
+
+### Chat med MCP-connectors (v7.26.0) — implementeret
+- **Baggrund:** ønsket var "en separat chat-sektion med connector-MCP til GitHub, WordPress, Gmail, Google Drive og andre nyttige WordPress-sider".
+- **Fanen 💬 Chat** (`tab=chat`, nav-gruppe med Cockpit): samtaleliste, valg af connectors pr. samtale, tråd med værktøjskald/svar, gule godkendelseskort og en connector-sektion (tabel + formular med skabeloner).
+- **MCP-klient i `app/main.py`:** `mcp_open`/`mcp_request`/`mcp_list_tools`/`mcp_call_tool` (Streamable HTTP, JSON og SSE, `Mcp-Session-Id`, genåbning ved 404, `nextCursor`). Egen session `MCP_HTTP` (ikke budget-adapteren), `assert_public_url` + ingen redirects.
+- **Skabeloner (`CONNECTOR_PRESETS`):** GitHub (`api.githubcopilot.com/mcp/`, PAT), Steamgears (`WP_URL/wp-json/mcp/novamira`, login `wp_env` = `WP_USER`/`WP_APP_PASSWORD`), WordPress MCP Adapter, WordPress.com, Gmail, Google Drive og "Anden". De fire sidste har bevidst ingen fast URL: de kræver OAuth hos udbyderen, og OAuth-flowet er ikke bygget (står i roadmappen under "Senere").
+- **Godkendelse:** kun `readOnlyHint=true` kører automatisk; resten går i `chat_pending`. `chat_decide` låser med rowcount (dobbeltklik = én kørsel), samtaler er pr. bruger, og godkendte kald logges som info-alarm.
+- **Chat-løkken:** `openrouter_complete()` (ny; `ai_chat()` er nu en tynd wrapper) med tools; højst `CHAT_MAX_STEPS = 8` runder og `CHAT_MAX_TOOLS = 80`. Ugyldige argumenter og ukendte værktøjer bliver tool-svar, ikke kald.
+- **Nye tabeller:** `mcp_connectors`, `chat_conversations`, `chat_messages`, `chat_pending` (i `migrate_db`).
+- **Nye ruter (9):** `GET /api/chat/state`, `GET /api/chat/{cid}`, `POST /chat/send|approve|delete`, `POST /connectors/add|refresh|toggle|delete`. `/connectors/add` og `/connectors/refresh` har `TASK_ESTIMATES`.
+- **Test:** 45 checks i `tests/test_v8_features.py` mod en fake MCP-server (`_FakeMcp`: JSON/SSE, session, to sider, 401) og en fake OpenRouter: validering, SSRF, nøgler aldrig i UI/HTML/state, auto-kørsel af læseværktøj, godkend/afvis, dobbelt godkendelse, ukendt værktøj, loft, anden bruger.
+- **Screenshots:** `scripts/screenshots.py` har `chat` i `TABS` og læser `CC_CHROMIUM_PATH`; alle 16 billeder er taget igen mod v7.26 (med demo-connectors mod en lokal fake MCP-server).
+- **Ikke verificeret her:** kald mod de rigtige servere (GitHub, WordPress, Google) — containerens netværk tillader dem ikke. Kendt begrænsning: nøglerne ligger i klartekst i databasen (og i backups).
+
+### AI via OpenRouter i stedet for aimlapi (v7.25.0) — implementeret
+- **Baggrund:** ønsket var "Tilføj openrouter api i stedet for aimlapi". aimlapi er fjernet; der er ingen fallback til den gamle nøgle (den virker ikke mod OpenRouter).
+- **Konfiguration:** `OPENROUTER_API_KEY` (erstatter `AIMLAPI_KEY`), `AI_MODEL` (nu en OpenRouter-slug, default uændret `google/gemini-3-8-flash`) og valgfri `OPENROUTER_BASE_URL` (default `https://openrouter.ai/api/v1`).
+- **Ét kald:** `ai_chat(prompt, max_tokens, timeout)` er eneste vej til modellen; `generate_article_ai()` og outreach-draften brugte før hver sin kopi af `HTTP.post`. Den sender `X-Title: Command Center` og `HTTP-Referer: CC_PUBLIC_URL` (når sat), læser OpenRouters `error`-objekt før `choices` og kaster `AIError` (en `RequestException`), så de eksisterende `except`-grene fanger den.
+- **Budget:** `API_BUDGETS["ai"]` tæller værtsnavnet fra `OPENROUTER_BASE_URL` (`openrouter.ai`), ikke `aimlapi.com`.
+- **Gammel nøgle:** `warn_legacy_aimlapi()` i lifespan giver `[cc] advarsel:` + alarm (`ai`), når kun `AIMLAPI_KEY` er sat.
+- **Test:** 15 `openrouter:`-checks i `tests/test_v8_features.py` (URL, headers, model/max_tokens/timeout, budget, fejl i 200-svar, 401 uden nøgle i teksten, tomt choices, tom besked, ikke-JSON, ingen Referer uden `CC_PUBLIC_URL`, advarsel, ingen `aimlapi.com` i koden).
+- **Ikke verificeret her:** et rigtigt kald til openrouter.ai (containerens proxy afviser værten), og om slug'en `google/gemini-3-8-flash` findes hos OpenRouter — tjek den på openrouter.ai/models og sæt `AI_MODEL` efter behov.
+- **Screenshots:** dashboardets AI-tekster er ændret, men `docs/img/` er ikke fotograferet om (commit med `[skip screenshots]`).
+- **Lokal testkørsel i en container uden DNS:** `NO_PROXY=127.0.0.1,localhost,testserver` og en `sitecustomize.py`, der giver ukendte navne en offentlig IP; ellers fejler SSRF-tjekkene på `example.com`/`example.dk` (det sker også på main).
 
 ### Vækst uden API-nøgle + moderniseret UI (v7.24.0) — implementeret
 - **Baggrund:** ønsket var "Surfer SEO, Ahrefs, Semrush og BabyLoveGrowth — vores egen version uden API-nøgle". Svaret er en lokal motor, ikke en kopi: vi kan måle tekst, men ikke genskabe deres webindekser.
@@ -466,7 +499,7 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
   tages én gang) samt `tests/ci_check.sh` (genforsoeg mod `fake_wp` lader kladdetallet vaere 1).
 
 ### Screenshot-script (v7.13.1)
-- `scripts/screenshots.py` tager `cc-login.png` og alle 15 fanebilleder i `docs/img/` mod en kørende
+- `scripts/screenshots.py` tager `cc-login.png` og alle 16 fanebilleder i `docs/img/` mod en kørende
   app: `python3 scripts/screenshots.py --base http://127.0.0.1:8000 --user X --password Y`.
   `--only cockpit,notes`, `--viewport` og `--skip-login` findes til delkørsler; login sker via
   `context.request.post("/login")`, og fanerne skiftes med `Alpine.$data(body).tab = <key>`.
@@ -553,8 +586,9 @@ springer tjekket over til rene undtagelser.
 - Én proces + SQLite + APScheduler: ingen vandret skalering; et job deler event-loop med HTTP.
 - Dashboardet henter Tailwind/Alpine/Chart.js fra CDN; login-siden er selvstændig.
 - Crawleren bruger `requests` (ingen JS-rendering) og ca. 20 kontroller — ikke Sitebulb-niveau.
+- Chat-connectors: Gmail, Google Drive og WordPress.com kræver et token fra en MCP-server/gateway (intet OAuth-flow i CC endnu), og connector-nøgler ligger i klartekst i `center.db` og dermed i backups.
 - Vækst-fanen måler tekst og de sider, brugeren selv peger på; der er ingen søgevolumen, placeringer eller backlink-data (det kræver et eksternt indeks). Konkurrentsammenligning henter højst tre sider pr. kald.
-- `docs/img/` er fotograferet mod v7.24-UI'et (login + alle 15 faner), og CI fejler nu, hvis et UI-commit går forbi uden nye billeder.
+- `docs/img/` er fotograferet mod v7.26-UI'et (login + alle 16 faner), og CI fejler nu, hvis et UI-commit går forbi uden nye billeder.
 - Efter Juno-fjernelsen: ingen GSC-data, og `drift`/`gsc_*`-tabeller kan stadig ligge tomme i en
   eksisterende `center.db` (intet læser eller skriver dem).
 - Systemd-genstartsstien er ikke testet i denne VM (ingen systemd); pidfile-stien er verificeret.
@@ -584,5 +618,5 @@ MCP-hærdning (v7.17.1). De står nu under "Færdigt" i roadmappen i stedet for 
   Cloudflare svarer 403 ("Just a moment…") og reader-proxyen afviser IP'en. Afvent at brugeren
   paster indholdet (diff/plan) — og mind dem om at fjerne tokens fra teksten.
 - Ingen secrets i repoet: brug `.env` (gitignored) eller miljøvariabler. `GITHUB_TOKEN`,
-  `SERPAPI_KEY`, `AIMLAPI_KEY`, `WP_APP_PASSWORD` og `TELEGRAM_*` må ikke committes.
+  `SERPAPI_KEY`, `OPENROUTER_API_KEY`, `WP_APP_PASSWORD` og `TELEGRAM_*` må ikke committes.
 - Vue: hold UI-tekster på dansk, og opdater README + manual + roadmap i samme ændring som koden.

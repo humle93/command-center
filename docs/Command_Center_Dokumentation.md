@@ -31,7 +31,7 @@ install.sh                 # selvstændig installer (indeholder kopier af filern
 2. `init_db()` → `migrate_db()` → `create_indexes()` køres i `_safe()`, så en fejl ikke kan crashe importen (ét retry, derefter videre)
 3. `seed_standard_user()` kaldes i lifespan **før** scheduler og selvtest: er `users` tom, og har `.env` både `CC_ADMIN_EMAIL` og `CC_ADMIN_PASSWORD`, oprettes standardbrugeren med `must_change_password`. Status skrives til opstartsloggen (`oprettet`, `findes`, `mangler`, `fejl: …`), og en afvist linje giver en advarsel i `alarms`. Derefter kaldes `warn_stale_env_password()`: passer `CC_ADMIN_PASSWORD` ikke til den gemte hash (fordi koden er skiftet i UI'et), skrives `[cc] advarsel: …` og en advarsel i `alarms`, og dashboardet viser en rød bjælke via `env_password_warning`
 4. Lifespan registrerer APScheduler-jobs og starter en selvtest i en worker-tråd (DB-skrivetest, nøgler, ruteantal → kritisk alarm ved fejl)
-5. Alt netværk går gennem én `requests.Session` med **BudgetAdapter**, der tæller kald til SerpAPI/aimlapi
+5. Alt netværk går gennem én `requests.Session` med **BudgetAdapter**, der tæller kald til SerpAPI/OpenRouter
 
 ## 3. Auth-model (v7.15–v7.18)
 
@@ -67,6 +67,8 @@ Tabeller i grupper:
 - **Indhold**: `articles`, `backlink_prospects`, `outreach`
 - **Drift/integrationer**: `socialqueue`, `competitors`, `linkcheck`, `ai_visibility`
 - **Adgang**: `api_clients` (MCP-nøgler, hash + scopes), `api_audit` (kald pr. nøgle)
+- **Login fra WordPress (v7.27)**: `sso_used` (`jti` primærnøgle + `exp`; rækker ældre end en time ryddes ved hvert login) og `settings.cc_sso_secret` / `settings.cc_sso_link`
+- **Chat (v7.26)**: `mcp_connectors` (eksterne MCP-servere: url, login, `secret` + `secret_hint`, værktøjsfilter, `tools_json`), `chat_conversations` (pr. bruger), `chat_messages` (user/assistant/tool i OpenAI-format) og `chat_pending` (skrivende kald der venter på godkendelse)
 - **System**: `users`, `sessions`, `settings` (nøgle/værdi: moduler, strategi, budget, snapshots, `deployed_commit`, `github_update`), `notes` og `_selftest` (resultat af opstarts-selvtesten)
 
 Alle queries er parameteriserede. `settings` bruges til små tilstande (JSON), så nye funktioner ikke kræver migration.
@@ -77,7 +79,7 @@ Alle queries er parameteriserede. `settings` bruges til små tilstande (JSON), s
 | --- | --- | --- |
 | Domæne-tjek | hvert 6. time | modul `domains` |
 | Keyword-positioner | 06:00 | modul `keywords` + `SERPAPI_KEY` |
-| Growth-autopilot | 05:15 | modul `growth` + `AIMLAPI_KEY` |
+| Growth-autopilot | 05:15 | modul `growth` + `OPENROUTER_API_KEY` |
 | Oprydning | 04:30 | — (lokale ISO-cutoffs) |
 | DB-backup | 04:40 | 14 kopier pr. tag |
 | GitHub-opdaterings-tjek | 05:00 | `GITHUB_TOKEN` |
@@ -129,6 +131,43 @@ mindst 2 H2 — ellers blokeres autopilot-push til WordPress (manuel push giver 
 Artikel-HTML, der vises i dashboardet, kører gennem `sanitize_article_html()` (allow-list af tags; ingen scripts,
 handlers, `javascript:`-links eller billeder), fordi indholdet kommer fra en ekstern AI-model.
 
+### 7d. Log ind fra WordPress (v7.27.0)
+
+Billetten er `base64url(json) + "." + base64url(HMAC-SHA256(nøgle, base64url(json)))`, med JSON-felterne `v` (1),
+`email`, `login`, `site`, `iat`, `exp` og `jti` (32 hex). `cc_sso_verify()` tjekker i denne rækkefølge: format og
+længde (≤ 2048), signaturen (`hmac.compare_digest`, før noget i JSON læses), `v`, `exp - iat ≤ 120` og `jti`-formatet,
+udløb med ±30 s ur-forskel, engangsbrug (`INSERT` i `sso_used`; `IntegrityError` = brugt) og til sidst en bruger med
+samme normaliserede e-mail. Nøglen laves med `secrets.token_urlsafe(48)` og forlader kun CC i `POST /cc-link` til
+pluginnet over den autentificerede bro. Pluginnet gemmer den uden autoload og viser kun `sso: true/false` i `/snapshot`.
+
+### 7c. Chat og MCP-connectors (v7.26.0)
+
+Command Center er her MCP-**klient** (det modsatte af `/mcp`, hvor CC er server). Klienten taler Streamable HTTP:
+`initialize` → `notifications/initialized` → `tools/list` (op til 10 sider) / `tools/call`, med `Mcp-Session-Id` og
+`MCP-Protocol-Version` fra svaret. Svar kan være `application/json` eller `text/event-stream` (`_mcp_parse`). En session
+caches pr. connector i `_MCP_SESSIONS` og åbnes igen én gang ved 400/404. Kald går gennem en egen `requests.Session`
+(`MCP_HTTP`), så de ikke tæller i AI-budgettet; adressen tjekkes med `assert_public_url`, og 3xx følges ikke.
+
+`chat_run(cid)` bygger tools fra de valgte connectors (`chat_tools`: funktionsnavn `c<id>_<værktøj>`, højst
+`CHAT_MAX_TOOLS`), kalder `openrouter_complete()` med system-prompt + historik og håndterer `tool_calls`:
+`readOnlyHint=true` udføres straks; alt andet skrives i `chat_pending` og returnerer `afventer`. `chat_decide()` låser
+rækken med `UPDATE … WHERE status='afventer'` (rowcount = 1), udfører eller afviser, og samtalen fortsætter, når intet
+venter. `_CHAT_RUNNING` forhindrer to samtidige kørsler af samme samtale. Svar fra værktøjer afkortes til 12.000 tegn.
+
+### 7b. AI-kald via OpenRouter (v7.25.0)
+
+Alle AI-kald går gennem `ai_chat(prompt, max_tokens, timeout)`: `POST {OPENROUTER_BASE_URL}/chat/completions`
+(standard `https://openrouter.ai/api/v1`) med `Authorization: Bearer OPENROUTER_API_KEY`, `X-Title: Command Center`
+og `HTTP-Referer: CC_PUBLIC_URL`, når den er sat (OpenRouters valgfri app-attribution). Kaldet går gennem den fælles
+`HTTP`-session, så `BudgetAdapter` tæller det som `ai`, og budgettets værtsnavn læses af `OPENROUTER_BASE_URL`.
+
+OpenRouter kan svare 200 med et `error`-objekt, når udbyderen bag modellen fejler. `ai_chat()` læser derfor `error`
+før `choices` og kaster `AIError` (en `requests.RequestException`) med OpenRouters besked, også ved tomt `choices` eller
+en tom besked. Eksisterende `except`-grene fanger den uændret, og nøglen indgår aldrig i fejlteksten.
+
+`AIMLAPI_KEY` bruges ikke længere. `warn_legacy_aimlapi()` kaldes i lifespan og giver en advarsel i opstartsloggen og en
+alarm (`ai`), når kun den gamle nøgle er sat.
+
 ## 8. API-budget
 
 `budget_spend()` tælles pr. kalendermåned i `settings` og kaster `BudgetExceeded` **før** kaldet sendes, når loftet er nået.
@@ -178,6 +217,9 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 
 ## 12. Versionshistorik (kort)
 
+- **v7.27.0** — Log ind fra WordPress med ét klik: `cc_sso_secret()`, `cc_sso_push()` (POST `/cc-link` i sync, kun ved ændring), `GET /cc-sso` med `cc_sso_verify()` (HMAC, udløb ±30 s, maks. 120 s levetid, `jti` én gang, kendt e-mail). Det døde `/cc-login`-flow fra v7.17.5 er fjernet
+- **v7.26.0** — Chat-fanen med MCP-connectors (GitHub, WordPress, Gmail, Google Drive m.fl.): MCP-klient (JSON + SSE, sessioner, sider), godkendelse af skrivende værktøjer (`chat_pending`), nøgler kun som hint i UI'et
+- **v7.25.0** — AI via OpenRouter i stedet for aimlapi: `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`, fælles `ai_chat()` med `AIError` for OpenRouters fejlsvar, budget på `openrouter.ai` og advarsel ved en tilbageblevet `AIMLAPI_KEY`
 - **v7.24.0** — Vækst-fanen: lokal indholdsoptimerer (`local_content_optimizer`, vægtet score + termdækning), konkurrent-sammenligning mod brugerangivne URL'er, indholdsplan (`content_briefs`) og manuel linkliste (`link_targets`) — ingen API-nøgle. UI'et er samtidig moderniseret: grupperet navigation, fanebeskrivelser og fælles visuel rytme for kort, felter og knapper
 - **v7.23.0** — Backup i UI: `POST /backup/now` og `POST /backup/restore` (kræver `GENDAN`), kort i fanen Moduler, `pre-restore`-backup før hver gendannelse
 - **v7.22.0** — Offline dashboard: Tailwind, Alpine og Chart.js serveres fra `app/static/vendor/` i stedet for CDN
@@ -287,7 +329,7 @@ ved hvert CI-løb, så tabellen og koden ikke kan glide fra hinanden ubemærket.
 | --- | --- |
 | Opstart og auth | `GET /setup`, `POST /setup`, `GET /login`, `POST /login`, `GET /logout` |
 | Brugere | `POST /users/invite` (mail med midlertidig kode), `POST /users/delete` (svar `del=ok|fejl` + `del_kind=slettet|sidste|findes-ikke|ugyldig`), `POST /users/password` |
-| Login fra WordPress | `POST /autopilot/login-link` (kræver session) laver en engangskode, gemmer `sha256` + `user_id` + `exp` i `settings.cc_login_code` og sender linket til pluginnet med `POST sgap/v1/login-link`. `GET /cc-login?code=…` validerer koden, sletter den i samme kald (engangsbrug, 10 min.) og opretter en normal session. Ugyldig eller brugt kode → `/login?cc=udloebet` med forklaring; koden slettes først når den er godkendt, så et forkert gæt ikke kan brænde linket |
+| Login fra WordPress | `POST /autopilot/login-link` (kræver session) sender adresse + nøgle til pluginnet nu (`cc_sso_push(force=True)`) og svarer i Social med `cc_link=ok|fejl`; `GET /cc-sso?t=<billet>` (uden session) logger ind med en signeret billet fra pluginnet og sender ellers til `/login?sso=ugyldig|udloebet|brugt|ukendt-bruger|ikke-forbundet|laast` |
 | API-nøgler | `POST /api-keys/create`, `POST /api-keys/revoke` (nøglen vises én gang og slettes fra `settings` i samme kald) |
 | MCP | `POST /mcp` — JSON-RPC 2.0 (`initialize`, `ping`, `tools/list`, `tools/call`) med Bearer-nøgle |
 | Dashboard | `GET /` |
@@ -295,6 +337,7 @@ ved hvert CI-løb, så tabellen og koden ikke kan glide fra hinanden ubemærket.
 | SEO og crawl | `POST /seo/audit`, `POST /seo/crawl`, `POST /seo/crawl/delete`, `POST /seo/linksuggest`, `POST /seo/rewrite`, `GET /api/crawl/status`, `GET /api/crawl/diff`, `GET /api/sitemap.xml`, `GET /api/redirects`, `GET /api/duplicates` |
 | Keywords | `POST /keywords/add`, `POST /keywords/delete`, `POST /keywords/check`, `POST /keywords/ideas`, `POST /keywords/difficulty`, `GET /api/visibility` |
 | Artikler | `POST /articles/generate`, `POST /articles/push`, `POST /articles/delete`, `POST /articles/autopilot`, `POST /articles/meta`, `POST /articles/score` |
+| Chat og connectors | `GET /api/chat/state`, `GET /api/chat/{cid}`, `POST /chat/send`, `POST /chat/approve` (`decision=godkend|afvis`), `POST /chat/delete` (JSON) · `POST /connectors/add`, `POST /connectors/refresh`, `POST /connectors/toggle`, `POST /connectors/delete` (redirect til `?tab=chat&conn=ok|fejl`) |
 | Vækst | `POST /backlinks/prospect`, `POST /backlinks/delete`, `POST /outreach/scan`, `POST /serp/discover`, `POST /serp/gap`, `POST /competitors/delete` |
 | Links, social og bro | `POST /links/check`, `POST /social/add`, `POST /social/delete`, `GET /social/export.csv`, `POST /social/to-autopilot`, `POST /autopilot/sync` |
 | Monitors og historik | `POST /monitors/add`, `POST /monitors/delete`, `POST /monitors/check`, `GET /api/health-history` |

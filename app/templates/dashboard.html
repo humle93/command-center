@@ -128,7 +128,7 @@
     </style>
 </head>
 {% if insecure %}<div class="bg-yellow-600 text-black text-xs text-center py-1.5 px-4 font-semibold">&Uacute;t&uacute;n HTTPS &mdash; login og adgangskoder sendes ukrypteret. S&aelig;t nginx + TLS op foran CC (se Install-dokumentationen).</div>{% endif %}
-<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: '{{ initial_tab }}', seoResult: null, seoLoading: false, crawl: null, histChart: null, histOpen: false, dups: null, healthChart: null, diff: null, redir: null, rewrite: null, growth: null, growthLoading: false, growthError: '', cmp: null, cmpLoading: false, cmpError: '' }">
+<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: '{{ initial_tab }}', seoResult: null, seoLoading: false, crawl: null, histChart: null, histOpen: false, dups: null, healthChart: null, diff: null, redir: null, rewrite: null, growth: null, growthLoading: false, growthError: '', cmp: null, cmpLoading: false, cmpError: '', chat: null, chatList: [], chatConns: [], chatSel: [], chatSelInit: false, chatBusy: false, chatError: '', chatInput: '' }">
 {% if env_password_warning %}
 <div class="bg-red-500/10 border-b border-red-500/40 text-red-300 text-xs text-center py-2 px-4">⚠️ {{ env_password_warning }}</div>
 {% endif %}
@@ -160,6 +160,7 @@
     <div class="max-w-7xl mx-auto cc-nav-inner flex items-center gap-1 overflow-x-auto">
         <div class="cc-nav-group">
             <button @click="tab='cockpit'" class="cc-nav-link" :class="tab==='cockpit' && 'is-active'">🧭 Cockpit</button>
+            <button @click="tab='chat'" class="cc-nav-link" :class="tab==='chat' && 'is-active'">💬 Chat</button>
         </div>
         <div class="cc-nav-group">
             <button @click="tab='seo'" class="cc-nav-link" :class="tab==='seo' && 'is-active'">🔍 SEO &amp; audit</button>
@@ -196,7 +197,7 @@
 
     {% if not ai_enabled or not wp_enabled %}
     <div class="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-3 text-xs text-amber-300">
-        Setup: AI {{ '✅' if ai_enabled else '❌ (AIMLAPI_KEY)' }} · WordPress {{ '✅' if wp_enabled else '❌ (WP_URL/WP_USER/WP_APP_PASSWORD)' }} · SerpAPI {{ '✅' if serpapi_enabled else '❌ (SERPAPI_KEY)' }} · Telegram {{ '✅' if telegram_enabled else '— (valgfrit)' }} — se .env.example
+        Setup: AI {{ '✅' if ai_enabled else '❌ (OPENROUTER_API_KEY)' }} · WordPress {{ '✅' if wp_enabled else '❌ (WP_URL/WP_USER/WP_APP_PASSWORD)' }} · SerpAPI {{ '✅' if serpapi_enabled else '❌ (SERPAPI_KEY)' }} · Telegram {{ '✅' if telegram_enabled else '— (valgfrit)' }} — se .env.example
     </div>
     {% endif %}
 
@@ -546,7 +547,7 @@
             {% endif %}
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
-            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Generér artikel {{ '(AI: Gemini via aimlapi)' if ai_enabled else '(skabelon — sæt AIMLAPI_KEY for AI)' }}</h2>
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Generér artikel {{ '(AI via OpenRouter)' if ai_enabled else '(skabelon — sæt OPENROUTER_API_KEY for AI)' }}</h2>
             <form action="/articles/generate" method="POST" class="flex gap-2">
                 <input type="text" name="keyword" placeholder="Emne / søgeord..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Generér</button>
@@ -596,7 +597,7 @@
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">🔗 Backlink-prospector</h2>
-            <p class="text-xs text-zinc-500 mb-3">Søg keyword → top 10 i Google → type + kontakt-mail + AI-outreach-draft. Kræver SERPAPI_KEY (AIMLAPI_KEY for AI-drafts).</p>
+            <p class="text-xs text-zinc-500 mb-3">Søg keyword → top 10 i Google → type + kontakt-mail + AI-outreach-draft. Kræver SERPAPI_KEY (OPENROUTER_API_KEY for AI-drafts).</p>
             <form action="/backlinks/prospect" method="POST" class="flex gap-2 mb-4">
                 <input type="text" name="keyword" placeholder="Keyword at finde links til..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Find muligheder</button>
@@ -1089,13 +1090,18 @@
                 {% if cc_link == 'ok' %}
                 <p class="text-[11px] text-emerald-300 mb-2">✅ {{ cc_msg }}</p>
                 {% elif cc_link == 'fejl' %}
-                <p class="text-[11px] text-rose-300 mb-2">❌ Linket kunne ikke lægges i WordPress: {{ cc_msg }}</p>
+                <p class="text-[11px] text-rose-300 mb-2">❌ Login-knappen kunne ikke forbindes: {{ cc_msg }}</p>
                 {% endif %}
+                <p class="text-[11px] mb-2 {{ 'text-emerald-300' if cc_sso.ok else 'text-zinc-400' }}">🔑 Knappen „Log ind i Command Center" i WordPress:
+                    {% if not cc_sso.public %}kræver <code>CC_PUBLIC_URL</code> (https) i .env
+                    {% elif cc_sso.ok %}forbundet{% if cc_sso.at %} <span class="text-zinc-600">({{ cc_sso.at }})</span>{% endif %}
+                    {% elif cc_sso.message %}ikke forbundet — {{ cc_sso.message }}
+                    {% else %}forbindes ved næste sync{% endif %}</p>
                 <div class="flex flex-wrap items-center gap-3">
                     <form action="/autopilot/login-link" method="POST">
-                        <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-2 rounded-xl text-xs">🔑 Log ind på Command Center</button>
+                        <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-2 rounded-xl text-xs">🔑 Forbind login-knappen nu</button>
                     </form>
-                    <span class="text-[10px] text-zinc-500">Lægger et engangslink i WordPress, så knappen der logger dig ind her — uden adgangskode. Linket holder 10 min. og virker én gang.</span>
+                    <span class="text-[10px] text-zinc-500">Giver knappen „Log ind i Command Center" i Steamgears (7.76+) adressen og en hemmelig nøgle. Et klik i WordPress logger dig ind her med en billet, der holder 1 minut og kun virker én gang — kun som en bruger med samme e-mail. Sker også automatisk ved hver sync.</span>
                 </div>
             </div>
             {% endif %}
@@ -1215,7 +1221,7 @@
                     <div class="text-zinc-500 truncate">{{ l.from_url }} → <span class="text-emerald-400">{{ l.to_url }}</span></div>
                 </div>
                 {% else %}
-                <p class="text-xs text-zinc-500">Ingen forslag endnu. Kør site-crawl først, og kræver AIMLAPI_KEY.</p>
+                <p class="text-xs text-zinc-500">Ingen forslag endnu. Kør site-crawl først, og kræver OPENROUTER_API_KEY.</p>
                 {% endfor %}
             </div>
         </div>
@@ -1577,6 +1583,143 @@
             </div>
         </div>
     </section>
+    <section x-show="tab === 'chat'" class="space-y-4" style="display: none;"
+             x-init="if (tab === 'chat') ccChatLoad(); $watch('tab', function (t) { if (t === 'chat') ccChatLoad(); })">
+        {% if not ai_enabled %}
+        <div class="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 text-xs text-amber-300">Chatten kræver <code>OPENROUTER_API_KEY</code> i .env. Connectors kan godt sættes op i forvejen.</div>
+        {% endif %}
+        <div class="grid lg:grid-cols-3 gap-4">
+            <div class="space-y-4">
+                <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+                    <div class="flex items-center justify-between mb-3">
+                        <h2 class="text-xs uppercase tracking-wider text-zinc-400">Samtaler</h2>
+                        <button type="button" @click="ccChatNew()" class="text-xs text-emerald-400 hover:text-emerald-300">+ Ny samtale</button>
+                    </div>
+                    <div class="space-y-1 max-h-72 overflow-y-auto">
+                        <template x-for="c in chatList" :key="c.id">
+                            <div class="flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs" :class="chat && chat.id === c.id ? 'bg-emerald-500/10 text-emerald-300' : 'text-zinc-300 hover:bg-zinc-800/60'">
+                                <button type="button" class="flex-1 text-left truncate" @click="ccChatOpen(c.id)" x-text="c.title || 'Samtale'"></button>
+                                <button type="button" class="text-zinc-600 hover:text-rose-400" @click="ccChatDelete(c.id)" aria-label="Slet samtale">✕</button>
+                            </div>
+                        </template>
+                        <p x-show="!chatList.length" class="text-xs text-zinc-500">Ingen samtaler endnu.</p>
+                    </div>
+                </div>
+                <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+                    <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">Connectors i samtalen</h2>
+                    <p class="text-[11px] text-zinc-500 mb-3">AI'en kan kun bruge værktøjer fra de valgte. 🔒 = værktøjer der ændrer noget og kræver din godkendelse.</p>
+                    <div class="space-y-1.5">
+                        <template x-for="c in chatConns.filter(function (x) { return x.enabled; })" :key="c.id">
+                            <label class="flex items-center gap-2 text-xs text-zinc-300">
+                                <input type="checkbox" class="accent-emerald-500" :value="String(c.id)" x-model="chatSel">
+                                <span x-text="c.name"></span>
+                                <span class="text-zinc-500" x-text="c.tool_count + ' værktøjer' + (c.write_count ? ' · ' + c.write_count + ' 🔒' : '')"></span>
+                                <span x-show="c.last_error" class="text-rose-400" title="Fejl ved sidste hentning">⚠</span>
+                            </label>
+                        </template>
+                        <p x-show="!chatConns.some(function (x) { return x.enabled; })" class="text-xs text-zinc-500">Ingen aktive connectors - tilføj en nedenfor. Chatten virker også uden.</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="lg:col-span-2 bg-zinc-900 border border-zinc-800 rounded-2xl p-5 flex flex-col">
+                <div class="flex items-center justify-between mb-3 gap-2">
+                    <h2 class="text-xs uppercase tracking-wider text-zinc-400 truncate" x-text="chat && chat.title ? chat.title : 'Ny samtale'">Ny samtale</h2>
+                    <span class="text-[11px] text-zinc-500 shrink-0">Model: {{ chat_model }}</span>
+                </div>
+                <div id="cc-chat-log" class="flex-1 min-h-[16rem] max-h-[60vh] overflow-y-auto space-y-2 pr-1">
+                    <p x-show="!chat || !chat.messages.length" class="text-xs text-zinc-500">Spørg om hvad som helst - fx "Hvilke åbne issues har command-center på GitHub?" eller "Find de 5 nyeste kladder på steamgears.eu".</p>
+                    <template x-for="(m, i) in (chat ? chat.messages : [])" :key="i">
+                        <div>
+                            <div x-show="m.role === 'user'" class="flex justify-end"><p class="max-w-[85%] rounded-2xl rounded-br-sm bg-emerald-500/10 border border-emerald-500/30 px-3 py-2 text-sm text-emerald-100 whitespace-pre-wrap" x-text="m.content"></p></div>
+                            <div x-show="m.role === 'assistant'"><p class="max-w-[90%] rounded-2xl rounded-bl-sm bg-zinc-950 border border-zinc-800 px-3 py-2 text-sm text-zinc-200 whitespace-pre-wrap" x-text="m.content"></p></div>
+                            <details x-show="m.role === 'call'" class="text-[11px] text-sky-300"><summary class="cursor-pointer">🔧 <span x-text="m.tool"></span></summary><pre class="mt-1 bg-zinc-950 border border-zinc-800 rounded-lg p-2 overflow-x-auto text-zinc-400 whitespace-pre-wrap" x-text="m.content"></pre></details>
+                            <details x-show="m.role === 'tool'" class="text-[11px] text-zinc-500"><summary class="cursor-pointer">↩︎ svar fra <span x-text="m.tool"></span></summary><pre class="mt-1 bg-zinc-950 border border-zinc-800 rounded-lg p-2 max-h-60 overflow-auto text-zinc-400 whitespace-pre-wrap" x-text="m.content"></pre></details>
+                        </div>
+                    </template>
+                    <template x-for="p in (chat ? chat.pending : [])" :key="'p' + p.id">
+                        <div class="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs space-y-2">
+                            <p class="text-amber-200">🔒 AI'en vil køre <strong x-text="p.tool"></strong> på <strong x-text="p.connector"></strong>. Det kan ændre noget - godkend kun hvis det er det, du vil.</p>
+                            <pre class="bg-zinc-950 border border-zinc-800 rounded-lg p-2 overflow-x-auto text-zinc-300 whitespace-pre-wrap" x-text="p.args"></pre>
+                            <div class="flex gap-2">
+                                <button type="button" @click="ccChatDecide(p.id, 'godkend')" :disabled="chatBusy" class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-3 py-1.5 rounded-lg">Godkend</button>
+                                <button type="button" @click="ccChatDecide(p.id, 'afvis')" :disabled="chatBusy" class="bg-rose-500/10 text-rose-400 border border-rose-500/30 px-3 py-1.5 rounded-lg">Afvis</button>
+                            </div>
+                        </div>
+                    </template>
+                    <p x-show="chatBusy" class="text-xs text-zinc-500 animate-pulse">Tænker og bruger værktøjer…</p>
+                </div>
+                <p x-show="chatError" x-text="chatError" class="mt-2 text-xs text-rose-400"></p>
+                <form class="mt-3 flex gap-2 items-end" @submit.prevent="ccChatSend()">
+                    <textarea x-model="chatInput" rows="2" placeholder="Skriv en besked… (Ctrl+Enter sender)" @keydown.ctrl.enter.prevent="ccChatSend()" @keydown.meta.enter.prevent="ccChatSend()" class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm"></textarea>
+                    <button :disabled="chatBusy || !(chatInput || '').trim()" class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-2 rounded-xl text-sm disabled:opacity-40">Send</button>
+                </form>
+            </div>
+        </div>
+
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">Connectors (MCP)</h2>
+            <p class="text-[11px] text-zinc-500 mb-3">Command Center forbinder sig som MCP-klient til eksterne servere (Streamable HTTP). Nøgler gemmes i databasen og vises aldrig igen - kun de sidste fire tegn.</p>
+            {% if connector_feedback %}
+            <div class="mb-3 rounded-xl border px-3 py-2 text-xs {{ 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' if connector_feedback.ok else 'border-rose-500/30 bg-rose-500/10 text-rose-300' }}">{{ connector_feedback.message }}</div>
+            {% endif %}
+            <div class="overflow-x-auto">
+                <table class="w-full text-xs">
+                    <thead class="text-zinc-500 text-left"><tr><th class="py-1 pr-3">Navn</th><th class="pr-3">Type</th><th class="pr-3 hidden md:table-cell">Adresse</th><th class="pr-3">Værktøjer</th><th class="pr-3">Status</th><th></th></tr></thead>
+                    <tbody>
+                    {% for c in connectors %}
+                    <tr class="border-t border-zinc-800 align-top">
+                        <td class="py-2 pr-3 text-zinc-200">{{ c.name }}{% if not c.enabled %} <span class="text-zinc-500">(slået fra)</span>{% endif %}</td>
+                        <td class="pr-3 text-zinc-400">{{ c.preset_label }}<br><span class="text-zinc-600">{{ c.auth_type }}{% if c.secret_hint %} · {{ c.secret_hint }}{% endif %}</span></td>
+                        <td class="pr-3 text-zinc-500 break-all max-w-[16rem] hidden md:table-cell">{{ c.url }}</td>
+                        <td class="pr-3 text-zinc-400">
+                            {{ c.tool_count }}{% if c.write_count %} · {{ c.write_count }} 🔒{% endif %}{% if c.tool_filter %}<br><span class="text-zinc-600">filter: {{ c.tool_filter }}</span>{% endif %}
+                            {% if c.tools %}<details class="mt-1"><summary class="cursor-pointer text-zinc-500">vis</summary><ul class="mt-1 space-y-0.5 max-h-48 overflow-y-auto">{% for t in c.tools %}<li title="{{ t.description }}">{{ '🔒 ' if not t.readOnly else '' }}{{ t.name }}</li>{% endfor %}</ul></details>{% endif %}
+                        </td>
+                        <td class="pr-3">{% if c.last_error %}<span class="text-rose-400">{{ c.last_error }}</span>{% elif c.tools_at %}<span class="text-emerald-400">OK</span> <span class="text-zinc-600">{{ c.tools_at }}</span>{% else %}<span class="text-zinc-500">ikke hentet</span>{% endif %}</td>
+                        <td class="text-right whitespace-nowrap space-x-2">
+                            <form action="/connectors/refresh" method="POST" class="inline"><input type="hidden" name="id" value="{{ c.id }}"><button class="text-emerald-400 hover:text-emerald-300">Hent værktøjer</button></form>
+                            <form action="/connectors/toggle" method="POST" class="inline"><input type="hidden" name="id" value="{{ c.id }}"><button class="text-zinc-400 hover:text-zinc-200">{{ 'Slå fra' if c.enabled else 'Slå til' }}</button></form>
+                            <form action="/connectors/delete" method="POST" class="inline" onsubmit="return confirm('Slet connectoren {{ c.name|e }}? Nøglen slettes også.')"><input type="hidden" name="id" value="{{ c.id }}"><button class="text-zinc-500 hover:text-rose-400">Slet</button></form>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="6" class="py-2 text-zinc-500">Ingen connectors endnu.</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
+            <form action="/connectors/add" method="POST" x-data="ccConnForm()" class="mt-4 grid md:grid-cols-2 gap-3 text-xs">
+                <label class="space-y-1"><span class="text-zinc-400">Skabelon</span>
+                    <select name="preset" x-model="preset" @change="applyPreset()" class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                        {% for key, p in connector_presets.items() %}<option value="{{ key }}">{{ p.label }}</option>{% endfor %}
+                    </select></label>
+                <label class="space-y-1"><span class="text-zinc-400">Navn</span>
+                    <input name="name" x-model="name" maxlength="60" required class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2"></label>
+                <label class="space-y-1 md:col-span-2"><span class="text-zinc-400">MCP-adresse (https)</span>
+                    <input name="url" x-model="url" :placeholder="placeholder" required class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2"></label>
+                <label class="space-y-1"><span class="text-zinc-400">Login</span>
+                    <select name="auth_type" x-model="auth" class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                        <option value="bearer">Bearer-token</option>
+                        <option value="basic">Brugernavn + adgangskode (Basic)</option>
+                        <option value="header">Nøgle i egen header</option>
+                        <option value="wp_env">WordPress fra .env (WP_USER/WP_APP_PASSWORD)</option>
+                        <option value="none">Intet login</option>
+                    </select></label>
+                <label class="space-y-1" x-show="auth === 'basic'"><span class="text-zinc-400">Brugernavn</span>
+                    <input name="username" autocomplete="off" class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2"></label>
+                <label class="space-y-1" x-show="auth === 'header'"><span class="text-zinc-400">Headernavn</span>
+                    <input name="auth_header" placeholder="X-API-Key" class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2"></label>
+                <label class="space-y-1" x-show="auth !== 'wp_env' && auth !== 'none'"><span class="text-zinc-400" x-text="auth === 'basic' ? 'Adgangskode / Application Password' : 'Nøgle / token'"></span>
+                    <input type="password" name="secret" autocomplete="new-password" class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2"></label>
+                <label class="space-y-1 md:col-span-2"><span class="text-zinc-400">Værktøjsfilter (valgfrit)</span>
+                    <input name="tool_filter" placeholder="fx list_*, search_issues, get_file_contents - tom = alle" class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2"></label>
+                <p class="md:col-span-2 text-[11px] text-zinc-500" x-text="hint"></p>
+                <div class="md:col-span-2"><button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Tilføj og hent værktøjer</button></div>
+            </form>
+        </div>
+    </section>
 </main>
 
 
@@ -1789,7 +1932,8 @@ if (document.getElementById('vischart')) loadVis();
         moduler: { title: 'Moduler', hint: 'Slå funktionsområder til og fra' },
         brugere: { title: 'Brugere', hint: 'Adgang, invitationer og MCP-nøgler' },
         alarms: { title: 'Alarmer', hint: 'Hvad der kræver din opmærksomhed' },
-        notes: { title: 'Noter', hint: 'Hurtige noter til arbejdsflowet' }
+        notes: { title: 'Noter', hint: 'Hurtige noter til arbejdsflowet' },
+        chat: { title: 'Chat', hint: 'Tal med AI\'en og giv den værktøjer fra GitHub, WordPress, Gmail, Drive m.fl.' }
     };
 
     // Den aktive fane skal altid vaere synlig i den vandrette navigation - ogsaa paa mobil.
@@ -1826,6 +1970,81 @@ if (document.getElementById('vischart')) loadVis();
             .then(function (d) { if (!d.ok) { s.cmpError = d.error || 'Sammenligningen fejlede'; } else { s.cmp = d; } })
             .catch(function () { s.cmpError = 'Netværksfejl - prøv igen'; })
             .finally(function () { s.cmpLoading = false; });
+    }
+
+    // ---- Chat + MCP-connectors (v7.26.0) ----
+    const CC_PRESETS = {{ connector_presets | tojson }};
+    function ccConnForm() {
+        return {
+            preset: 'github', name: '', url: '', auth: 'bearer', hint: '', placeholder: '',
+            init() { this.applyPreset(); },
+            applyPreset() {
+                const p = CC_PRESETS[this.preset] || {};
+                this.name = p.label || ''; this.url = p.url || ''; this.auth = p.auth_type || 'bearer';
+                this.hint = p.hint || ''; this.placeholder = p.placeholder || 'https://…/mcp';
+            }
+        };
+    }
+    function ccChatScroll() {
+        setTimeout(function () { const el = document.getElementById('cc-chat-log'); if (el) el.scrollTop = el.scrollHeight; }, 30);
+    }
+    function ccPost(path, data) {
+        return fetch(path, { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: new URLSearchParams(data) }).then(function (r) { return r.json(); });
+    }
+    function ccChatLoad() {
+        const s = ccState();
+        fetch('/api/chat/state').then(function (r) { return r.json(); }).then(function (d) {
+            s.chatList = d.conversations || []; s.chatConns = d.connectors || [];
+            if (!s.chatSelInit) {
+                s.chatSel = s.chatConns.filter(function (c) { return c.enabled && c.tool_count; }).map(function (c) { return String(c.id); });
+                s.chatSelInit = true;
+            }
+        });
+    }
+    function ccChatOpen(id) {
+        const s = ccState();
+        s.chatError = '';
+        fetch('/api/chat/' + id).then(function (r) { return r.json(); }).then(function (d) {
+            if (d.error) { s.chatError = d.error; return; }
+            s.chat = d;
+            if (d.connectors) { s.chatSel = d.connectors.split(','); }
+            ccChatScroll();
+        });
+    }
+    function ccChatNew() { const s = ccState(); s.chat = null; s.chatError = ''; }
+    function ccChatAfter(d) {
+        const s = ccState();
+        s.chatBusy = false;
+        if (!d.ok && d.error) { s.chatError = d.error; }
+        if (d.conversation_id) { ccChatOpen(d.conversation_id); ccChatLoad(); }
+    }
+    function ccChatFail() { const s = ccState(); s.chatBusy = false; s.chatError = 'Netværksfejl - prøv igen'; }
+    function ccChatSend() {
+        const s = ccState();
+        const text = (s.chatInput || '').trim();
+        if (!text || s.chatBusy) return;
+        s.chatBusy = true; s.chatError = '';
+        if (!s.chat) { s.chat = { id: null, title: text.slice(0, 60), messages: [], pending: [] }; }
+        s.chat.messages.push({ role: 'user', content: text });
+        s.chatInput = '';
+        ccChatScroll();
+        ccPost('/chat/send', { message: text, conversation_id: s.chat.id || '', connectors: s.chatSel.join(',') })
+            .then(ccChatAfter).catch(ccChatFail);
+    }
+    function ccChatDecide(id, decision) {
+        const s = ccState();
+        if (s.chatBusy) return;
+        s.chatBusy = true; s.chatError = '';
+        ccPost('/chat/approve', { id: id, decision: decision }).then(ccChatAfter).catch(ccChatFail);
+    }
+    function ccChatDelete(id) {
+        const s = ccState();
+        if (!confirm('Slet samtalen?')) return;
+        ccPost('/chat/delete', { id: id }).then(function () {
+            if (s.chat && s.chat.id === id) { s.chat = null; }
+            ccChatLoad();
+        });
     }
 </script>
 </body>

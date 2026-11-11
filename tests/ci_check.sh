@@ -64,16 +64,30 @@ DEL_ID=$(q "SELECT id FROM users WHERE email='slettes@example.dk'")
 check "delete: a second user can be deleted" \
     "$(curl -s -o /dev/null -b "$JAR" -X POST $U/users/delete -d id=$DEL_ID -w '%{redirect_url}' | grep -c 'del=ok')" "1"
 check "delete: the deleted user is gone" "$(q "SELECT COUNT(*) FROM users WHERE email='slettes@example.dk'")" "0"
-# v7.17.5: knappen i WordPress faar et engangslink fra CC - og det link logger ind én gang.
-check "cc-login: CC pushes a one-time link to WordPress" \
-    "$(curl -s -o /dev/null -b "$JAR" -X POST $U/autopilot/login-link -w '%{redirect_url}' | grep -c 'cc_link=ok')" "1"
-LINK=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['url'])" "$TMP/state.link")
-check "cc-login: the link points at this app" "$(printf '%s' "$LINK" | grep -c '^http://127.0.0.1:8765/cc-login?code=')" "1"
-curl -s -o /dev/null -c "$TMP/ccjar" "$LINK"
-check "cc-login: the link opens the dashboard" "$(curl -s -o /dev/null -b "$TMP/ccjar" -w '%{http_code}' $U/)" "200"
-check "cc-login: the button is in the Social tab" \
-    "$(curl -s -b "$JAR" "$U/?tab=social" | grep -c 'Log ind på Command Center')" "1"
-check "cc-login: the same link cannot be used twice" "$(curl -s -o /dev/null -w '%{redirect_url}' "$LINK" | sed "s|^$U||")" "/login?cc=udloebet"
+# v7.27.0: "Log ind i Command Center" i WordPress - signeret billet (60 s, én gang, kendt e-mail).
+# CI-serveren har ingen CC_PUBLIC_URL, saa knappen i Social skal forklare det i stedet for at sende noget.
+check "sso: without CC_PUBLIC_URL the Social button explains why" \
+    "$(curl -s -o /dev/null -b "$JAR" -X POST $U/autopilot/login-link -w '%{redirect_url}' | grep -c 'cc_link=fejl.*CC_PUBLIC_URL')" "1"
+check "sso: nothing was sent to WordPress" "$( [ -f "$TMP/state.cclink" ] && echo sendt || echo intet)" "intet"
+SSO_SECRET=$(python3 -c "import app.main as m; print(m.cc_sso_secret())")
+sso_ticket() { python3 - "$SSO_SECRET" "$1" <<'PY'
+import base64, hashlib, hmac, json, secrets, sys, time
+b = lambda raw: base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+now = int(time.time())
+p = b(json.dumps({"v": 1, "email": sys.argv[2], "login": "ci", "site": "http://127.0.0.1:8770/", "iat": now, "exp": now + 60,
+                  "jti": secrets.token_hex(16)}).encode())
+print(p + "." + b(hmac.new(sys.argv[1].encode(), p.encode(), hashlib.sha256).digest()))
+PY
+}
+TICKET=$(sso_ticket ciadmin@example.dk)
+curl -s -o /dev/null -c "$TMP/ssojar" "$U/cc-sso?t=$TICKET"
+check "sso: a signed ticket logs in and opens the dashboard" "$(curl -s -o /dev/null -b "$TMP/ssojar" -w '%{http_code}' $U/)" "200"
+check "sso: the same ticket cannot be used twice" "$(curl -s -o /dev/null -w '%{redirect_url}' "$U/cc-sso?t=$TICKET" | sed "s|^$U||")" "/login?sso=brugt"
+check "sso: an unknown e-mail gets no account" \
+    "$(curl -s -o /dev/null -w '%{redirect_url}' "$U/cc-sso?t=$(sso_ticket nobody@example.dk)" | sed "s|^$U||")" "/login?sso=ukendt-bruger"
+check "sso: the old one-time link route is gone" "$(curl -s -o /dev/null -b "$JAR" -w '%{http_code}' "$U/cc-login?code=x")" "404"
+check "sso: the button is in the Social tab" \
+    "$(curl -s -b "$JAR" "$U/?tab=social" | grep -c 'Forbind login-knappen nu')" "1"
 # --- v7.20.0: Cockpit viser budget-kort og job-heartbeat ---
 check "cockpit: budgetkort vises" "$(curl -s -b "$JAR" $U/ | grep -c 'API-budget denne m')" "1"
 check "cockpit: job-heartbeat vises" "$(curl -s -b "$JAR" $U/ | grep -c 'Planlagte jobs (heartbeat)')" "1"

@@ -56,9 +56,9 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.auth_ok(): return self.send(401, {})
         n = int(self.headers.get("content-length", 0)); data = json.loads(self.rfile.read(n) or b"{}")
-        if self.path == "/wp-json/sgap/v1/login-link":
-            open(STATE + ".link", "w").write(json.dumps(data))
-            return self.send(201, {"ok": True, "url": data.get("url"), "expires_in": data.get("expires_in")})
+        if self.path == "/wp-json/sgap/v1/cc-link":
+            open(STATE + ".cclink", "w").write(json.dumps(data))
+            return self.send(200, {"ok": True, "linked": bool(data.get("secret")), "url": data.get("url")})
         if self.path == "/wp-json/sgap/v1/drafts":
             drafts.append({"id": len(drafts) + 1, "status": "pending", **data})
             open(STATE + ".last", "w").write(json.dumps(data))

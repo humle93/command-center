@@ -1,9 +1,21 @@
-# Command Center v7.24 PRO
+# Command Center v7.27 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
+
+## Nyheder i v7.27
+
+- **Log ind fra WordPress med ét klik (v7.27.0)** — knappen **Log ind i Command Center** i Steamgears Autopilot (7.76+) logger nu direkte ind. Command Center sender sin adresse (`CC_PUBLIC_URL`) og en hemmelig nøgle til pluginnet (`POST /sgap/v1/cc-link`) ved hver sync; knappen signerer en billet (HMAC-SHA256, 60 sekunder, tilfældigt `jti`), og `GET /cc-sso` tjekker signatur, udløb og engangsbrug og logger kun ind som en bruger, der allerede findes med samme e-mail. Afviste billetter tæller med i login-låsen (5 fejl = 10 min.), og hvert login fra WordPress står under Alarmer. Det gamle engangslink (v7.17.5) er fjernet: det sendte til `/sgap/v1/login-link`, en rute pluginnet aldrig har haft, så det kunne ikke virke. Knappen **🔑 Forbind login-knappen nu** i fanen Social forbinder med det samme i stedet for at vente på næste sync
+
+## Nyheder i v7.26
+
+- **Chat med MCP-connectors (v7.26.0)** — ny fane **💬 Chat**, hvor du taler med AI'en (OpenRouter) og giver den værktøjer fra eksterne MCP-servere: **GitHub** (officiel server), dine **WordPress-sites** (Steamgears via `.env` eller ethvert site med WordPress MCP Adapter), **WordPress.com**, **Gmail**, **Google Drive** og enhver anden MCP-server med Streamable HTTP. Værktøjer, der kun læser, kører automatisk; alt, der ændrer noget (sende mail, slette et indlæg, lukke et issue), venter på, at du trykker **Godkend** i chatten. Nøgler gemmes i databasen og vises aldrig igen (kun de sidste fire tegn), connector-adresser går gennem SSRF-guarden, og hver bruger ser kun sine egne samtaler. Gmail, Drive og WordPress.com kræver OAuth hos udbyderen: indsæt URL + token fra en MCP-server/gateway — login med OAuth direkte fra Command Center er ikke bygget endnu
+
+## Nyheder i v7.25
+
+- **AI via OpenRouter (v7.25.0)** — alle AI-funktioner (artikler, outreach-drafts, interne link-forslag, meta-rewrites og AI-synlighed) kalder nu OpenRouter i stedet for aimlapi. Sæt `OPENROUTER_API_KEY` (fra openrouter.ai/keys) og vælg model med `AI_MODEL` som OpenRouter-slug (`udbyder/model`). De tre kaldesteder er samlet i én `ai_chat()`, som også forstår OpenRouters fejlsvar, og månedsloftet `AI_MONTHLY_LIMIT` tæller nu kald til `openrouter.ai`. Står kun den gamle `AIMLAPI_KEY` i `.env`, bruges den ikke, men opstarten skriver en advarsel og lægger en alarm, så AI ikke forsvinder i stilhed
 
 ## Nyheder i v7.24
 
@@ -50,9 +62,10 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 
 ## Funktioner
 
+- 💬 **Chat** — tal med AI'en og giv den værktøjer fra MCP-connectors (GitHub, WordPress, Gmail, Google Drive m.fl.); skrivende værktøjer kræver din godkendelse
 - 🎛️ **Cockpit** — domæneovervågning (uptime, svartid, SSL), opdaterings-panel og alarmer
 - 🔍 **SEO Scanner** — deep audit af enkelt side (20+ vægtede kontroller inkl. focus keyword, læsbarhed, mixed content, schema, OG/Twitter) + **site-crawl** med score per side, robots.txt/sitemap-tjek og crawl-diff mod forrige crawl
-- ✍️ **Artikler** — AI-generering (Gemini via aimlapi) eller skabelon, **push til WordPress som udkast**, **fakta-prompt med SerpAPI-konkurrentanalyse**, autopilot (idé → artikel → WP-kladde) og **kvalitetsgate** før publicering
+- ✍️ **Artikler** — AI-generering (via OpenRouter, model i `AI_MODEL`) eller skabelon, **push til WordPress som udkast**, **fakta-prompt med SerpAPI-konkurrentanalyse**, autopilot (idé → artikel → WP-kladde) og **kvalitetsgate** før publicering
 - 🎯 **SEO-strategi** — AdSense / Affiliate / Backlink-vækst styrer AI-artiklernes stil + længde og autopilotens arbejde, med automatisk pre-flight-checkliste
 - 🌱 **Growth Pack** — backlink-prospector (SerpAPI top 10 → sitetype + kontakt-e-mail + AI-outreach-draft), keyword-ideer via Google/DDG-autocomplete, visibility-index
 - 🎯 **Keywords** — Google-positioner via SerpAPI (dagligt kl. 06:00), sværhedsgrads-heuristik, content gap mod top 10
@@ -71,7 +84,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 
 ![Cockpit](docs/img/cc-cockpit.png)
 
-Cockpit med opdaterings-panel og alarmer. Login-siden og alle 15 faner ligger i `docs/img/`
+Cockpit med opdaterings-panel og alarmer. Login-siden og alle 16 faner ligger i `docs/img/`
 (`cc-login.png`, `cc-cockpit.png` … `cc-notes.png`); billederne er taget med
 `python3 scripts/screenshots.py` mod den kørende app, og samme kommando opdaterer dem — se
 [manualens afsnit om screenshots](docs/Command_Center_Bruger_og_Systemmanual.md#opdater-screenshots).
@@ -145,7 +158,7 @@ Command Center og WordPress-pluginnet **Steamgears Autopilot** snakker sammen vi
 - **WP-Cron holdes i gang**: CC kalder `wp-cron.php` hvert 5. min, så pluginnets job (udgivelse, selvtjek) kører til tiden, selvom sitet har få besøg
 - **Pluginnet ser CC**: hvert kald sender `X-Command-Center: <version>`; Steamgears Autopilot 7.33+ viser "Command Center connected" i sit selvtjek og melder et problem, hvis CC har været tavs i over 2 timer
 - **"→ Autopilot"** sender et opslag som kladde til pluginnet (godkendes i WordPress under Steamgears → AI Drafts). Opslaget sendes **kun én gang**: rækken låses før kaldet, så et dobbeltklik eller et genforsøg ikke giver to kladder. Svarer WordPress ikke (timeout), bliver status "sendt? (svar udeblev)" — tjek AI Drafts, før du sender igen
-- **Log ind på Command Center fra WordPress** — knappen **🔑 Log ind på Command Center** i fanen Social lægger et engangslink i pluginnet (`POST /login-link` på `sgap/v1`, gemt som option), og knappen i WordPress åbner det. Linket logger dig ind på CC uden adgangskode: koden gemmes kun som sha256, virker **én gang** og udløber efter 10 minutter. Er den brugt eller udløbet, forklarer login-siden det — så en gammel knap ikke ser ud som et brudt login. Retningen er stadig CC → site
+- **Log ind fra WordPress med ét klik (v7.27)** — Command Center sender sin adresse (`CC_PUBLIC_URL`) og en hemmelig nøgle til pluginnet (`POST /cc-link` på `sgap/v1`, Steamgears Autopilot 7.76+) ved hver sync, kun når noget har ændret sig. Knappen **Log ind i Command Center** i WordPress signerer en billet (HMAC-SHA256, 60 s, `jti`), og `GET /cc-sso` logger ind som brugeren med samme e-mail. **🔑 Forbind login-knappen nu** i fanen Social forbinder med det samme. Uden `CC_PUBLIC_URL` (https) forbindes intet, og fanen siger hvorfor
 - Slå til/fra under Moduler ("Autopilot-bro"). Retningen er altid CC → site, så CC kan blive på 127.0.0.1
 - **Begge sider viser, hvornår CC sidst kaldte**: hvert kald har `X-Command-Center`-headeren, så WordPress noterer tid, version, rute og bruger (`sgap_cc_seen`). Pluginnets kort viser alderen (`live` / `late` / `silent`), og fanen Social viser **WordPress' eget svar** — samme tal, regnet ud ved visning. Er broen brudt, siger begge sider det i stedet for at se stille ud
 
@@ -165,7 +178,7 @@ skriver alle filer (inkl. `deploy/nginx-command-center.conf` og `deploy/command-
 - **Backup**: `app/backups/cc-daglig-*.db` (14 gemmes) + `cc-pre-update-*.db` før hver opdatering. Gendan fra Moduler-fanen (skriv `GENDAN`)
 - **Health**: `/health` (200, eller 503 ved kritisk DB/disk-tilstand) viser også månedens API-forbrug
 - **Tests**: `python3 tests/test_v8_features.py` (enhedstests), `bash tests/ci_check.sh` (boot + alle sider + auth + WordPress-bro + link-audit)
-- **Screenshots**: `python3 scripts/screenshots.py` tager login-siden og alle 15 faner ind i `docs/img/` (kræver `pip install playwright` + `python3 -m playwright install chromium`; kør mod en kørende app med `--base/--user/--password`). CI **fejler**, hvis billederne er ældre end dashboard-skabelonen — skriv `[skip screenshots]` i commit-beskeden, når ændringen ikke påvirker udseendet
+- **Screenshots**: `python3 scripts/screenshots.py` tager login-siden og alle 16 faner ind i `docs/img/` (kræver `pip install playwright` + `python3 -m playwright install chromium`; kør mod en kørende app med `--base/--user/--password`). CI **fejler**, hvis billederne er ældre end dashboard-skabelonen — skriv `[skip screenshots]` i commit-beskeden, når ændringen ikke påvirker udseendet
 - **Fælles agentregler i alle repoer**: `bash scripts/agents_md_rollout.sh --dry-run` viser planen, og uden `--dry-run` lægger den `AGENTS.md` ind i alle dine repoer som branch + PR (kræver `gh` logget ind). En eksisterende fil overskrives kun med `--overwrite`, og `main` røres aldrig
 - **Scripts i `scripts/`**: alle otte har samme header — `navn - formål`, `Brug:`, `Kraever:` og `Sidst aendret` — og er eksekverbare. `bash scripts/update.sh -h` (og `--help` på de øvrige med flag) læser headeren, så hjælpen ikke kan drive fra scriptet. Versionsnumre står ikke i headere: de læses fra `APP_VERSION` i `app/main.py`
 
@@ -231,7 +244,7 @@ og handoff, `AGENTS.md` er de korte regler for agenter.
 
 - **Brugere**: PBKDF2-SHA256 med salt pr. bruger; sessioner er HttpOnly-cookies (30 dage) gemt som `sha256(id)` i databasen, så en DB-kopi ikke giver adgang. Skift af adgangskode logger dine andre sessioner ud.
 - **Cookie/HTTPS**: cookien sættes `Secure` når appen ser https (kræver `X-Forwarded-Proto` bag proxy — se nginx-afsnittet).
-- **API-budget**: SerpAPI og aimlapi tælles pr. måned og stoppes ved loftet (`SERPAPI_MONTHLY_LIMIT`, `AI_MONTHLY_LIMIT`), med alarm ved 80 % og 100 %. Forbruget vises på Cockpit.
+- **API-budget**: SerpAPI og AI-kald til OpenRouter tælles pr. måned og stoppes ved loftet (`SERPAPI_MONTHLY_LIMIT`, `AI_MONTHLY_LIMIT`), med alarm ved 80 % og 100 %. Forbruget vises på Cockpit.
 - **Job-heartbeat**: hvert planlagt job skriver sin sidste kørsel; forsinkede eller fejlede jobs alarmeres (v7.20).
 - Default binding er 127.0.0.1 — sæt aldrig `0.0.0.0` uden reverse proxy + TLS.
 - **SSRF**: alle udgående kald med en URL fra et felt går gennem `safe_request()`. Loopback, private net, link-local (`169.254.169.254` = sky-metadata), reserverede adresser og navne som `.local`/`.internal` afvises, og en viderestilling tjekkes hop for hop — så en 302 ikke kan føre ind i det lokale net. Afvisningen forklares i formularen. Skal CC måle en intern side, åbner `CC_SSRF_ALLOW=vaert.ditdomaene` for netop den værtsadresse.
@@ -241,5 +254,5 @@ og handoff, `AGENTS.md` er de korte regler for agenter.
 - Dashboardet henter Tailwind, Alpine.js og Chart.js lokalt fra `app/static/vendor/` (siden v7.22), så det virker uden internetadgang. Login-siden er helt selvstændig.
 - Opdatering kræver `GITHUB_TOKEN`; ændringer i `requirements.txt` rapporteres men installeres først ved næste `./run.sh`.
 - `install.sh` indeholder kopier af projektets filer (CI tjekker at de matcher); ret derfor altid kildefilerne og kør regen, ikke installeren.
-- Screenshots i `docs/img/` er taget med `python3 scripts/screenshots.py` mod v7.24-UI'et (alle 15 faner, inkl. Vækst); kør scriptet igen efter større UI-ændringer — CI fejler, hvis du glemmer det.
+- Screenshots i `docs/img/` er taget med `python3 scripts/screenshots.py` mod v7.26-UI'et (alle 16 faner, inkl. Chat); kør scriptet igen efter større UI-ændringer — CI fejler, hvis du glemmer det.
 - **Vækst måler tekst, ikke markedet**: Surfer, Ahrefs og Semrush bygger på egne webindekser og søgedata. Vækst-fanen tæller ord og termer i det indhold, du giver den, og henter kun de konkurrentsider, du selv angiver — derfor ingen søgevolumen, sværhedsgrad, placeringer eller backlink-profiler.

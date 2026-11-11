@@ -6,11 +6,12 @@ Brug:
     python3 scripts/screenshots.py --base http://127.0.0.1:8099 --user demo --password 'xxx'
     python3 scripts/screenshots.py --only cockpit,alarms,notes
     python3 scripts/screenshots.py --viewport          # kun det synlige omraade
+    CC_CHROMIUM_PATH=/sti/til/chrome python3 scripts/screenshots.py   # brug en installeret Chromium
 
 Billederne skrives til docs/img/ som cc-login.png og cc-<fane>.png.
 Kraever (kun for dette script - appen selv bruger det ikke):
     pip install playwright && python3 -m playwright install chromium
-Sidst aendret: 4. november 2026
+Sidst aendret: 11. november 2026
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ import sys
 # (Alpine-fane, filnavn uden .png) - holdes i takt med nav-knapperne i dashboard.html
 TABS = [
     ("cockpit", "cc-cockpit"),
+    ("chat", "cc-chat"),
     ("seo", "cc-seo"),
     ("keywords", "cc-keywords"),
     ("articles", "cc-articles"),
@@ -85,7 +87,10 @@ def shot(page, path: str, full_page: bool, written: list) -> None:
 def capture(pw, args, tabs, out_dir, written, problems) -> None:
     base = args.base.rstrip("/")
     try:
-        browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+        # CC_CHROMIUM_PATH: brug en allerede installeret Chromium i stedet for Playwrights egen
+        # (fx naar pip-pakken er nyere end browseren, der ligger paa maskinen).
+        exe = os.environ.get("CC_CHROMIUM_PATH") or None
+        browser = pw.chromium.launch(executable_path=exe, args=["--no-sandbox", "--disable-dev-shm-usage"])
     except Exception as exc:
         raise SetupError("Kunne ikke starte Chromium (%s). Kør: python3 -m playwright install "
                          "--with-deps chromium" % str(exc).splitlines()[0])

@@ -59,7 +59,7 @@ og en app der starter mod et fremmed skema kan ændre tabeller undervejs. Beslut
 | Data | Hvad der sker |
 | --- | --- |
 | Brugere og adgangskode-hashes | oprettes igen (standardbruger fra `.env` eller via `/setup`, resten i fanen **Brugere** eller med `scripts/user_create.py`) |
-| SerpAPI, aimlapi, WordPress, Telegram | kopieres fra den gamle `.env` ind i den nye |
+| SerpAPI, WordPress, Telegram | kopieres fra den gamle `.env` ind i den nye; AI kræver nu `OPENROUTER_API_KEY` (en gammel `AIMLAPI_KEY` bruges ikke) |
 | Artikler, søgeord, planlagte opslag | starter tomt. Skal de med, gøres det som et **separat** arbejde med en gennemgang af skemaet først — ikke som en del af cutover |
 
 ### 3.2 Adresse: fast domæne, ikke `trycloudflare`

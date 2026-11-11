@@ -1,7 +1,7 @@
 # Command Center — Roadmap
 
 Status pr. **10. november 2026 (v7.24.0)**. Koden er 5.972 linjer i `app/main.py`, 86 ruter, 31 tabeller,
-8 jobs, 11 moduler og 15 faner. Rækkefølgen i "Næste" er den anbefalede prioritering: sikkerhed og
+8 jobs, 11 moduler og 16 faner. Rækkefølgen i "Næste" er den anbefalede prioritering: sikkerhed og
 driftsstabilitet før nye features.
 
 **Genoptrænet 3. november 2026.** Listen er gennemgået mod koden — ikke mod tidligere noter. Tre punkter
@@ -30,6 +30,7 @@ findes.
 
 | Version | Indhold |
 | --- | --- |
+| **v7.26.0** | **Chat med MCP-connectors** — fanen 💬 Chat: AI via OpenRouter med værktøjer fra eksterne MCP-servere (GitHub, Steamgears/WordPress via `.env`, WordPress MCP Adapter, WordPress.com, Gmail, Google Drive, andre) · egen MCP-klient (Streamable HTTP, JSON + SSE, sessioner, sider) · læseværktøjer kører straks, skrivende venter på Godkend/Afvis · nøgler kun som hint i UI'et, SSRF-guard på adresser · 45 nye checks i `tests/test_v8_features.py` |
 | **v7.25.0** | **AI via OpenRouter** — aimlapi er erstattet af OpenRouter: `OPENROUTER_API_KEY` + `AI_MODEL` (OpenRouter-slug) og valgfri `OPENROUTER_BASE_URL` · de tre AI-kaldesteder samlet i `ai_chat()` med `AIError` for fejlsvar · AI-budgettet tæller `openrouter.ai` · advarsel + alarm når kun `AIMLAPI_KEY` står i `.env` · 15 nye checks i `tests/test_v8_features.py` |
 | **v7.24.0** | **Vækst uden API-nøgle** — fanen 🚀 Vækst samler fire lokale værktøjer inspireret af Surfer, Ahrefs, Semrush og BabyLoveGrowth: indholdsoptimerer med vægtet 0-100-score, termdækning og prioriteret fix-liste (`local_content_optimizer`) · sammenligning mod op til tre konkurrent-URL'er, som brugeren selv angiver (`compare_with_competitors`) · indholdsplan med briefs, mål for ord/H2 og overskrifter (`content_briefs`) · manuel linkliste med kontakt og status (`link_targets`) · **UI moderniseret**: grupperet navigation, fanebeskrivelser, fælles kort-, felt- og knapstil · begge testsuiter dækker score, termtælling, konkurrent-gab, briefs, linkliste og at intet kræver `SERPAPI_KEY` eller `AIMLAPI_KEY` |
 | **v7.23.0** | **Backup/restore i UI** (roadmap 2): fanen Moduler viser alle gyldige `backups/`-filer, knapperne "Tag backup nu" og "Gendan" · gendannelse kræver at skrive `GENDAN` · kun filer på formatet `cc-<tag>-YYYYMMDD-HHMM.db` accepteres, med integritetstjek og tjek af tabellen `users` · en `pre-restore`-backup laves først, og fejler den, sker der intet · enhedstests dækker navnevalidering, bekræftelse, ugyldig fil og en rigtig gendannelse |
@@ -70,6 +71,9 @@ findes.
 | 5 | **Alarmer, resten** | Dedup, stille timer, backoff og fire kanaler er færdige (v7.12). Tilbage: maintenance windows, ugentlig digest og eventuelt Apprise som ekstra kanal | Resten er "nice to have" nu hvor spam-problemet er løst — derfor sidst i rækken | S |
 
 ## Senere / idéer
+
+- **OAuth til connectors** (Gmail, Google Drive, WordPress.com): i dag skal man indsætte URL + token fra en MCP-server/gateway. Et rigtigt OAuth-flow (authorization code + PKCE, refresh-tokens, krypteret lagring) ville gøre dem til ét klik. Samme arbejde som MCP fase 3
+- **Krypterede connector-nøgler**: `mcp_connectors.secret` ligger i klartekst i databasen (og dermed i backups) — kryptér med en nøgle fra `.env`
 
 - **Planlagt crawl** (ugentligt) med alarm ved score-fald, og crawl pr. domæne i stedet for én global
 - **Rank-tracking i dybden**: device, geo, SERP-features (inkl. AI Overviews), konkurrent-positioner,

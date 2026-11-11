@@ -1,9 +1,13 @@
-# Command Center v7.25 PRO
+# Command Center v7.26 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
+
+## Nyheder i v7.26
+
+- **Chat med MCP-connectors (v7.26.0)** — ny fane **💬 Chat**, hvor du taler med AI'en (OpenRouter) og giver den værktøjer fra eksterne MCP-servere: **GitHub** (officiel server), dine **WordPress-sites** (Steamgears via `.env` eller ethvert site med WordPress MCP Adapter), **WordPress.com**, **Gmail**, **Google Drive** og enhver anden MCP-server med Streamable HTTP. Værktøjer, der kun læser, kører automatisk; alt, der ændrer noget (sende mail, slette et indlæg, lukke et issue), venter på, at du trykker **Godkend** i chatten. Nøgler gemmes i databasen og vises aldrig igen (kun de sidste fire tegn), connector-adresser går gennem SSRF-guarden, og hver bruger ser kun sine egne samtaler. Gmail, Drive og WordPress.com kræver OAuth hos udbyderen: indsæt URL + token fra en MCP-server/gateway — login med OAuth direkte fra Command Center er ikke bygget endnu
 
 ## Nyheder i v7.25
 
@@ -54,6 +58,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 
 ## Funktioner
 
+- 💬 **Chat** — tal med AI'en og giv den værktøjer fra MCP-connectors (GitHub, WordPress, Gmail, Google Drive m.fl.); skrivende værktøjer kræver din godkendelse
 - 🎛️ **Cockpit** — domæneovervågning (uptime, svartid, SSL), opdaterings-panel og alarmer
 - 🔍 **SEO Scanner** — deep audit af enkelt side (20+ vægtede kontroller inkl. focus keyword, læsbarhed, mixed content, schema, OG/Twitter) + **site-crawl** med score per side, robots.txt/sitemap-tjek og crawl-diff mod forrige crawl
 - ✍️ **Artikler** — AI-generering (via OpenRouter, model i `AI_MODEL`) eller skabelon, **push til WordPress som udkast**, **fakta-prompt med SerpAPI-konkurrentanalyse**, autopilot (idé → artikel → WP-kladde) og **kvalitetsgate** før publicering
@@ -75,7 +80,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 
 ![Cockpit](docs/img/cc-cockpit.png)
 
-Cockpit med opdaterings-panel og alarmer. Login-siden og alle 15 faner ligger i `docs/img/`
+Cockpit med opdaterings-panel og alarmer. Login-siden og alle 16 faner ligger i `docs/img/`
 (`cc-login.png`, `cc-cockpit.png` … `cc-notes.png`); billederne er taget med
 `python3 scripts/screenshots.py` mod den kørende app, og samme kommando opdaterer dem — se
 [manualens afsnit om screenshots](docs/Command_Center_Bruger_og_Systemmanual.md#opdater-screenshots).
@@ -169,7 +174,7 @@ skriver alle filer (inkl. `deploy/nginx-command-center.conf` og `deploy/command-
 - **Backup**: `app/backups/cc-daglig-*.db` (14 gemmes) + `cc-pre-update-*.db` før hver opdatering. Gendan fra Moduler-fanen (skriv `GENDAN`)
 - **Health**: `/health` (200, eller 503 ved kritisk DB/disk-tilstand) viser også månedens API-forbrug
 - **Tests**: `python3 tests/test_v8_features.py` (enhedstests), `bash tests/ci_check.sh` (boot + alle sider + auth + WordPress-bro + link-audit)
-- **Screenshots**: `python3 scripts/screenshots.py` tager login-siden og alle 15 faner ind i `docs/img/` (kræver `pip install playwright` + `python3 -m playwright install chromium`; kør mod en kørende app med `--base/--user/--password`). CI **fejler**, hvis billederne er ældre end dashboard-skabelonen — skriv `[skip screenshots]` i commit-beskeden, når ændringen ikke påvirker udseendet
+- **Screenshots**: `python3 scripts/screenshots.py` tager login-siden og alle 16 faner ind i `docs/img/` (kræver `pip install playwright` + `python3 -m playwright install chromium`; kør mod en kørende app med `--base/--user/--password`). CI **fejler**, hvis billederne er ældre end dashboard-skabelonen — skriv `[skip screenshots]` i commit-beskeden, når ændringen ikke påvirker udseendet
 - **Fælles agentregler i alle repoer**: `bash scripts/agents_md_rollout.sh --dry-run` viser planen, og uden `--dry-run` lægger den `AGENTS.md` ind i alle dine repoer som branch + PR (kræver `gh` logget ind). En eksisterende fil overskrives kun med `--overwrite`, og `main` røres aldrig
 - **Scripts i `scripts/`**: alle otte har samme header — `navn - formål`, `Brug:`, `Kraever:` og `Sidst aendret` — og er eksekverbare. `bash scripts/update.sh -h` (og `--help` på de øvrige med flag) læser headeren, så hjælpen ikke kan drive fra scriptet. Versionsnumre står ikke i headere: de læses fra `APP_VERSION` i `app/main.py`
 
@@ -245,5 +250,5 @@ og handoff, `AGENTS.md` er de korte regler for agenter.
 - Dashboardet henter Tailwind, Alpine.js og Chart.js lokalt fra `app/static/vendor/` (siden v7.22), så det virker uden internetadgang. Login-siden er helt selvstændig.
 - Opdatering kræver `GITHUB_TOKEN`; ændringer i `requirements.txt` rapporteres men installeres først ved næste `./run.sh`.
 - `install.sh` indeholder kopier af projektets filer (CI tjekker at de matcher); ret derfor altid kildefilerne og kør regen, ikke installeren.
-- Screenshots i `docs/img/` er taget med `python3 scripts/screenshots.py` mod v7.24-UI'et (alle 15 faner, inkl. Vækst); kør scriptet igen efter større UI-ændringer — CI fejler, hvis du glemmer det.
+- Screenshots i `docs/img/` er taget med `python3 scripts/screenshots.py` mod v7.26-UI'et (alle 16 faner, inkl. Chat); kør scriptet igen efter større UI-ændringer — CI fejler, hvis du glemmer det.
 - **Vækst måler tekst, ikke markedet**: Surfer, Ahrefs og Semrush bygger på egne webindekser og søgedata. Vækst-fanen tæller ord og termer i det indhold, du giver den, og henter kun de konkurrentsider, du selv angiver — derfor ingen søgevolumen, sværhedsgrad, placeringer eller backlink-profiler.

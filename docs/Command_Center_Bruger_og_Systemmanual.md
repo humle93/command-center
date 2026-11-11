@@ -98,7 +98,7 @@ Hvert login giver en ny session, og den gamle session slettes. Ændringer, der s
 
 ## Guidet fanerækkefølge
 
-Navigationen er delt i grupper — **overblik**, **analyse** (SEO, Keywords, Vækst), **produktion** (Indhold, Links, Spy), **drift** (Social, Monitors, Alarmer) og **system** (AI, Pro, Moduler, Brugere, Noter) — og hver fane har en kort beskrivelse øverst. Afsnittene nedenfor følger samme rækkefølge som et normalt arbejdsflow.
+Navigationen er delt i grupper — **overblik** (Cockpit og Chat), **analyse** (SEO, Keywords, Vækst), **produktion** (Indhold, Links, Spy), **drift** (Social, Monitors, Alarmer) og **system** (AI, Pro, Moduler, Brugere, Noter) — og hver fane har en kort beskrivelse øverst. Afsnittene nedenfor følger samme rækkefølge som et normalt arbejdsflow.
 
 ### 1. Cockpit — dit daglige overblik
 
@@ -204,6 +204,32 @@ Fanen **🚀 Vækst** er Command Centers egen udgave af det, Surfer, Ahrefs, Sem
 
 - Hurtige workflow-noter: skriv en note, se de nyeste og slet enkelte (`/notes/add`, `/notes/delete`). Gemmes i tabellen `notes`
 
+### Chat og connectors (v7.26)
+
+![Chat](img/cc-chat.png)
+
+Fanen **💬 Chat** er en samtale med AI'en (OpenRouter, `CHAT_MODEL` eller `AI_MODEL`), hvor modellen kan bruge værktøjer fra de **connectors**, du vælger i venstre side. En connector er en ekstern MCP-server; Command Center forbinder sig som klient (Streamable HTTP).
+
+**Tilføj en connector** nederst på fanen: vælg en skabelon, ret navn/adresse, vælg login og indsæt nøglen. Ved "Tilføj og hent værktøjer" henter Command Center værktøjslisten med det samme og viser antallet — 🔒 markerer værktøjer, der ændrer noget.
+
+| Skabelon | Adresse | Login |
+| --- | --- | --- |
+| GitHub | `https://api.githubcopilot.com/mcp/` | Personal access token (Bearer) fra github.com/settings/tokens. Brug værktøjsfilteret (fx `list_*, get_*, search_*`), serveren har mange værktøjer |
+| Steamgears (WordPress) | `WP_URL` + `/wp-json/mcp/novamira` | `WP_USER` + `WP_APP_PASSWORD` fra `.env` — ingen nøgle i formularen |
+| WordPress-site (MCP Adapter) | `https://ditsite.dk/wp-json/mcp/mcp-adapter-default-server` | Brugernavn + Application Password. Kræver pluginnet WordPress MCP Adapter |
+| WordPress.com, Gmail, Google Drive | URL fra din MCP-server/gateway | Token fra samme sted. Udbyderne kræver OAuth; login med OAuth direkte fra Command Center er ikke bygget endnu |
+| Anden MCP-server | enhver `https://…` | Bearer, Basic, nøgle i egen header eller intet login |
+
+**Sådan virker en samtale**
+
+- Værktøjer med `readOnlyHint` kører automatisk; svaret ses under "↩︎ svar fra …".
+- Alle andre værktøjer (også dem uden annotation) stopper chatten med et gult kort: **Godkend** kører kaldet, **Afvis** fortæller AI'en, at du sagde nej. Mens et kald venter, kan der ikke sendes nye beskeder i samtalen, og hvert kald kan kun besluttes én gang. Godkendte kald logges under Alarmer (info).
+- Indhold fra værktøjer (mails, sider, issues) er data: AI'en får besked på ikke at følge instruktioner i det.
+- Højst 8 værktøjsrunder pr. besked (`CHAT_MAX_STEPS`) og 80 værktøjer i alt pr. samtale; skriv videre for at fortsætte.
+- Samtaler er personlige: andre brugere kan hverken se dem eller godkende dine kald.
+
+**Sikkerhed:** nøglen gemmes i `mcp_connectors.secret` og sendes aldrig til browseren igen — kun de sidste fire tegn. Database-backups indeholder derfor nøglerne. Adresser skal bruge `https://` og går gennem SSRF-guarden (`CC_SSRF_ALLOW` åbner for en intern vært), og viderestillinger følges ikke. Chatten tæller med i `AI_MONTHLY_LIMIT` (ét kald pr. runde).
+
 ### 12. Moduler
 
 - Slå de 11 funktionsområder fra/til med det samme (se "Moduler" nedenfor)
@@ -245,7 +271,7 @@ pip install playwright && python3 -m playwright install chromium   # kun foerste
 python3 scripts/screenshots.py --base http://127.0.0.1:8000 --user din@mail.dk --password 'din-adgangskode'
 ```
 
-Scriptet logger ind, tager `cc-login.png` og skifter derefter gennem alle 15 faner og gemmer
+Scriptet logger ind, tager `cc-login.png` og skifter derefter gennem alle 16 faner og gemmer
 `cc-cockpit.png` … `cc-notes.png`. Vil du kun opdatere enkelte faner, så brug `--only alarms,notes`,
 og vil du kun have det synlige omraade i stedet for hele siden, så tilføj `--viewport`.
 Brug `--base`, `--user` og `--password` (eller `CC_BASE`, `CC_USER`, `CC_PASSWORD`).
@@ -358,7 +384,7 @@ Alle routes kræver en indlogget bruger (cookie) - samme session som UI'et. Vigt
 
 ## Environment-variabler (.env)
 
-`CC_HOST`, `CC_PORT`, `CC_PUBLIC_URL`, `CC_FORWARDED_ALLOW_IPS`, `GITHUB_TOKEN`, `GITHUB_REPO`, `UPDATE_AUTO_RESTART`, `UPDATE_RESTART_CMD`, `OPENROUTER_API_KEY`, `AI_MODEL`, `OPENROUTER_BASE_URL`, `WP_URL/USER/APP_PASSWORD`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_TO`, `SMTP_TLS`, `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN`, `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_SECRET`, `ALERT_MIN_SEVERITY`, `ALERT_QUIET_HOURS`, `ALERT_DEDUPE_MINUTES`, `SERPAPI_KEY`, `TRACK_DOMAIN`, `PSI_API_KEY`, `SSL_WARN_DAYS`, `LINKCHECK_LIMIT`, `SERPAPI_MONTHLY_LIMIT`, `AI_MONTHLY_LIMIT`, `QUALITY_MIN_WORDS`.
+`CC_HOST`, `CC_PORT`, `CC_PUBLIC_URL`, `CC_FORWARDED_ALLOW_IPS`, `GITHUB_TOKEN`, `GITHUB_REPO`, `UPDATE_AUTO_RESTART`, `UPDATE_RESTART_CMD`, `OPENROUTER_API_KEY`, `AI_MODEL`, `OPENROUTER_BASE_URL`, `CHAT_MODEL`, `CHAT_MAX_TOKENS`, `MCP_TIMEOUT`, `WP_URL/USER/APP_PASSWORD`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_TO`, `SMTP_TLS`, `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN`, `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_SECRET`, `ALERT_MIN_SEVERITY`, `ALERT_QUIET_HOURS`, `ALERT_DEDUPE_MINUTES`, `SERPAPI_KEY`, `TRACK_DOMAIN`, `PSI_API_KEY`, `SSL_WARN_DAYS`, `LINKCHECK_LIMIT`, `SERPAPI_MONTHLY_LIMIT`, `AI_MONTHLY_LIMIT`, `QUALITY_MIN_WORDS`.
 
 Rigtige miljøvariabler vinder over `.env`. `.env` læses før appens konfiguration, og inline-kommentarer (`KEY=  # note`) fjernes.
 

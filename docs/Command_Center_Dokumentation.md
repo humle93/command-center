@@ -67,6 +67,7 @@ Tabeller i grupper:
 - **Indhold**: `articles`, `backlink_prospects`, `outreach`
 - **Drift/integrationer**: `socialqueue`, `competitors`, `linkcheck`, `ai_visibility`
 - **Adgang**: `api_clients` (MCP-nøgler, hash + scopes), `api_audit` (kald pr. nøgle)
+- **Chat (v7.26)**: `mcp_connectors` (eksterne MCP-servere: url, login, `secret` + `secret_hint`, værktøjsfilter, `tools_json`), `chat_conversations` (pr. bruger), `chat_messages` (user/assistant/tool i OpenAI-format) og `chat_pending` (skrivende kald der venter på godkendelse)
 - **System**: `users`, `sessions`, `settings` (nøgle/værdi: moduler, strategi, budget, snapshots, `deployed_commit`, `github_update`), `notes` og `_selftest` (resultat af opstarts-selvtesten)
 
 Alle queries er parameteriserede. `settings` bruges til små tilstande (JSON), så nye funktioner ikke kræver migration.
@@ -128,6 +129,20 @@ mindst 2 H2 — ellers blokeres autopilot-push til WordPress (manuel push giver 
 
 Artikel-HTML, der vises i dashboardet, kører gennem `sanitize_article_html()` (allow-list af tags; ingen scripts,
 handlers, `javascript:`-links eller billeder), fordi indholdet kommer fra en ekstern AI-model.
+
+### 7c. Chat og MCP-connectors (v7.26.0)
+
+Command Center er her MCP-**klient** (det modsatte af `/mcp`, hvor CC er server). Klienten taler Streamable HTTP:
+`initialize` → `notifications/initialized` → `tools/list` (op til 10 sider) / `tools/call`, med `Mcp-Session-Id` og
+`MCP-Protocol-Version` fra svaret. Svar kan være `application/json` eller `text/event-stream` (`_mcp_parse`). En session
+caches pr. connector i `_MCP_SESSIONS` og åbnes igen én gang ved 400/404. Kald går gennem en egen `requests.Session`
+(`MCP_HTTP`), så de ikke tæller i AI-budgettet; adressen tjekkes med `assert_public_url`, og 3xx følges ikke.
+
+`chat_run(cid)` bygger tools fra de valgte connectors (`chat_tools`: funktionsnavn `c<id>_<værktøj>`, højst
+`CHAT_MAX_TOOLS`), kalder `openrouter_complete()` med system-prompt + historik og håndterer `tool_calls`:
+`readOnlyHint=true` udføres straks; alt andet skrives i `chat_pending` og returnerer `afventer`. `chat_decide()` låser
+rækken med `UPDATE … WHERE status='afventer'` (rowcount = 1), udfører eller afviser, og samtalen fortsætter, når intet
+venter. `_CHAT_RUNNING` forhindrer to samtidige kørsler af samme samtale. Svar fra værktøjer afkortes til 12.000 tegn.
 
 ### 7b. AI-kald via OpenRouter (v7.25.0)
 
@@ -192,6 +207,7 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 
 ## 12. Versionshistorik (kort)
 
+- **v7.26.0** — Chat-fanen med MCP-connectors (GitHub, WordPress, Gmail, Google Drive m.fl.): MCP-klient (JSON + SSE, sessioner, sider), godkendelse af skrivende værktøjer (`chat_pending`), nøgler kun som hint i UI'et
 - **v7.25.0** — AI via OpenRouter i stedet for aimlapi: `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`, fælles `ai_chat()` med `AIError` for OpenRouters fejlsvar, budget på `openrouter.ai` og advarsel ved en tilbageblevet `AIMLAPI_KEY`
 - **v7.24.0** — Vækst-fanen: lokal indholdsoptimerer (`local_content_optimizer`, vægtet score + termdækning), konkurrent-sammenligning mod brugerangivne URL'er, indholdsplan (`content_briefs`) og manuel linkliste (`link_targets`) — ingen API-nøgle. UI'et er samtidig moderniseret: grupperet navigation, fanebeskrivelser og fælles visuel rytme for kort, felter og knapper
 - **v7.23.0** — Backup i UI: `POST /backup/now` og `POST /backup/restore` (kræver `GENDAN`), kort i fanen Moduler, `pre-restore`-backup før hver gendannelse
@@ -310,6 +326,7 @@ ved hvert CI-løb, så tabellen og koden ikke kan glide fra hinanden ubemærket.
 | SEO og crawl | `POST /seo/audit`, `POST /seo/crawl`, `POST /seo/crawl/delete`, `POST /seo/linksuggest`, `POST /seo/rewrite`, `GET /api/crawl/status`, `GET /api/crawl/diff`, `GET /api/sitemap.xml`, `GET /api/redirects`, `GET /api/duplicates` |
 | Keywords | `POST /keywords/add`, `POST /keywords/delete`, `POST /keywords/check`, `POST /keywords/ideas`, `POST /keywords/difficulty`, `GET /api/visibility` |
 | Artikler | `POST /articles/generate`, `POST /articles/push`, `POST /articles/delete`, `POST /articles/autopilot`, `POST /articles/meta`, `POST /articles/score` |
+| Chat og connectors | `GET /api/chat/state`, `GET /api/chat/{cid}`, `POST /chat/send`, `POST /chat/approve` (`decision=godkend|afvis`), `POST /chat/delete` (JSON) · `POST /connectors/add`, `POST /connectors/refresh`, `POST /connectors/toggle`, `POST /connectors/delete` (redirect til `?tab=chat&conn=ok|fejl`) |
 | Vækst | `POST /backlinks/prospect`, `POST /backlinks/delete`, `POST /outreach/scan`, `POST /serp/discover`, `POST /serp/gap`, `POST /competitors/delete` |
 | Links, social og bro | `POST /links/check`, `POST /social/add`, `POST /social/delete`, `GET /social/export.csv`, `POST /social/to-autopilot`, `POST /autopilot/sync` |
 | Monitors og historik | `POST /monitors/add`, `POST /monitors/delete`, `POST /monitors/check`, `GET /api/health-history` |

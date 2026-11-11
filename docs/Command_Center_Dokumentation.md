@@ -131,6 +131,21 @@ mindst 2 H2 — ellers blokeres autopilot-push til WordPress (manuel push giver 
 Artikel-HTML, der vises i dashboardet, kører gennem `sanitize_article_html()` (allow-list af tags; ingen scripts,
 handlers, `javascript:`-links eller billeder), fordi indholdet kommer fra en ekstern AI-model.
 
+### 7c2. Understi bag nginx (v7.28.0)
+
+Ultra.cc's nginx giver kun `location /<app>/` på brugerens faste adresse, ikke et eget domæne. `CC_BASE_PATH`
+(`cc_base_path()`: `CC_BASE_PATH` fra miljøet, ellers stien i `CC_PUBLIC_URL`; kun `[A-Za-z0-9._-]`-segmenter, ellers
+roden) bestemmer understien. `BasePathMiddleware` er et rent ASGI-lag, registreret **efter** `auth_middleware` og **før**
+GZip, så rækkefølgen udefra er GZip → understi → auth → ruter:
+
+- **Ind:** `/cc/x` → `scope.path = /x` (og `raw_path`); `/cc` → 307 til `/cc/`. Kald uden præfiks (127.0.0.1, `scripts/update.sh`) går uændret igennem.
+- **Ud:** `Location: /x` → `/cc/x` (ikke `//…` og ikke allerede præfikset), `Set-Cookie …; Path=/` → `Path=/cc`.
+- **HTML** (`text/html`, buffret, ny `Content-Length`): `href|action|src|formaction="/x"` → `"/cc/x"`, og et `<script>` lige efter `<head>` sætter `window.CC_BASE` og pakker `window.fetch`, så `fetch('/api/…')` rammer `/cc/api/…`. Dashboardets tidsestimat (`ccEstimate`) fjerner præfikset igen, før det slår ruten op i `TASK_ESTIMATES`.
+- Er `CC_BASE_PATH` tom, kalder laget blot videre — ingen omskrivning.
+
+`CC_PUBLIC_URL` beholder stien, så login-linket, invitationsmailen og `cc_sso_push()` (WordPress-knappen) automatisk peger
+på `…/cc/…`. Host-tjekket på `/mcp` bruger kun værten og er uændret.
+
 ### 7d. Log ind fra WordPress (v7.27.0)
 
 Billetten er `base64url(json) + "." + base64url(HMAC-SHA256(nøgle, base64url(json)))`, med JSON-felterne `v` (1),
@@ -217,6 +232,7 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 
 ## 12. Versionshistorik (kort)
 
+- **v7.28.0** — Understi bag nginx (Ultra.cc uden Cloudflare-tunnel): `cc_base_path()`/`CC_BASE_PATH`, `BasePathMiddleware` (pure ASGI, mellem GZip og `auth_middleware`), `rewrite_html_for_base()` og `base_path_script()` (fetch-indpakning + `window.CC_BASE`), `deploy/nginx-ultracc-proxy.conf`
 - **v7.27.0** — Log ind fra WordPress med ét klik: `cc_sso_secret()`, `cc_sso_push()` (POST `/cc-link` i sync, kun ved ændring), `GET /cc-sso` med `cc_sso_verify()` (HMAC, udløb ±30 s, maks. 120 s levetid, `jti` én gang, kendt e-mail). Det døde `/cc-login`-flow fra v7.17.5 er fjernet
 - **v7.26.0** — Chat-fanen med MCP-connectors (GitHub, WordPress, Gmail, Google Drive m.fl.): MCP-klient (JSON + SSE, sessioner, sider), godkendelse af skrivende værktøjer (`chat_pending`), nøgler kun som hint i UI'et
 - **v7.25.0** — AI via OpenRouter i stedet for aimlapi: `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`, fælles `ai_chat()` med `AIError` for OpenRouters fejlsvar, budget på `openrouter.ai` og advarsel ved en tilbageblevet `AIMLAPI_KEY`

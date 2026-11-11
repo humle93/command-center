@@ -5,7 +5,7 @@ Samlet manual for de tre dele, der hænger sammen fra 11. november 2026:
 | Del | Version | Repo | Hvor den kører |
 | --- | --- | --- | --- |
 | **Steamgears Autopilot** (WordPress-plugin) | 7.76.0 | `humle93/steamgears-site` → `plugins/steamgears-autopilot-v7.76.0.zip` | steamgears.eu (Simply) |
-| **Command Center** | 7.27.0 | `humle93/command-center` | din server (`laser`, Ultra.cc eller Docker) bag nginx |
+| **Command Center** | 7.28.0 | `humle93/command-center` | din server (`laser`, Ultra.cc eller Docker) bag nginx |
 | **wp-auto-deployer** | 1.0.0 | `humle93/wp-auto-deployer` | en Linux-server med Docker (eller lokalt i dry-run) |
 
 Følg rækkefølgen: **1 → 2 → 3**. Login-knappen i WordPress virker først, når både 1 og 2 er på plads.
@@ -73,7 +73,7 @@ wp plugin get steamgears-autopilot --field=version     # skal give 7.76.0
 
 ---
 
-## 2. Command Center 7.27.0
+## 2. Command Center 7.28.0
 
 ### 2a. Opdatér koden
 
@@ -129,6 +129,75 @@ MCP-server/gateway; et OAuth-login direkte fra Command Center findes ikke endnu.
 
 ---
 
+### 2e. Ultra.cc uden Cloudflare
+
+Fra v7.28 logger man ind direkte på Ultra.cc-serverens faste adresse — ingen `cloudflared`/`trycloudflare`-tunnel.
+Ultra.cc giver en egen app en **understi** (`https://<bruger>.<server>.usbx.me/cc/`), og den kan appen nu ligge på.
+
+**1) Find tunnellen og stop den** (den kan være startet på flere måder — tjek alle fire):
+
+```bash
+ps -eo pid,args | grep -i cloudflared | grep -v grep          # kører den?
+systemctl --user list-units --all | grep -i cloudflared       # som systemd-brugerenhed?
+crontab -l 2>/dev/null | grep -i cloudflared                  # fra cron (@reboot)?
+screen -ls; tmux ls 2>/dev/null                               # i en screen/tmux?
+
+systemctl --user disable --now cloudflared                    # ret navnet til enheden fra listen
+crontab -e                                                    # slet cloudflared-linjen, hvis der er en
+pkill -f cloudflared                                          # stop det, der stadig kører
+```
+
+Står `cloudflared` i en enhed eller et script, du selv har lavet (fx `~/.config/systemd/user/cloudflared.service`
+eller `~/bin/tunnel.sh`), så slet filen bagefter og kør `systemctl --user daemon-reload`.
+
+**2) Port og adresse i `.env`** (`~/command-center/.env`):
+
+```bash
+app-ports free                       # Ultra.cc: vælg en ledig port fra listen
+```
+
+```
+CC_HOST=127.0.0.1
+CC_PORT=<porten>
+CC_FORWARDED_ALLOW_IPS=127.0.0.1
+CC_PUBLIC_URL=https://<bruger>.<server>.usbx.me/cc
+```
+
+Adressen er den faste fra Ultra.cc-panelet (samme vært som dine andre apps) + `/cc`. Ingen anførselstegn, intet `/` til sidst.
+
+**3) nginx-blokken:**
+
+```bash
+cp deploy/nginx-ultracc-proxy.conf ~/.apps/nginx/proxy.d/command-center.conf
+sed -i 's/12345/<porten>/' ~/.apps/nginx/proxy.d/command-center.conf
+app-nginx restart
+```
+
+Filen er kun `location`-blokke: Ultra.cc har selv `server { }` og certifikatet. Den sætter `X-Forwarded-Proto https`
+fast, så session-cookien bliver `Secure`. `proxy_pass` har **ikke** `/` til sidst — appen fjerner selv `/cc`.
+
+**4) Genstart og log ind:**
+
+```bash
+bash scripts/restart.sh
+bash scripts/update.sh --check       # "login:" skal vise https://<bruger>.<server>.usbx.me/cc/login
+```
+
+Åbn `https://<bruger>.<server>.usbx.me/cc/` → login-siden → e-mail + adgangskode (standardbrugeren fra
+`CC_ADMIN_EMAIL`/`CC_ADMIN_PASSWORD` eller en bruger fra fanen **Brugere**).
+
+**5) WordPress-knappen og MCP får den nye adresse:** næste sync sender den nye `CC_PUBLIC_URL` til pluginnet af sig selv
+(fingerprintet har ændret sig), eller tryk **🔑 Forbind login-knappen nu** under Social. MCP-klienter skal pege på
+`https://<bruger>.<server>.usbx.me/cc/mcp`.
+
+| Symptom | Årsag | Løsning |
+| --- | --- | --- |
+| 502 Bad Gateway på `/cc/` | Appen kører ikke, eller porten i nginx-blokken ≠ `CC_PORT` | `bash scripts/update.sh --version`, ret porten, `app-nginx restart` |
+| 404 fra appen på alle sider | `CC_PUBLIC_URL` uden `/cc` (appen kender ikke understien) | Tilføj `/cc`, genstart |
+| Siden uden layout, knapper gør intet | nginx stripper stien (`proxy_pass …/;`) **og** et ældre CC end 7.28 | Opdatér til 7.28; fjern `/` efter porten |
+| Login lykkes, men man sendes tilbage til login | Cookien er `Secure`, men siden er åbnet på `http://` | Brug `https://`-adressen |
+| HTTPS-advarsel i dashboardet | `X-Forwarded-Proto` mangler i blokken | Brug `deploy/nginx-ultracc-proxy.conf` uændret |
+
 ## 3. wp-auto-deployer
 
 Den fulde trin-for-trin-guide ligger i repoet: `docs/installationsguide-for-begyndere.md`. Kort:
@@ -158,7 +227,7 @@ loginctl enable-linger "$USER"                         # servicen kører videre 
 | Plugin-version | wp-admin → Plugins | Steamgears Autopilot **7.76.0** |
 | AI via OpenRouter | Settings → Keys | AI-nøgletest grøn, udbyder *OpenRouter* |
 | Billeder | Dashboard | `Images: <billedmodel>` |
-| Command Center-version | `bash scripts/update.sh --version` | 7.27.0 tre steder, kode 0 |
+| Command Center-version | `bash scripts/update.sh --version` | 7.28.0 tre steder, kode 0 |
 | AI i Command Center | Cockpit → Setup-linjen | `AI ✅` |
 | Login-knappen forbundet | Command Center → Social | »Knappen … i WordPress: forbundet« |
 | Login med ét klik | wp-admin → Steamgears → *Log ind i Command Center* | Command Center-dashboardet åbner |

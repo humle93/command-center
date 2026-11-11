@@ -10,6 +10,9 @@ shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)
 os.environ.update(APP_TOKEN="", AIMLAPI_KEY="test-key", WP_URL="", WP_USER="", WP_APP_PASSWORD="")
 
 from app import main  # noqa: E402
+from app.services import alarms as alarms_service  # noqa: E402
+from app.services import audit as audit_service  # noqa: E402
+from app.services import content as content_service  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 FAILED = []
@@ -43,7 +46,9 @@ check("gate: SERP benchmark raises the minimum (80 % of 1000)", not r["passed"] 
 # --- autopilot is blocked by the gate ---
 with main.get_db() as db:
     db.execute("INSERT INTO keyword_ideas (idea, created_at) VALUES (?,?)", ("brass goggles", main.now_iso())) if "idea" in [c[1] for c in db.execute("PRAGMA table_info(keyword_ideas)")] else None
-main.generate_article_ai = lambda keyword, strategy=None: "<h2>x</h2><p>too short</p>"
+# Siden v8.0 M4 ligger autopiloten i app.services.content, saa det er dér
+# stubbens navn skal overskrives - en patch paa main.generate_article_ai naar ikke ind.
+content_service.generate_article_ai = lambda keyword, strategy=None: "<h2>x</h2><p>too short</p>"
 res = main.autopilot_sync()
 with main.get_db() as db:
     art = db.execute("SELECT status FROM articles ORDER BY id DESC LIMIT 1").fetchone()
@@ -112,6 +117,14 @@ check("login: Secure-flag naar X-Forwarded-Proto er https",
 check("login: X-CC-Token header virker fortsat for scripts",
       TestClient(main.app).get("/api/redirects", headers={"X-CC-Token": "test-token-123"}).status_code == 200)
 main.APP_TOKEN = ""
+
+# --- v8.0 M4: koden er delt op, men app.main er stadig den ene indgang ---
+main_lines = len(open(os.path.join(ROOT, "app", "main.py"), encoding="utf-8").read().splitlines())
+check("m4: app/main.py er under 2.000 linjer", main_lines < 2000, main_lines)
+check("m4: services gen-eksporteres fra app.main",
+      main.analyze_page is audit_service.analyze_page
+      and main.autopilot_sync is content_service.autopilot_sync
+      and main.add_alarm is alarms_service.add_alarm, "gen-eksport")
 
 srv.shutdown()
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)

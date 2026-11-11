@@ -41,14 +41,14 @@ Fanerne er nummereret i den rækkefølge, et normalt arbejdsflow bruger dem:
 
 ### 4. Indhold (Artikler)
 
-**SEO-strategi-vælger** (øverst på fanen): vælg mellem *AdSense-indkomst*, *Affiliate* og *Backlink-vækst*. Valget styrer AI-artiklernes stil og længde (begge manuel generering OG autopilot) og hvad autopiloten gør (artikel vs. prospector/outreach). Efter hvert valg kører CC et **automatisk pre-flight-tjek**: AIMLAPI/SERPAPI-nøgler, WordPress-creds, modul-status, autopilot-cron og DB-skrivetest — vist som grøn/rød-checkliste, med kritisk alarm hvis noget vigtigt mangler. Valget gemmes i settings og overlever genstart.
+**SEO-strategi-vælger** (øverst på fanen): vælg mellem *AdSense-indkomst*, *Affiliate* og *Backlink-vækst*. Valget styrer AI-artiklernes stil og længde (begge manuel generering OG autopilot) og hvad autopiloten gør (artikel vs. prospector/outreach). Efter hvert valg kører CC et **automatisk pre-flight-tjek**: AI-nøgle (AIMLAPI eller OpenRouter)/SERPAPI-nøgler, WordPress-creds, modul-status, autopilot-cron og DB-skrivetest — vist som grøn/rød-checkliste, med kritisk alarm hvis noget vigtigt mangler. Valget gemmes i settings og overlever genstart.
 - **Generér artikel**: indtast emne/keyword → AI-artikel (Gemini via aimlapi). Prompten henter **top 5 Google-resultater via SerpAPI** og kræver, at artiklen er fakta-baseret og dækker deres content gap — ingen sludder.
 - **Kladde-liste**: hver artikel har knapperne *Score vs SERP* (position + score), *Meta/social* (AI-genereret titel/meta), *Push til WP (kladde)* og slet.
 - **Autopilot**: én knap kører hele cyklussen — vælg idé → AI-artikel → WP-kladde. Kører også automatisk hver dag kl. 05:15 (kræver modul *Growth* aktiveret). Nye idéer hentes automatisk fra Google-autocomplete.
 
 ![Indhold](img/cc-articles.png)
 
-- **Backlink-prospector** (nederst på fanen): indtast keyword → top 10 Google-resultater klassificeret (blog/liste/artikel/shop) + fundne kontakt-e-mails + AI-outreach-draft. Gemmes i prospekt-tabel; slet enkeltlinjer. Kræver SERPAPI_KEY (AIMLAPI_KEY for AI-drafts).
+- **Backlink-prospector** (nederst på fanen): indtast keyword → top 10 Google-resultater klassificeret (blog/liste/artikel/shop) + fundne kontakt-e-mails + AI-outreach-draft. Gemmes i prospekt-tabel; slet enkeltlinjer. Kræver SERPAPI_KEY (AIMLAPI_KEY eller OPENROUTER_KEY for AI-drafts).
 
 ### 5. Links
 - Tjek eksterne links på et domæne: status (ok/brudt/redirect) med historik. Brudte links = hurtige fix-muligheder.
@@ -74,7 +74,7 @@ Fanerne er nummereret i den rækkefølge, et normalt arbejdsflow bruger dem:
 ---
 
 ## AI Tools
-Samlede AI-værktøjer: title/meta-rewrites, outreach-drafts, artikel-meta m.m. Bruger AIMLAPI_KEY + AI_MODEL (default `google/gemini-3-8-flash`, max_tokens 3000 pga. reasoning-tokens).
+Samlede AI-værktøjer: title/meta-rewrites, outreach-drafts, artikel-meta m.m. Bruger AIMLAPI_KEY eller OPENROUTER_KEY + AI_MODEL (max_tokens 3000 pga. reasoning-tokens). Provideren vælges med AI_PROVIDER (`aimlapi` eller `openrouter`); er den tom, vælges OpenRouter automatisk når OPENROUTER_KEY er sat. Standardmodel: `anthropic/claude-3-5-sonnet` (aimlapi) eller `anthropic/claude-3.5-sonnet` (openrouter).
 
 ## Pro
 Redirect-audit, rewrite-historik, sitemap-værktøjer m.m. (se screenshot).
@@ -106,7 +106,7 @@ Alle endpoints kræver `Authorization: Bearer <token>`. Vigtigste:
 `/self-update` trækker nyeste install.sh fra det private repo og geninstallerer — opdatering på under et minut.
 
 ## Environment-variabler (.env)
-`APP_TOKEN`, `JUNO_TOKEN`, `GITHUB_TOKEN`, `GITHUB_REPO`, `BRIDGE_POLL_MINUTES`, `AIMLAPI_KEY`, `AI_MODEL`, `WP_URL/USER/APP_PASSWORD`, `TELEGRAM_*`, `SERPAPI_KEY`, `TRACK_DOMAIN`, `PSI_API_KEY`, `SSL_WARN_DAYS`, `LINKCHECK_LIMIT`.
+`APP_TOKEN`, `JUNO_TOKEN`, `GITHUB_TOKEN`, `GITHUB_REPO`, `BRIDGE_POLL_MINUTES`, `AI_PROVIDER`, `AIMLAPI_KEY`, `OPENROUTER_KEY`, `AI_MODEL`, `WP_URL/USER/APP_PASSWORD`, `TELEGRAM_*`, `SERPAPI_KEY`, `TRACK_DOMAIN`, `PSI_API_KEY`, `SSL_WARN_DAYS`, `LINKCHECK_LIMIT`.
 
 ## Installation
 ```

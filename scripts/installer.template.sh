@@ -3,7 +3,7 @@ set -e
 PROJECT_DIR="$HOME/command-center"
 
 echo "⚡ Command Center v7.10 - installerer i $PROJECT_DIR..."
-mkdir -p "$PROJECT_DIR/app/templates" "$PROJECT_DIR/app/data" "$PROJECT_DIR/app/static" "$PROJECT_DIR/deploy" "$PROJECT_DIR/scripts"
+mkdir -p "$PROJECT_DIR/app/templates" "$PROJECT_DIR/app/data" "$PROJECT_DIR/app/static" "$PROJECT_DIR/app/services" "$PROJECT_DIR/deploy" "$PROJECT_DIR/scripts"
 echo "📄 requirements.txt..."
 cat << 'EOF_REQ' > "$PROJECT_DIR/requirements.txt"
 #@@embed:requirements.txt@@
@@ -19,6 +19,45 @@ cat << 'EOF_MAIN' > "$PROJECT_DIR/app/main.py"
 #@@embed:app/main.py@@
 EOF_MAIN
 
+echo "📄 app/core.py..."
+cat << 'EOF_CORE' > "$PROJECT_DIR/app/core.py"
+#@@embed:app/core.py@@
+EOF_CORE
+
+echo "📄 app/services/..."
+cat << 'EOF_SVC_INIT' > "$PROJECT_DIR/app/services/__init__.py"
+#@@embed:app/services/__init__.py@@
+EOF_SVC_INIT
+
+cat << 'EOF_SVC_ALARMS' > "$PROJECT_DIR/app/services/alarms.py"
+#@@embed:app/services/alarms.py@@
+EOF_SVC_ALARMS
+
+cat << 'EOF_SVC_BUDGET' > "$PROJECT_DIR/app/services/budget.py"
+#@@embed:app/services/budget.py@@
+EOF_SVC_BUDGET
+
+cat << 'EOF_SVC_WP' > "$PROJECT_DIR/app/services/wp.py"
+#@@embed:app/services/wp.py@@
+EOF_SVC_WP
+
+cat << 'EOF_SVC_CONTENT' > "$PROJECT_DIR/app/services/content.py"
+#@@embed:app/services/content.py@@
+EOF_SVC_CONTENT
+
+cat << 'EOF_SVC_AUDIT' > "$PROJECT_DIR/app/services/audit.py"
+#@@embed:app/services/audit.py@@
+EOF_SVC_AUDIT
+
+echo "🎨 app/static/theme.css..."
+cat << 'EOF_THEME_CSS' > "$PROJECT_DIR/app/static/theme.css"
+#@@embed:app/static/theme.css@@
+EOF_THEME_CSS
+
+cat << 'EOF_THEME_JS' > "$PROJECT_DIR/app/static/theme.js"
+#@@embed:app/static/theme.js@@
+EOF_THEME_JS
+
 echo "📄 app/templates/dashboard.html..."
 cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 #@@embed:app/templates/dashboard.html@@
@@ -28,6 +67,11 @@ echo "📄 app/templates/login.html..."
 cat << 'EOF_LOGIN' > "$PROJECT_DIR/app/templates/login.html"
 #@@embed:app/templates/login.html@@
 EOF_LOGIN
+
+echo "📄 app/templates/landing.html..."
+cat << 'EOF_LANDING' > "$PROJECT_DIR/app/templates/landing.html"
+#@@embed:app/templates/landing.html@@
+EOF_LANDING
 
 echo "📄 run.sh..."
 cat << 'EOF_RUNSH' > "$PROJECT_DIR/run.sh"

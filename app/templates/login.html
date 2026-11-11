@@ -5,19 +5,34 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center — Login</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/static/theme.js?v=8"></script>
+    <link rel="preconnect" href="https://cdn.tailwindcss.com" crossorigin>
+    <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="/static/theme.css?v=8">
+    <meta name="theme-color" content="#0f0c0a">
 </head>
-<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans flex items-center justify-center">
-    <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-8 w-full max-w-sm space-y-4">
-        <h1 class="font-bold text-lg">⚡ COMMAND CENTER</h1>
-        <p class="text-xs text-zinc-400">Indtast din adgangstoken</p>
-        {% if error %}<p class="text-xs text-rose-400">{{ error }}</p>{% endif %}
-        <form action="/login" method="POST" class="space-y-3">
-            <input type="password" name="token" required autofocus
-                   class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
-            <button class="w-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">
-                Log ind
-            </button>
-        </form>
+<body class="bg-zinc-950 text-zinc-100 min-h-screen flex items-center justify-center p-4">
+    <div class="w-full max-w-sm">
+        <div class="text-center mb-5">
+            <h1 class="cc-wordmark text-lg text-zinc-100">⚡ Command Center</h1>
+            <p class="text-[11px] uppercase tracking-[0.28em] text-zinc-500 mt-1">Steamgears drift</p>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-8 space-y-4">
+            <div>
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Log ind</h2>
+                <p class="text-[11px] text-zinc-500 mt-1">Indtast din adgangstoken</p>
+            </div>
+            {% if error %}<p class="text-xs text-rose-400">{{ error }}</p>{% endif %}
+            <form action="/login" method="POST" class="space-y-3">
+                <input type="password" name="token" required autofocus
+                       class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <button class="w-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">
+                    Log ind
+                </button>
+            </form>
+        </div>
+        <p class="text-center text-[10px] uppercase tracking-[0.22em] text-zinc-600 mt-5">WordPress · SEO · Indhold</p>
     </div>
 </body>
 </html>

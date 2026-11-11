@@ -5,7 +5,7 @@ Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Y
 ## Funktioner
 - 🎛️ **Cockpit** — domæneovervågning (uptime, svartid, SSL), daglig drift-kort (Woo/checkout via Juno-bro)
 - 🔍 **SEO Scanner** — deep audit af enkelt side (20+ vægtede kontroller inkl. focus keyword, lesbarhed, mixed content, schema, OG/Twitter) + **site-crawl** med score per side og robots.txt/sitemap-tjek
-- ✍️ **Artikler** — AI-generering (Gemini via aimlapi) eller skabelon, **push direkte til WordPress som udkast**, **fakta-prompt med SerpAPI-konkurrentanalyse** (top 5 resultater ind i prompten — artiklen skal slå dem), autopilot (idé → artikel → WP-kladde, ny idé via Google-autocomplete når puljen er tom)
+- ✍️ **Artikler** — AI-generering (Gemini via aimlapi eller OpenRouter) eller skabelon, **push direkte til WordPress som udkast**, **fakta-prompt med SerpAPI-konkurrentanalyse** (top 5 resultater ind i prompten — artiklen skal slå dem), autopilot (idé → artikel → WP-kladde, ny idé via Google-autocomplete når puljen er tom)
 - 🎯 **SEO-strategi-vælger** — dropdown (AdSense-indkomst / Affiliate / Backlink-vækst): styler AI-artikler (stil + længde) og autopiloten (artikel vs. prospecting), med automatisk pre-flight-tjek af nøgler, moduler, cron og DB efter hvert valg (grøn/rød-checkliste)
 - 🛡️ **v7.9 Stabilitet** — daglig DB-backup (04:40, seneste 14 gemmes) + automatisk backup foer hver self-update; opstarts-selvtest (DB-skrivetest, noegler, rute-taelling → kritisk alarm ved fejl); login rate-limit (5 fejl = 10 min laas pr. IP); HTTPS-advarsel i UI; scripts/smoke_test.sh; run.bat (Windows-startscript, klar til fremtid - self-update er Linux-only)
 - 🌱 **Growth Pack** — autopilot-nøgleord-side (05:15 dagligt), **backlink-prospector** (SerpAPI top 10 → sitetype + kontakt-e-mail + AI-outreach-draft), visibility-index
@@ -20,7 +20,7 @@ Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Y
 
 ## v7.10 – fra v8-planen (Drive)
 - **Kvalitetsgate**: autopilot-artikler sendes kun til WordPress, hvis de har nok ord (min. `QUALITY_MIN_WORDS`, eller 80 % af SERP-gennemsnittet fra Content Gap), indeholder fokus-keywordet og har mindst 2 H2. Ellers status "Stoppet af kvalitetsgate" + alarm. Manuel push er tilladt, men giver en info-alarm. Faerre end 2 interne links giver kun en advarsel.
-- **API-budget**: hvert kald til SerpAPI og aimlapi taelles pr. maaned; ved `SERPAPI_MONTHLY_LIMIT` / `AI_MONTHLY_LIMIT` stoppes kaldene til den 1. Alarm (og Telegram) ved 80 % og 100 %.
+- **API-budget**: hvert kald til SerpAPI og den valgte AI-provider (aimlapi/OpenRouter) taelles pr. maaned; ved `SERPAPI_MONTHLY_LIMIT` / `AI_MONTHLY_LIMIT` stoppes kaldene til den 1. Alarm (og Telegram) ved 80 % og 100 %.
 - **/health**: tester at databasen kan skrive og hvor fuld disken er (advarsel ≥ 80 %, kritisk ≥ 90 % → HTTP 503), viser maanedens API-forbrug og schema-versionen (`schema_version`, `schema_version_expected`, `schema_ok` — manglende overensstemmelse giver `advarsel` og en alarm).
 
 ## Steamgears Autopilot-bro (WordPress-plugin 7.5+)
@@ -43,6 +43,11 @@ curl -H "Authorization: Bearer <TOKEN>" -H "Accept: application/vnd.github.raw" 
 Eller med Docker: `cp .env.example .env && docker compose up -d --build`
 
 ### Udvikling
+Koden er delt i tre: `app/main.py` har ruterne, `app/core.py` har konfiguration,
+database og schema, og `app/services/{audit,content,wp,budget,alarms}.py` har de rene
+funktioner. `app/main.py` gen-eksporterer dem, saa `from app.main import ...` og
+`install.sh`-flowet er uaendret.
+
 `install.sh` er genereret — rediger aldrig fil-kopierne inde i den. Ret i stedet
 `scripts/installer.template.sh` (shell-flowet) eller selve filen i repoet (fx `app/main.py`), og kør:
 

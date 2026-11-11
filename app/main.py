@@ -31,31 +31,41 @@ import json as jsonlib
 import subprocess
 import sys
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "data", "center.db")
-STATIC_DIR = os.path.join(BASE_DIR, "static")
+# --- Funktioner flyttet ud (v8.0 M4). Gen-eksporteres, saa app.main er uaendret. ---
+from app.core import (
+    AI_KEY, AI_KEY_ENV, AI_MODEL, AI_PROVIDER, API_BUDGETS, APP_TOKEN,
+    get_ai_model,
+    APP_VERSION, BASE_DIR, BRIDGE_POLL_MINUTES, BudgetAdapter,
+    BudgetExceeded, DB_PATH, GITHUB_REPO, GITHUB_TOKEN,
+    HTTP, JUNO_TOKEN, LINKCHECK_LIMIT, MODULES,
+    PSI_API_KEY, SCHEMA_VERSION, SERPAPI_KEY, SSL_WARN_DAYS,
+    STATIC_DIR, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TRACK_DOMAIN,
+    WP_APP_PASSWORD, WP_URL, WP_USER, _MODULE_CACHE,
+    _WAL_SET, _adapter, _safe, cleanup_old_data,
+    ai_chat, create_indexes, get_db, init_db, init_schema,
+    load_dotenv, migrate_db, module_on, modules_state,
+    normalize_url, now_iso, report_schema_version, safe_request,
+    schema_version, set_module, stamp_schema_version,
+)
+from app.services.alarms import add_alarm, notify_telegram
+from app.services.budget import budget_service, budget_spend, budget_usage
+from app.services.wp import (
+    SGAP_ALIASES, SGAP_CHANNELS, sgap_api, sgap_channel,
+    sgap_error_text, sgap_ready, sgap_snapshot, sgap_sync,
+    wp_push_draft,
+)
+from app.services.content import (
+    DEFAULT_STRATEGY, EMAIL_RE, QUALITY_MIN_WORDS, STRATEGIES,
+    TEMPLATE_ARTICLE, autopilot_sync, classify_site, generate_article_ai,
+    get_active_strategy, prospect_sync, quality_check, serp_competitor_context,
+)
+from app.services.audit import (
+    CRAWL_STATE, _check, analyze_page, check_links_sync,
+    crawl_competitor, deep_extras, discover_competitors_sync, psi_fetch,
+    site_crawl_sync,
+)
 
-# --- Konfiguration via miljoevariabler / .env ---
-APP_TOKEN = os.environ.get("APP_TOKEN", "").strip()          # login-token (tom = ingen auth, lokal tilstand)
-JUNO_TOKEN = os.environ.get("JUNO_TOKEN", "").strip()
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()     # GitHub-token: pull-bro + selv-opdatering
-GITHUB_REPO = os.environ.get("GITHUB_REPO", "humle93/command-center").strip()
-BRIDGE_POLL_MINUTES = int(os.environ.get("BRIDGE_POLL_MINUTES", "60"))  # hvor ofte CC henter bridge-filer
-AIMLAPI_KEY = os.environ.get("AIMLAPI_KEY", "").strip()      # AI-artikelgenerator (gemini via aimlapi)
-AI_MODEL = os.environ.get("AI_MODEL", "google/gemini-3-8-flash")
-WP_URL = os.environ.get("WP_URL", "").strip()                # fx https://steamgears.eu
-WP_USER = os.environ.get("WP_USER", "").strip()
-WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "").strip()
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "").strip()
-TRACK_DOMAIN = os.environ.get("TRACK_DOMAIN", "steamgears.eu").strip()
-SSL_WARN_DAYS = int(os.environ.get("SSL_WARN_DAYS", "30"))
-LINKCHECK_LIMIT = int(os.environ.get("LINKCHECK_LIMIT", "25"))
-PSI_API_KEY = os.environ.get("PSI_API_KEY", "").strip()   # Google PageSpeed API (gratis noegle)
 
-APP_VERSION = "7.10.0"
-SCHEMA_VERSION = 1  # v8.0: bumpes naar init_db/migrate_db aendrer tabeller eller kolonner
 app = FastAPI(title="Command Center Engine", version=APP_VERSION)
 # Git does not keep empty folders, so a fresh clone has no app/static: create it or startup fails.
 os.makedirs(STATIC_DIR, exist_ok=True)
@@ -65,405 +75,8 @@ scheduler = AsyncIOScheduler(timezone="Europe/Copenhagen")
 executor = ThreadPoolExecutor(max_workers=8)
 
 
-def load_dotenv(path=None):
-    path = path or os.path.join(os.path.dirname(BASE_DIR), ".env")
-    if not os.path.exists(path):
-        return
-    for line in open(path):
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        os.environ.setdefault(key.strip(), val.strip())
-
-
-load_dotenv()
-APP_TOKEN = os.environ.get("APP_TOKEN", "").strip()
-AIMLAPI_KEY = os.environ.get("AIMLAPI_KEY", "").strip()
-WP_URL = os.environ.get("WP_URL", "").strip()
-WP_USER = os.environ.get("WP_USER", "").strip()
-WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "").strip()
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "").strip()
-TRACK_DOMAIN = os.environ.get("TRACK_DOMAIN", "steamgears.eu").strip()
-
-
-_WAL_SET = False
-
-
-@contextmanager
-def get_db():
-    global _WAL_SET
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=15)  # timeout = busy timeout (15 s)
-    conn.row_factory = sqlite3.Row
-    if not _WAL_SET:
-        # WAL is a property of the database file: setting it once per process is enough.
-        conn.execute("PRAGMA journal_mode=WAL")
-        _WAL_SET = True
-    conn.execute("PRAGMA synchronous=NORMAL")
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-def init_db():
-    with get_db() as db:
-        db.executescript("""
-        CREATE TABLE IF NOT EXISTS schema_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        );
-        CREATE TABLE IF NOT EXISTS domains (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            url TEXT UNIQUE NOT NULL,
-            status TEXT DEFAULT 'Ukendt',
-            response_time TEXT DEFAULT '-',
-            ssl_days TEXT DEFAULT '-',
-            last_checked TEXT,
-            last_error TEXT
-        );
-        CREATE TABLE IF NOT EXISTS check_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            domain_id INTEGER NOT NULL,
-            status TEXT,
-            response_time INTEGER,
-            ssl_days INTEGER,
-            checked_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS competitors (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            url TEXT NOT NULL,
-            crawled_info TEXT DEFAULT 'Ikke scannet endnu',
-            status TEXT DEFAULT 'Aktiv',
-            found_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS articles (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            keyword TEXT,
-            content TEXT,
-            status TEXT DEFAULT 'Kladde',
-            source TEXT DEFAULT 'skabelon',
-            wp_link TEXT,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS linkcheck (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            url TEXT NOT NULL,
-            result TEXT,
-            checked_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS socialqueue (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            platform TEXT NOT NULL,
-            message TEXT NOT NULL,
-            status TEXT DEFAULT 'Klar i ko',
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS notes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            content TEXT,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS keywords (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            keyword TEXT UNIQUE NOT NULL,
-            position INTEGER,
-            target_url TEXT,
-            checked_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS alarms (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            type TEXT NOT NULL,
-            message TEXT NOT NULL,
-            severity TEXT DEFAULT 'info',
-            resolved INTEGER DEFAULT 0,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS gsc_daily (
-            day TEXT PRIMARY KEY,
-            clicks INTEGER,
-            impressions INTEGER,
-            ctr REAL,
-            avg_position REAL
-        );
-        CREATE TABLE IF NOT EXISTS gsc_queries (
-            day TEXT NOT NULL,
-            query TEXT NOT NULL,
-            clicks INTEGER,
-            impressions INTEGER,
-            position REAL,
-            PRIMARY KEY (day, query)
-        );
-        CREATE TABLE IF NOT EXISTS drift (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            checked_at TEXT,
-            orders INTEGER,
-            revenue REAL,
-            woo_status TEXT,
-            checkout_status TEXT,
-            notes TEXT
-        );
-        CREATE TABLE IF NOT EXISTS seopages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_id INTEGER,
-            url TEXT NOT NULL,
-            http_status INTEGER,
-            title TEXT,
-            meta_len INTEGER,
-            h1 TEXT,
-            words INTEGER,
-            score INTEGER,
-            issues TEXT,
-            crawled_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS crawl_runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            host TEXT,
-            robots_ok INTEGER DEFAULT 0,
-            sitemap_ok INTEGER DEFAULT 0,
-            sitemap_urls INTEGER DEFAULT 0,
-            pages INTEGER DEFAULT 0,
-            avg_score INTEGER,
-            started_at TEXT,
-            finished_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS monitors (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            url TEXT NOT NULL,
-            type TEXT NOT NULL DEFAULT 'contains',
-            expected TEXT NOT NULL,
-            last_status TEXT DEFAULT 'Ikke tjekket',
-            last_result TEXT,
-            last_checked TEXT
-        );
-        CREATE TABLE IF NOT EXISTS ai_visibility (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            question TEXT NOT NULL,
-            mention_found INTEGER DEFAULT 0,
-            snippet TEXT,
-            answer TEXT,
-            checked_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS health_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            host TEXT,
-            avg_score INTEGER,
-            pages INTEGER,
-            run_id INTEGER,
-            checked_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS internal_links (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            from_url TEXT,
-            to_url TEXT,
-            anchor TEXT,
-            reason TEXT,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS keyword_ideas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            keyword TEXT,
-            idea TEXT,
-            source TEXT,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS content_gap (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            keyword TEXT NOT NULL,
-            stats_json TEXT,
-            top_titles TEXT,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS outreach (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT NOT NULL,
-            source_url TEXT,
-            found_at TEXT,
-            UNIQUE(email, source_url)
-        );
-        CREATE TABLE IF NOT EXISTS backlink_prospects (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            keyword TEXT NOT NULL,
-            site TEXT,
-            url TEXT,
-            type TEXT,
-            email TEXT,
-            draft TEXT,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS visibility (
-            day TEXT PRIMARY KEY,
-            score REAL
-        );
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        );
-        CREATE TABLE IF NOT EXISTS keyword_difficulty (
-            keyword TEXT PRIMARY KEY,
-            difficulty INTEGER,
-            domains INTEGER,
-            authority INTEGER,
-            ads INTEGER,
-            avg_words INTEGER,
-            top_domains TEXT,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS auth_sessions (
-            sid_hash TEXT PRIMARY KEY,
-            created_at TEXT,
-            expires_at TEXT,
-            ip TEXT
-        );
-        """)
-
-
-def _safe(fn):
-    """Koer en init-funktion uden at lade importen crashe (opstart-stabilitet)."""
-    try:
-        fn()
-    except Exception as e:
-        print("[cc] init-fejl (proever igen om 5s):", repr(e), flush=True)
-        import time as _t
-        _t.sleep(5)
-        try:
-            fn()
-        except Exception as e2:
-            print("[cc] init-fejl fortsaetter (app starter alligevel):", repr(e2), flush=True)
-
-
-def migrate_db():
-    with get_db() as db:
-        cols = {}
-        for table, want in {
-            "articles": ["meta_title", "meta_desc"],
-            "seopages": ["content_hash", "redirects"],
-            "crawl_runs": ["sitemap_broken", "sitemap_missing"],
-        }.items():
-            existing = [r[1] for r in db.execute(f"PRAGMA table_info({table})").fetchall()]
-            for c in want:
-                if c not in existing:
-                    db.execute(f"ALTER TABLE {table} ADD COLUMN {c} TEXT")
-
-
-
-def create_indexes():
-    with get_db() as db:
-        for stmt in [
-            "CREATE INDEX IF NOT EXISTS idx_seopages_run ON seopages(run_id)",
-            "CREATE INDEX IF NOT EXISTS idx_gsc_daily_day ON gsc_daily(day)",
-            "CREATE INDEX IF NOT EXISTS idx_gsc_q ON gsc_queries(query)",
-            "CREATE INDEX IF NOT EXISTS idx_alarms_open ON alarms(resolved, id)",
-            "CREATE INDEX IF NOT EXISTS idx_hist_domain ON check_history(domain_id, id)",
-            "CREATE INDEX IF NOT EXISTS idx_health_time ON health_history(checked_at)",
-            "CREATE INDEX IF NOT EXISTS idx_crawl_time ON crawl_runs(started_at)",
-            "CREATE INDEX IF NOT EXISTS kw_ideas_kw ON keyword_ideas(keyword)",
-        ]:
-            db.execute(stmt)
-        db.execute("ANALYZE")
-
-
-def schema_version() -> int:
-    """Schema-versionen der er stemplet i databasen (0 = ikke stemplet / ukendt)."""
-    try:
-        with get_db() as db:
-            row = db.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
-        return int(row["value"]) if row else 0
-    except Exception:
-        return 0
-
-
-def stamp_schema_version():
-    with get_db() as db:
-        db.execute(
-            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', ?)",
-            (str(SCHEMA_VERSION),),
-        )
-
-
-def init_schema():
-    """Byg og migrer schemaet i raekkefoelge — stemplet saettes kun naar alle trin gik igennem.
-
-    Fejler et trin, bliver versionen i DB ikke opdateret, og naeste opstart (og /health)
-    kan se forskellen. Foer stod hvert trin med sit eget _safe()-kald, saa en fejlet
-    migrering kunne fortsaette i aevig tid uden at nogen opdagede det.
-    """
-    init_db()
-    migrate_db()
-    create_indexes()
-    stamp_schema_version()
-
-
-def report_schema_version():
-    """Goer version-mismatch synligt: skarp loglinje + alarm i UI'et."""
-    have = schema_version()
-    if have == SCHEMA_VERSION:
-        return
-    msg = (f"Database-schema er version {have or 'ukendt'}, koden forventer {SCHEMA_VERSION} — "
-           "en migrering er ikke gennemfoert (se serverloggen)")
-    print("[cc] SCHEMA-ADVARSEL:", msg, flush=True)
-    try:
-        # now_iso() er defineret laengere nede i filen, og denne koeres ved import.
-        with get_db() as db:
-            db.execute(
-                "INSERT INTO alarms (type, message, severity, created_at) VALUES (?, ?, ?, ?)",
-                ("schema", msg[:300], "kritisk", datetime.now().isoformat(timespec="seconds")),
-            )
-    except Exception:
-        pass
-
-
 _safe(init_schema)
 _safe(report_schema_version)
-
-
-MODULES = ["domains", "keywords", "ai", "monitors", "social", "links", "bridge", "spy", "wp_push", "telegram", "growth", "autopilot"]
-
-
-_MODULE_CACHE = {"at": 0.0, "states": {}}
-
-
-def modules_state() -> dict:
-    """On/off for every module from one query, cached for 10 s (cleared by set_module)."""
-    if time.time() - _MODULE_CACHE["at"] > 10:
-        try:
-            with get_db() as db:
-                rows = db.execute("SELECT key, value FROM settings WHERE key LIKE 'module\\_%' ESCAPE '\\'").fetchall()
-            stored = {r["key"][len("module_"):]: r["value"] == "on" for r in rows}
-        except Exception:
-            stored = {}
-        _MODULE_CACHE.update(at=time.time(), states={m: stored.get(m, True) for m in MODULES})
-    return _MODULE_CACHE["states"]
-
-
-def module_on(name: str) -> bool:
-    return modules_state().get(name, True)
-
-
-def set_module(name: str, state: str):
-    with get_db() as db:
-        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", ("module_" + name, state))
-    _MODULE_CACHE["at"] = 0.0
-
-
-def cleanup_old_data():
-    """Daglig oprydning: gamle maalinger rulles af, DB holdes sund."""
-    with get_db() as db:
-        db.execute("DELETE FROM check_history WHERE checked_at < datetime('now', '-90 days')")
-        db.execute("DELETE FROM alarms WHERE resolved=1 AND created_at < datetime('now', '-30 days')")
-        db.execute("DELETE FROM health_history WHERE checked_at < datetime('now', '-180 days')")
-        db.execute("DELETE FROM keyword_ideas WHERE created_at < datetime('now', '-180 days')")
-        db.execute("DELETE FROM auth_sessions WHERE expires_at < ?", (now_iso(),))
 
 
 # ---------- Auth ----------
@@ -534,7 +147,7 @@ def is_juno(request: Request) -> bool:
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
     request.state.insecure = (request.headers.get("x-forwarded-proto", "https") == "http" and (request.client.host if request.client else "") not in ("127.0.0.1", "::1"))
-    public = ("/login", "/health", "/static")
+    public = ("/login", "/landing", "/health", "/static")
     if APP_TOKEN and not any(path.startswith(p) for p in public) and not is_authed(request):
         if path.startswith("/api/") and is_juno(request):
             juno_forbidden = ("/api/bridge", "/api/duplicates", "/api/visibility", "/api/health-history")
@@ -550,6 +163,11 @@ async def auth_middleware(request: Request, call_next):
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
     return templates.TemplateResponse("login.html", {"request": request, "error": ""})
+
+
+@app.get("/landing", response_class=HTMLResponse)
+async def landing_page(request: Request):
+    return templates.TemplateResponse("landing.html", {"request": request})
 
 
 @app.post("/login")
@@ -607,114 +225,11 @@ _LOGIN_FAILS: dict = {}  # v7.9: IP -> (antal fejl, laas-til)
 
 
 # ---------- Hjaelpere ----------
-def normalize_url(url: str) -> str:
-    url = (url or "").strip()
-    if not url:
-        raise ValueError("URL mangler")
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
-    parsed = urlparse(url)
-    if not parsed.netloc or "." not in parsed.netloc:
-        raise ValueError("Ugyldig URL")
-    return url.rstrip("/")
 
 
 # ---------- API-budget (v8-plan): maanedligt loft for betalte API'er ----------
 # Taeller hvert kald til SerpAPI og AI (aimlapi) pr. kalendermaaned og stopper dem ved loftet,
 # saa en loekke eller fejl aldrig kan braende kreditter af. 0 = intet loft.
-API_BUDGETS = {
-    "serpapi": ("serpapi.com", int(os.environ.get("SERPAPI_MONTHLY_LIMIT", "1000") or 0)),
-    "ai": ("aimlapi.com", int(os.environ.get("AI_MONTHLY_LIMIT", "3000") or 0)),
-}
-
-
-class BudgetExceeded(requests.RequestException):
-    """Kaldet blev ikke sendt: maanedens API-budget er brugt."""
-
-
-def budget_service(url: str) -> str:
-    host = (urlparse(url).hostname or "").lower()
-    for service, (domain, _limit) in API_BUDGETS.items():
-        if host == domain or host.endswith("." + domain):
-            return service
-    return ""
-
-
-def budget_usage() -> dict:
-    """{service: (brugt, loft)} for indevaerende maaned."""
-    month = datetime.now().strftime("%Y-%m")
-    with get_db() as db:
-        rows = {r["key"]: int(r["value"]) for r in db.execute(
-            "SELECT key, value FROM settings WHERE key LIKE ?", (f"budget_{month}_%",)
-        ).fetchall()}
-    return {s: (rows.get(f"budget_{month}_{s}", 0), limit) for s, (_d, limit) in API_BUDGETS.items()}
-
-
-def budget_spend(service: str):
-    """Taeller et kald; kaster BudgetExceeded hvis loftet er naaet. Alarmerer en gang ved 80 % og 100 %."""
-    limit = API_BUDGETS[service][1]
-    month = datetime.now().strftime("%Y-%m")
-    key = f"budget_{month}_{service}"
-    with get_db() as db:
-        row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-        used = int(row["value"]) if row else 0
-        if limit and used >= limit:
-            raise BudgetExceeded(f"{service}: maanedens budget paa {limit} kald er brugt (saet {service.upper()}_MONTHLY_LIMIT i .env)")
-        used += 1
-        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(used)))
-        if limit and used == int(limit * 0.8):
-            add_alarm(db, "budget", f"{service}: 80 % af maanedens API-budget brugt ({used}/{limit})", "advarsel")
-        if limit and used == limit:
-            add_alarm(db, "budget", f"{service}: maanedens API-budget er brugt ({limit} kald) - kald stoppes til den 1.", "kritisk")
-
-
-class BudgetAdapter(requests.adapters.HTTPAdapter):
-    def send(self, request, **kwargs):
-        service = budget_service(request.url)
-        if service:
-            budget_spend(service)
-        return super().send(request, **kwargs)
-
-
-HTTP = requests.Session()
-_adapter = BudgetAdapter(pool_connections=10, pool_maxsize=20)
-HTTP.mount("https://", _adapter)
-HTTP.mount("http://", _adapter)
-
-
-def safe_request(url: str, timeout: int = 6):
-    return HTTP.get(
-        url,
-        timeout=timeout,
-        allow_redirects=True,
-        headers={"User-Agent": "Mozilla/5.0 CommandCenter/7.4"},
-    )
-
-
-def now_iso():
-    return datetime.now().isoformat(timespec="seconds")
-
-
-def add_alarm(db, type_: str, message: str, severity: str = "info"):
-    db.execute(
-        "INSERT INTO alarms (type, message, severity, created_at) VALUES (?, ?, ?, ?)",
-        (type_, message, severity, now_iso()),
-    )
-    notify_telegram(f"[{severity.upper()}] {type_}: {message}")
-
-
-def notify_telegram(text: str):
-    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
-        return False
-    try:
-        HTTP.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": text},
-            timeout=8,
-        )
-        return True
-    except Exception:
-        return False
 
 
 # ---------- Domene-tjek ----------
@@ -818,199 +333,6 @@ async def domain_history(domain_id: int):
 
 
 # ---------- SEO: deep audit (RankMath/Yoast-stil) ----------
-def _check(name, ok, weight, info=""):
-    return {"name": name, "ok": bool(ok), "weight": weight, "info": info}
-
-
-def analyze_page(url: str, keyword: str = "", html: str = None, status_code: int = None, ms: int = None):
-    """Dyb sideanalyse i stil med RankMath Pro / Yoast Premium."""
-    keyword = (keyword or "").strip().lower()
-    items = []
-    try:
-        if html is None:
-            url = normalize_url(url)
-            t0 = datetime.now()
-            response = safe_request(url, timeout=10)
-            ms = int((datetime.now() - t0).total_seconds() * 1000)
-            status_code = response.status_code
-            html = response.text
-        soup = BeautifulSoup(html, "html.parser")
-
-        # --- Grundlaeggende ---
-        items.append(_check("HTTP 200", status_code == 200, 3, f"status {status_code}"))
-        is_https = url.startswith("https://")
-        items.append(_check("HTTPS", is_https, 3))
-        title = soup.find("title")
-        title_text = title.get_text(strip=True) if title else ""
-        title_len = len(title_text)
-        items.append(_check("Titel findes", bool(title_text), 3))
-        items.append(_check("Titel-laengde 30-60", 30 <= title_len <= 60, 2, f"{title_len} tegn"))
-        meta = soup.find("meta", attrs={"name": "description"})
-        meta_text = (meta.get("content", "").strip() if meta else "")
-        meta_len = len(meta_text)
-        items.append(_check("Meta description findes", bool(meta_text), 3))
-        items.append(_check("Meta description 70-160", 70 <= meta_len <= 160, 2, f"{meta_len} tegn"))
-        h1s = soup.find_all("h1")
-        items.append(_check("Praecis een H1", len(h1s) == 1, 3, f"{len(h1s)} stk"))
-        h2s = soup.find_all("h2")
-        items.append(_check("Min. 2 H2-underoverskrifter", len(h2s) >= 2, 2, f"{len(h2s)} stk"))
-        h1_text = h1s[0].get_text(strip=True).lower() if h1s else ""
-        viewport = soup.find("meta", attrs={"name": "viewport"})
-        items.append(_check("Viewport (mobil)", bool(viewport), 3))
-        robots_meta = soup.find("meta", attrs={"name": "robots"})
-        noindex = robots_meta and "noindex" in (robots_meta.get("content", "") or "").lower()
-        items.append(_check("Ikke noindex", not noindex, 3, "noindex!" if noindex else ""))
-        canonical = soup.find("link", rel=lambda v: v and "canonical" in v)
-        items.append(_check("Canonical", bool(canonical), 2))
-        jsonlds = soup.find_all("script", attrs={"type": "application/ld+json"})
-        schema_types = []
-        for s in jsonlds:
-            try:
-                import json as _json
-                d = _json.loads(s.string or "{}")
-                g = d.get("@graph") or [d]
-                for node in g:
-                    t = node.get("@type")
-                    if isinstance(t, list):
-                        schema_types.extend(t)
-                    elif t:
-                        schema_types.append(t)
-            except Exception:
-                pass
-        items.append(_check("JSON-LD schema", bool(jsonlds), 2, ", ".join(schema_types[:3])))
-        og_title = soup.find("meta", attrs={"property": "og:title"})
-        og_img = soup.find("meta", attrs={"property": "og:image"})
-        items.append(_check("Open Graph", bool(og_title), 1, "med billede" if og_img else "uden billede"))
-        twitter = soup.find("meta", attrs={"name": re.compile("twitter:card", re.I)})
-        items.append(_check("Twitter card", bool(twitter), 1))
-        favicon = soup.find("link", rel=lambda v: v and "icon" in v)
-        items.append(_check("Favicon", bool(favicon), 1))
-        html_tag = soup.find("html")
-        lang = html_tag.get("lang") if html_tag else None
-        items.append(_check("lang-attribut", bool(lang), 1, lang or ""))
-        images = soup.find_all("img")
-        no_alt = [img for img in images if not img.get("alt", "").strip()]
-        items.append(_check("Billeder har alt-tekst", len(no_alt) == 0, 2, f"{len(no_alt)} mangler af {len(images)}"))
-
-        # --- Indhold ---
-        for tag in soup(["script", "style", "noscript"]):
-            tag.decompose()
-        text = soup.get_text(" ", strip=True)
-        words = re.findall(r"[\w\u00C0-\u024F']+", text)
-        wc = len(words)
-        items.append(_check("Mindst 300 ord", wc >= 300, 3, f"{wc} ord"))
-        sentences = [s for s in re.split(r"[.!?]+\s", text) if len(s.strip()) > 2]
-        avg_sent = round(wc / max(len(sentences), 1), 1)
-        items.append(_check("Lesbarhed: saetninger < 25 ord", avg_sent < 25, 1, f"snit {avg_sent} ord"))
-        def _syllables(w):
-            w = w.lower()
-            groups = re.findall(r"[aeiouyaeiouy]+", w)
-            return max(len(groups), 1)
-        try:
-            syl = sum(_syllables(w) for w in words)
-            flesch = round(206.835 - 1.015 * (wc / max(len(sentences), 1)) - 84.6 * (syl / max(wc, 1)))
-            items.append(_check("Flesch-lesbarhed > 50", flesch > 50, 1, f"score {flesch}"))
-        except Exception:
-            pass
-        paragraphs = [p for p in soup.find_all("p") if len(p.get_text(strip=True)) > 20]
-        long_paras = 0
-        for p in paragraphs:
-            if len(re.findall(r"[\w']+", p.get_text())) > 150:
-                long_paras += 1
-        items.append(_check("Korte afsnit (< 150 ord)", long_paras == 0, 1, f"{long_paras} lange"))
-        links_all = [a.get("href", "") for a in soup.find_all("a", href=True)]
-        host = urlparse(url).netloc if url else ""
-        internal = [l for l in links_all if l.startswith("/") or (host and host in l)]
-        external = [l for l in links_all if l.startswith("http") and host and host not in l]
-        items.append(_check("Min. 3 interne links", len(internal) >= 3, 2, f"{len(internal)} stk"))
-        items.append(_check("Min. 1 eksternt link", len(external) >= 1, 1, f"{len(external)} stk"))
-        mixed = is_https and "http://" in html.replace("http://www.w3.org", "")
-        items.append(_check("Intet mixed content", not mixed, 2))
-
-        # --- Focus keyword (som RankMath) ---
-        if keyword:
-            kw = re.sub(r"\s+", " ", keyword)
-            items.append(_check("Keyword i titel", kw in title_text.lower(), 3, title_text[:60]))
-            items.append(_check("Keyword i meta description", kw in meta_text.lower(), 2))
-            slug = urllib.parse.unquote(urlparse(url).path.lower()) if url else ""
-            items.append(_check("Keyword i URL", kw.replace(" ", "-") in slug or kw in slug, 2, slug[:40]))
-            items.append(_check("Keyword i H1", kw in h1_text, 2))
-            first10 = " ".join(words[: max(int(wc * 0.1), 20)]).lower()
-            items.append(_check("Keyword i foerste 10 % af teksten", kw in first10, 2))
-            density = (text.lower().count(kw) * max(len(kw.split()), 1)) / max(wc, 1) * 100
-            items.append(_check("Keyword density 0,5-3 %", 0.5 <= density <= 3.0, 2, f"{density:.1f} %"))
-
-        # --- Hastighed ---
-        if ms is not None:
-            items.append(_check("Svartid < 1500 ms", ms < 1500, 2, f"{ms} ms"))
-
-        total_weight = sum(c["weight"] for c in items)
-        earned = sum(c["weight"] for c in items if c["ok"])
-        score = round(earned / total_weight * 100) if total_weight else 0
-        return {
-            "score": score,
-            "items": [{"ok": c["ok"], "text": c["name"] + (f" ({c['info']})" if c["info"] else "")} for c in items],
-            "raw": items,
-            "title": title_text, "meta": meta_text, "h1": h1_text,
-            "words": wc, "internal": len(internal), "external": len(external),
-        }
-    except Exception as e:
-        return {"score": 0, "items": [{"ok": False, "text": f"Fejl: {e}"}], "raw": [],
-                "title": "", "meta": "", "h1": "", "words": 0, "internal": 0, "external": 0}
-
-
-def psi_fetch(url: str):
-    if not PSI_API_KEY:
-        return None
-    try:
-        r = HTTP.get(
-            "https://www.googleapis.com/pagespeedonline/v5/runPagespeed",
-            params={"url": url, "key": PSI_API_KEY, "strategy": "mobile"},
-            timeout=60,
-        )
-        r.raise_for_status()
-        d = r.json()
-        lr = d.get("lighthouseResult", {})
-        cats = lr.get("categories", {}).get("performance", {}).get("score")
-        audits = lr.get("audits", {})
-        lcp = audits.get("largest-contentful-paint", {}).get("displayValue", "")
-        cls = audits.get("cumulative-layout-shift", {}).get("displayValue", "")
-        return {"perf": round((cats or 0) * 100), "lcp": lcp, "cls": cls}
-    except Exception:
-        return None
-
-
-def deep_extras(url: str):
-    """Dyb-niveau: status paa eksterne links + billeder uden alt-tekst."""
-    items = []
-    try:
-        r = safe_request(url, timeout=12)
-        soup = BeautifulSoup(r.text, "html.parser")
-        base = url
-        ext_links = []
-        seen = set()
-        for a_ in soup.find_all("a", href=True):
-            href = urllib.parse.urljoin(base, a_["href"].split("#")[0])
-            d = urlparse(href).netloc
-            if d and d != urlparse(base).netloc and href not in seen:
-                seen.add(href)
-                ext_links.append(href)
-            if len(ext_links) >= 8:
-                break
-        broken = 0
-        for link in ext_links:
-            try:
-                lr = safe_request(link, timeout=8)
-                if lr.status_code >= 400:
-                    broken += 1
-            except Exception:
-                broken += 1
-        items.append({"ok": broken == 0, "text": f"Eksterne links: {len(ext_links)} tjekket, {broken} brodne"})
-        no_alt = [im for im in soup.find_all("img") if not (im.get("alt") or "").strip()]
-        items.append({"ok": len(no_alt) == 0, "text": f"Billeder uden alt-tekst: {len(no_alt)}"})
-    except Exception as e:
-        items.append({"ok": False, "text": "Dyb-scan fejlede: " + str(e)[:100]})
-    return items
 
 
 @app.post("/seo/audit")
@@ -1045,125 +367,6 @@ async def run_seo_audit(request: Request):
 
 
 # ---------- SEO: site-crawler ----------
-CRAWL_STATE = {"running": False, "done": 0, "total": 0, "start": "", "error": None, "avg": None}
-
-
-def site_crawl_sync(start_url: str, max_pages: int = 30):
-    try:
-        start_url = normalize_url(start_url)
-        host = urlparse(start_url).netloc
-        with get_db() as db:
-            db.execute("DELETE FROM seopages")
-            db.execute("DELETE FROM crawl_runs")
-        # robots.txt + sitemap.xml
-        robots_ok = sitemap_ok = False
-        sitemap_count = 0
-        try:
-            r = safe_request(f"https://{host}/robots.txt", timeout=8)
-            robots_ok = (r.status_code == 200)
-            m = re.search(r"Sitemap:\s*(\S+)", r.text, re.I)
-            sitemap_url = m.group(1) if m else f"https://{host}/sitemap.xml"
-            r2 = safe_request(sitemap_url, timeout=10)
-            if r2.status_code == 200:
-                sm = BeautifulSoup(r2.text, "html.parser")
-                sitemap_count = len(sm.find_all("loc"))
-                sitemap_ok = sitemap_count > 0
-        except Exception:
-            pass
-        with get_db() as db:
-            db.execute(
-                "INSERT INTO crawl_runs (host, robots_ok, sitemap_ok, sitemap_urls, started_at) VALUES (?,?,?,?,?)",
-                (host, int(robots_ok), int(sitemap_ok), sitemap_count, now_iso()),
-            )
-            run_id = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-
-        queue = [start_url]
-        seen = set()
-        CRAWL_STATE.update({"running": True, "done": 0, "total": max_pages, "start": start_url, "error": None, "avg": None})
-        total_score = 0
-        pages_saved = 0
-        while queue and len(seen) < max_pages:
-            current = queue.pop(0)
-            if current in seen:
-                continue
-            seen.add(current)
-            resp = None
-            try:
-                t0 = datetime.now()
-                resp = safe_request(current, timeout=10)
-                ms = int((datetime.now() - t0).total_seconds() * 1000)
-                res = analyze_page(current, "", html=resp.text if resp.status_code == 200 else None,
-                                   status_code=resp.status_code, ms=ms)
-                status = resp.status_code
-            except Exception:
-                res = {"score": 0, "title": "", "meta": "", "h1": "", "words": 0, "raw": []}
-                status = 0
-            issues = [c["name"] for c in res.get("raw", []) if not c["ok"]]
-            redirects = ""
-            if resp is not None and resp.history:
-                redirects = " -> ".join([str(r.status_code) for r in resp.history] + [str(resp.status_code)]) +                             " | " + " -> ".join([r.url for r in resp.history] + [resp.url])
-            content_hash = ""
-            if resp is not None and resp.status_code == 200:
-                psoup2 = BeautifulSoup(resp.text, "html.parser")
-                for t in psoup2(["script", "style", "noscript"]):
-                    t.decompose()
-                content_hash = hashlib.md5(" ".join(psoup2.get_text().split()).encode()).hexdigest()
-            with get_db() as db:
-                db.execute(
-                    "INSERT INTO seopages (run_id, url, http_status, title, meta_len, h1, words, score, issues, redirects, content_hash, crawled_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (run_id, current, status, res.get("title", "")[:200], len(res.get("meta", "")),
-                     res.get("h1", "")[:200], res.get("words", 0), res["score"],
-                     "; ".join(issues[:8]), redirects[:300], content_hash, now_iso()),
-                )
-            if resp is not None and resp.status_code < 400:
-                total_score += res["score"]
-                pages_saved += 1
-                try:
-                    psoup = BeautifulSoup(resp.text, "html.parser")
-                    for a in psoup.find_all("a", href=True):
-                        href = urllib.parse.urljoin(current, a["href"].split("#")[0])
-                        ph = urlparse(href)
-                        if ph.netloc == host and ph.scheme.startswith("http") and href not in seen:
-                            queue.append(href)
-                except Exception:
-                    pass
-            CRAWL_STATE["done"] = len(seen)
-            time.sleep(0.4)
-        avg = round(total_score / pages_saved) if pages_saved else 0
-        # sitemap-validering: tjek foerste 50 sitemap-URLs for 404/fejl
-        sitemap_broken = []
-        sitemap_missing = 0
-        if sitemap_ok:
-            try:
-                sm_urls = []
-                r3 = safe_request(sitemap_url, timeout=10)
-                for loc in BeautifulSoup(r3.text, "html.parser").find_all("loc"):
-                    sm_urls.append(loc.get_text(strip=True))
-                for su in sm_urls[:50]:
-                    try:
-                        rr = safe_request(su, timeout=8)
-                        if rr.status_code >= 400:
-                            sitemap_broken.append(f"{su} ({rr.status_code})")
-                    except Exception:
-                        sitemap_broken.append(f"{su} (timeout)")
-                    time.sleep(0.2)
-            except Exception:
-                pass
-        with get_db() as db:
-            db.execute("UPDATE crawl_runs SET pages=?, avg_score=?, finished_at=?, sitemap_broken=?, sitemap_missing=? WHERE id=?",
-                       (pages_saved, avg, now_iso(), "; ".join(sitemap_broken[:10]) if sitemap_broken else "",
-                        max(sitemap_count - pages_saved, 0) if sitemap_ok else 0, run_id))
-            db.execute("INSERT INTO health_history (host, avg_score, pages, run_id, checked_at) VALUES (?,?,?,?,?)",
-                       (host, avg, pages_saved, run_id, now_iso()))
-            if sitemap_broken:
-                add_alarm(db, "sitemap", f"{len(sitemap_broken)} sitemap-URLs fejler (foerste 50 tjekket)", "advarsel")
-        CRAWL_STATE.update({"running": False, "avg": avg})
-        return {"ok": True, "pages": pages_saved, "avg_score": avg, "robots_ok": robots_ok,
-                "sitemap_ok": sitemap_ok, "sitemap_urls": sitemap_count}
-    except Exception as e:
-        CRAWL_STATE.update({"running": False, "error": str(e)[:200]})
-        return {"ok": False, "error": str(e)[:200]}
 
 
 @app.post("/seo/crawl/delete")
@@ -1253,38 +456,6 @@ async def redirect_audit():
     return JSONResponse({"with_redirects": len(rows), "chains": chains, "loops": loops, "insecure": insecure})
 
 # ---------- SERP & konkurrenter ----------# ---------- SERP & konkurrenter ----------
-def discover_competitors_sync(keyword: str):
-    try:
-        query = urllib.parse.quote_plus(keyword)
-        response = safe_request(f"https://html.duckduckgo.com/html/?q={query}", timeout=10)
-        soup = BeautifulSoup(response.text, "html.parser")
-        found = []
-        for anchor in soup.select("a.result__url[href]"):
-            href = anchor.get("href", "")
-            if "uddg=" in href:
-                parsed = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
-                href = parsed.get("uddg", [href])[0]
-            if href.startswith("http") and "duckduckgo.com" not in href:
-                domain = urlparse(href).netloc
-                if domain and domain not in [item[0] for item in found]:
-                    found.append((domain, href))
-                if len(found) >= 5:
-                    break
-        if not found:
-            raise RuntimeError("Ingen resultater (DuckDuckGo blokerede muligvis - proev igen eller brug Juno/SerpAPI)")
-        with get_db() as db:
-            for domain, url in found:
-                info = crawl_competitor(url)
-                db.execute(
-                    "INSERT INTO competitors (name, url, crawled_info, found_at) VALUES (?,?,?,?)",
-                    (domain, url, info, now_iso()),
-                )
-        return {"ok": True, "count": len(found), "error": None}
-    except Exception as e:
-        err = str(e)[:200]
-        with get_db() as db:
-            add_alarm(db, "serp-scan", f"Konkurrent-scan '{keyword}' fejlede: {err}", "advarsel")
-        return {"ok": False, "count": 0, "error": err}
 
 
 @app.post("/serp/discover")
@@ -1297,23 +468,6 @@ async def discover(keyword: str = Form(...)):
     return RedirectResponse("/", status_code=303)
 
 
-def crawl_competitor(url: str):
-    try:
-        url = normalize_url(url)
-        response = safe_request(url)
-        if response.status_code != 200:
-            return f"HTTP-fejl {response.status_code}"
-        soup = BeautifulSoup(response.text, "html.parser")
-        title = soup.title.get_text(strip=True) if soup.title else "Ingen titel"
-        meta = soup.find("meta", attrs={"name": "description"})
-        description = meta.get("content", "").strip() if meta else "Ingen beskrivelse"
-        h1 = soup.find("h1")
-        h1_text = h1.get_text(strip=True) if h1 else "Ingen H1"
-        return f"Titel: {title[:80]} | H1: {h1_text[:60]} | Beskrivelse: {description[:100]}"
-    except Exception as e:
-        return f"Fejl: {e}"
-
-
 @app.post("/competitors/delete")
 async def delete_competitor(id: int = Form(...)):
     with get_db() as db:
@@ -1322,137 +476,9 @@ async def delete_competitor(id: int = Form(...)):
 
 
 # ---------- Artikler (AI + WordPress) ----------
-TEMPLATE_ARTICLE = """
-<h2>Hvad er {keyword}?</h2>
-<p>{keyword} er et emne, hvor god struktur, klar information og brugervenligt indhold gor en stor forskel.</p>
-<h3>Hvorfor er {keyword} vigtigt?</h3>
-<ul><li>Det hjaelper besogende med hurtigt at finde relevant information.</li><li>Godt struktureret indhold understotter sogemaskineforstaelse.</li></ul>
-<h3>Sadan kommer du i gang</h3>
-<ol><li>Definer malgruppen og deres behov.</li><li>Lav en klar side med overskrifter, korte afsnit og relevante links.</li><li>Tilfoj FAQ, interne links og relevant struktureret data.</li></ol>
-<h3>Konklusion</h3>
-<p>Med fokus paa kvalitet, struktur og brugerbehov kan indhold om {keyword} skabe langtidsholdbar vaerdi.</p>
-"""
-
-
-def serp_competitor_context(keyword: str, n: int = 5):
-    """Hent top-SERP-resultater som konkurrent-kontekst til artikelgenerering."""
-    if not SERPAPI_KEY:
-        return ""
-    try:
-        r = HTTP.get(
-            "https://serpapi.com/search",
-            params={"engine": "google", "q": keyword, "num": 10, "api_key": SERPAPI_KEY},
-            timeout=30,
-        )
-        r.raise_for_status()
-        org = r.json().get("organic_results") or []
-        lines = []
-        for it in org[:n]:
-            t = (it.get("title") or "").strip()
-            sn = (it.get("snippet") or "").strip()
-            if t:
-                lines.append(f"- {t}: {sn}" if sn else f"- {t}")
-        if not lines:
-            return ""
-        return "\n".join(lines)
-    except Exception:
-        return ""
 
 
 # ---------- SEO-strategier (v7.8) ----------
-STRATEGIES = {
-    "adsense": {
-        "label": "AdSense-indkomst",
-        "desc": "Long-tail informationsartikler, volumen forst, rolig CTA",
-        "words": "1000-1400",
-        "style": (
-            "Artikeltypen er LANG og informationsrig (1000-1400 ord). Maalgruppe: laesere fra "
-            "Google-sogninger der vil vide noget. Dybdegaaende sektioner, tabel eller liste med "
-            "konkrete data, FAQ-sektion med 4-5 spoergsmaal. Roelig, nyttig tone; hojst 1 diskret "
-            "produktlink. Fokus: laesetid, laesbarhed og reelle svar."
-        ),
-        "autopilot": "artikel",
-    },
-    "affiliate": {
-        "label": "Affiliate",
-        "desc": "Buyer-intent (best/vs/review), sammenligningstabeller, CTA-tung",
-        "words": "900-1200",
-        "style": (
-            "Artikeltypen er koebeside-venlig (900-1200 ord). Keywordet er typisk buyer-intent "
-            "(best, vs, review, hvor kan man koebe). Indhold: sammenligningstabel med 3-5 produkter/"
-            "valg, fordele-ulemper-lister, tydelig men aeldelig CTA efter hver stor sektion, FAQ med "
-            "4 koeb-relaterede spoergsmaal. Fokus: hjaelp laeseren at vælge."
-        ),
-        "autopilot": "artikel",
-    },
-    "backlinks": {
-        "label": "Backlink-vÃ¦kst",
-        "desc": "Link-vÃ¦rdigt indhold + prospector/outreach autopilot",
-        "words": "700-1000",
-        "style": (
-            "Artikeltypen er link-venlig (700-1000 ord): lister ('10 bedste ...'), checklister, "
-            "begynder-guides og ressourcesider andre sider naturligt vil linke til. Klar struktur, "
-            "citervenlige facts, faerre produktlinks. Autopiloten koerer ogsa backlink-prospecting "
-            "paa keywords i denne strategi."
-        ),
-        "autopilot": "backlink",
-    },
-}
-DEFAULT_STRATEGY = "adsense"
-
-
-def get_active_strategy() -> dict:
-    try:
-        with get_db() as db:
-            row = db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone()
-        key = row["value"] if row else DEFAULT_STRATEGY
-    except Exception:
-        key = DEFAULT_STRATEGY
-    return STRATEGIES.get(key, STRATEGIES[DEFAULT_STRATEGY])
-
-
-def generate_article_ai(keyword: str, strategy: dict = None):
-    st = strategy or get_active_strategy()
-    competitors = serp_competitor_context(keyword)
-    if competitors:
-        comp_block = (
-            "TOP 5 KONKURRENTER PA GOOGLE FOR DETA KEYWORD (titel + snippet):\n"
-            f"{competitors}\n\n"
-            "DIN OPGAVE: Skriv en artikel der er MAERKBART BEDRE end disse resultater. "
-            "Dæk alt hvad konkurrenterne dækker (content gap), og tilføj mere: konkrete "
-            "materialer, prisestimater, trin-for-trin, praktiske detaljer. "
-            "Byg KUN pa faktuelle, verifikbare oplysninger - ingen opdigtede tal, "
-            "ingen tom fyldstof-saetninger ('in today's world', 'look no further' osv. "
-            "er forbudt). Hver saetning skal give laeseren ny, brugbar info."
-        )
-    else:
-        comp_block = (
-            "KVALITETSKRAV: Byg KUN pa faktuelle, verifikbare oplysninger om emnet - "
-            "ingen opdigtede tal eller statistik. Ingen tom fyldstof-saetninger. "
-            "Hver saetning skal give laeseren konkret, brugbar info (materialer, "
-            "prisniveauer, trin, fejl man skal undga). Mål: bedre end de nuværende "
-            "topresultater pa Google for dette keyword."
-        )
-    prompt = (
-        f"Write an SEO-optimized blog article draft in English about '{keyword}' for a steampunk "
-        f"cosplay & merchandise webshop. Output raw HTML (h2/h3/p/ul/ol only, no <html> wrapper). "
-        f"Include: engaging intro, 3-4 H2 sections, a bullet list, an FAQ section, "
-        f"and a short conclusion. Around {st['words']} words. No images. Natural, helpful tone.\n\n"
-        f"STRATEGI ({st['label']}): {st['style']}\n\n"
-        f"{comp_block}"
-    )
-    resp = HTTP.post(
-        "https://api.aimlapi.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {AIMLAPI_KEY}", "Content-Type": "application/json"},
-        json={
-            "model": AI_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 3000,
-        },
-        timeout=120,
-    )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
 
 
 @app.post("/articles/generate")
@@ -1464,13 +490,13 @@ async def create_article(keyword: str = Form(...)):
     title = f"Guide: {keyword} i 2027"
     content = TEMPLATE_ARTICLE.format(keyword=keyword)
     err = None
-    if AIMLAPI_KEY:
+    if AI_KEY:
         try:
             loop = asyncio.get_event_loop()
             st_active = get_active_strategy()
             content = await loop.run_in_executor(executor, generate_article_ai, keyword, st_active)
             title = f"Guide: {keyword}"
-            source = f"AI ({AI_MODEL})"
+            source = f"AI ({get_ai_model()})"
         except Exception as e:
             err = str(e)[:200]
     with get_db() as db:
@@ -1516,141 +542,9 @@ async def delete_article(id: int = Form(...)):
 
 
 # ---------- Artikel-kvalitetsgate (v8-plan) ----------
-QUALITY_MIN_WORDS = int(os.environ.get("QUALITY_MIN_WORDS", "400") or 0)
-
-
-def quality_check(content: str, keyword: str) -> dict:
-    """Deterministisk tjek foer en artikel maa blive WP-kladde.
-    Blokerer: for faa ord (min. QUALITY_MIN_WORDS, eller 80 % af SERP-gennemsnittet fra Content Gap),
-    fokus-keyword mangler, under 2 H2-overskrifter. Advarer: faerre end 2 interne links."""
-    soup = BeautifulSoup(content or "", "html.parser")
-    text = soup.get_text(" ", strip=True)
-    words = len(text.split())
-    min_words = QUALITY_MIN_WORDS
-    try:
-        with get_db() as db:
-            gap = db.execute("SELECT stats_json FROM content_gap WHERE keyword=? ORDER BY id DESC LIMIT 1", (keyword,)).fetchone()
-        avg = jsonlib.loads(gap["stats_json"]).get("summary", {}).get("avg_words", 0) if gap and gap["stats_json"] else 0
-        if avg:
-            min_words = max(min_words, int(avg * 0.8))
-    except Exception:
-        pass
-    h2 = len(soup.find_all("h2")) or len([l for l in (content or "").splitlines() if l.startswith("## ")])
-    internal = 0
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if href.startswith("/") or (TRACK_DOMAIN and TRACK_DOMAIN in href):
-            internal += 1
-    errors, warnings = [], []
-    if words < min_words:
-        errors.append(f"for kort: {words} ord (min. {min_words})")
-    if keyword and keyword.lower() not in text.lower():
-        errors.append(f"fokus-keyword '{keyword}' mangler")
-    if h2 < 2:
-        errors.append(f"kun {h2} H2-overskrift(er), min. 2")
-    if internal < 2:
-        warnings.append(f"kun {internal} interne link(s), anbefalet min. 2")
-    return {"passed": not errors, "words": words, "min_words": min_words, "h2": h2, "internal_links": internal,
-            "errors": errors, "warnings": warnings}
 
 
 # ---------- Growth Pack (v7.7): autopilot + backlink-prospector ----------
-def wp_push_draft(title: str, content: str):
-    resp = HTTP.post(
-        f"{WP_URL.rstrip('/')}/wp-json/wp/v2/posts",
-        auth=(WP_USER, WP_APP_PASSWORD),
-        json={"title": title, "content": content, "status": "draft"},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json().get("id")
-
-
-def autopilot_sync():
-    """Growth-autopilot: vaelg aeldste ubrugte keyword-idee -> AI-artikel -> (valgfrit) WP-kladde."""
-    if not AIMLAPI_KEY:
-        with get_db() as db:
-            add_alarm(db, "growth", "Autopilot sprang over: AIMLAPI_KEY mangler", "advarsel")
-        return "no-ai"
-    with get_db() as db:
-        row = db.execute(
-            "SELECT id, idea FROM keyword_ideas WHERE idea IS NOT NULL AND idea != '' "
-            "AND idea NOT IN (SELECT keyword FROM articles) ORDER BY id ASC LIMIT 1"
-        ).fetchone()
-    if not row:
-        # Idea-puljen er tom: sow nye via Google-autocomplete fra eksisterende keywords
-        try:
-            with get_db() as db:
-                seeds = [r["keyword"] for r in db.execute("SELECT DISTINCT keyword FROM keywords LIMIT 5").fetchall()]
-            if not seeds:
-                seeds = ["steampunk costume", "steampunk goggles"]
-            import urllib.parse as _up
-            newideas = []
-            for seed in seeds[:3]:
-                rr = HTTP.get(
-                    "https://suggestqueries.google.com/complete/search",
-                    params={"client": "firefox", "q": seed, "hl": "en"},
-                    timeout=10,
-                )
-                for sug in (rr.json()[1] or [])[:5]:
-                    if sug.lower() != seed.lower():
-                        newideas.append(sug)
-            with get_db() as db:
-                for ni in dict.fromkeys(newideas):
-                    db.execute("INSERT OR IGNORE INTO keyword_ideas (keyword, idea, source, created_at) VALUES (?,?,?,?)",
-                               (ni.split()[0] if ni else "", ni, "autopilot", now_iso()))
-            with get_db() as db:
-                row = db.execute(
-                    "SELECT id, idea FROM keyword_ideas WHERE idea IS NOT NULL AND idea != '' "
-                    "AND idea NOT IN (SELECT keyword FROM articles) ORDER BY id ASC LIMIT 1"
-                ).fetchone()
-        except Exception as e:
-            with get_db() as db:
-                add_alarm(db, "growth", f"Autopilot kunne ikke hente nye ideer: {str(e)[:120]}", "advarsel")
-            return "no-ideas"
-        if not row:
-            return "no-ideas"
-    idea = row["idea"].strip()
-    st_auto = get_active_strategy()
-    if st_auto.get("autopilot") == "backlink":
-        try:
-            prospect_sync(idea)
-        except Exception as e:
-            with get_db() as db:
-                add_alarm(db, "growth", f"Autopilot-prospecting fejlede for '{idea}': {str(e)[:120]}", "advarsel")
-        with get_db() as db:
-            db.execute("DELETE FROM keyword_ideas WHERE id=?", (row["id"],))
-        return "backlink-prospect"
-    try:
-        content = generate_article_ai(idea, st_auto)
-    except Exception as e:
-        with get_db() as db:
-            add_alarm(db, "growth", f"Autopilot-generering fejlede for '{idea}': {str(e)[:150]}", "advarsel")
-        return "ai-fail"
-    title = f"Guide: {idea}"
-    with get_db() as db:
-        cur = db.execute(
-            "INSERT INTO articles (title, keyword, content, source, created_at) VALUES (?,?,?,?,?)",
-            (title, idea, content, "Autopilot", now_iso()),
-        )
-        art_id = cur.lastrowid
-        db.execute("DELETE FROM keyword_ideas WHERE id=?", (row["id"],))
-    gate = quality_check(content, idea)
-    if not gate["passed"]:
-        with get_db() as db:
-            db.execute("UPDATE articles SET status=? WHERE id=?", ("Stoppet af kvalitetsgate: " + "; ".join(gate["errors"]), art_id))
-            add_alarm(db, "kvalitet", f"Autopilot-artikel #{art_id} ('{idea}') blev ikke sendt til WP: " + "; ".join(gate["errors"]), "advarsel")
-        return f"quality-blocked:{art_id}"
-    if WP_URL and WP_USER and WP_APP_PASSWORD and module_on("wp_push"):
-        try:
-            wp_id = wp_push_draft(title, content)
-            link = f"{WP_URL.rstrip('/')}/wp-admin/post.php?post={wp_id}&action=edit"
-            with get_db() as db:
-                db.execute("UPDATE articles SET status='Sendt til WP (kladde)', wp_link=? WHERE id=?", (link, art_id))
-        except Exception as e:
-            with get_db() as db:
-                add_alarm(db, "growth", f"Autopilot WP-push fejlede for #{art_id}: {str(e)[:150]}", "advarsel")
-    return f"ok:{art_id}"
 
 
 async def run_autopilot():
@@ -1671,70 +565,6 @@ async def job_growth_autopilot():
     await run_autopilot()
 
 
-def classify_site(url: str):
-    u = (url or "").lower()
-    if any(x in u for x in ("/blog/", ".blogspot", "medium.com", "substack.com")):
-        return "blog"
-    if any(x in u for x in ("directory", "liste", "resources", "tools")):
-        return "liste"
-    if any(x in u for x in ("forum", "reddit.com", "quora.com")):
-        return "forum"
-    return "artikel"
-
-
-EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
-
-def prospect_sync(keyword: str):
-    if not SERPAPI_KEY:
-        with get_db() as db:
-            add_alarm(db, "growth", "Backlink-prospector: SERPAPI_KEY mangler", "advarsel")
-        return
-    r = HTTP.get(
-        "https://serpapi.com/search",
-        params={"engine": "google", "q": keyword, "num": 10, "api_key": SERPAPI_KEY},
-        timeout=20,
-    )
-    results = (r.json().get("organic_results") or [])[:10]
-    for res in results:
-        url = res.get("link") or ""
-        if not url or urlparse(url).netloc in (TRACK_DOMAIN, "www." + TRACK_DOMAIN):
-            continue
-        site = urlparse(url).netloc
-        stype = classify_site(url)
-        email, draft = None, None
-        try:
-            resp = safe_request(url, timeout=6)
-            found = EMAIL_RE.findall(resp.text or "")
-            email = next((e for e in found if not any(x in e.lower() for x in (".png", ".jpg", ".webp", ".svg", "example.com", "sentry"))), None)
-        except Exception:
-            pass
-        if AIMLAPI_KEY and email:
-            try:
-                prompt = (
-                    f"Write a short (max 120 words) friendly outreach email in English to {email} "
-                    f"who runs {site}. Suggest a steampunk cosplay guide or resource relevant to "
-                    f"their page about '{keyword}' as a reason to add a link to our site {TRACK_DOMAIN}. "
-                    f"Output only the email body."
-                )
-                resp2 = HTTP.post(
-                    "https://api.aimlapi.com/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {AIMLAPI_KEY}", "Content-Type": "application/json"},
-                    json={"model": AI_MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": 3000},
-                    timeout=60,
-                )
-                draft = resp2.json()["choices"][0]["message"]["content"]
-            except Exception:
-                draft = None
-        if not draft:
-            draft = (f"Hej! Vi har lavet en guide om '{keyword}' paa {TRACK_DOMAIN}, som dine laesere "
-                     f"maaske kan bruge. Maa vi linke den ind? (Skabelon-draft - saet AIMLAPI_KEY for AI-drafts)")
-        with get_db() as db:
-            db.execute(
-                "INSERT INTO backlink_prospects (keyword, site, url, type, email, draft, created_at) VALUES (?,?,?,?,?,?,?)",
-                (keyword, site, url, stype, email, draft, now_iso()),
-            )
-
-
 @app.post("/backlinks/prospect")
 async def backlink_prospect(keyword: str = Form(...)):
     keyword = keyword.strip()
@@ -1752,35 +582,6 @@ async def backlink_delete(id: int = Form(...)):
 
 
 # ---------- Linktjek ----------
-def check_links_sync(url: str):
-    try:
-        url = normalize_url(url)
-        response = safe_request(url)
-        soup = BeautifulSoup(response.text, "html.parser")
-        links = [a["href"] for a in soup.find_all("a", href=True)]
-        external = [l for l in links if l.startswith("http")]
-        checked = 0
-        broken = 0
-        broken_list = []
-        for link in external[:LINKCHECK_LIMIT]:
-            checked += 1
-            try:
-                result = safe_request(link, timeout=5)
-                if result.status_code >= 400:
-                    broken += 1
-                    broken_list.append(f"{link} ({result.status_code})")
-            except Exception:
-                broken += 1
-                broken_list.append(f"{link} (timeout)")
-        result_text = (
-            f"Fandt {len(links)} links. Eksterne: {len(external)}. "
-            f"Tjekkede: {checked}. Broedte/muligt fejlende: {broken}."
-        )
-        if broken:
-            result_text += " | " + "; ".join(broken_list[:5])
-        return {"ok": True, "text": result_text, "broken": broken, "url": url, "error": None}
-    except Exception as e:
-        return {"ok": False, "text": f"Fejl: {e}", "broken": 0, "url": url, "error": str(e)[:200]}
 
 
 @app.post("/links/check")
@@ -1834,86 +635,6 @@ async def export_social_csv():
 # ---------- Steamgears Autopilot-bro (WordPress-pluginnet steamgears-autopilot >= 7.5) ----------
 # CC kalder pluginnets REST-API (/wp-json/sgap/v1) med samme WP_USER/WP_APP_PASSWORD som WordPress-push.
 # Retningen er altid CC -> site: sitet kan ikke naa CC, der kun lytter paa 127.0.0.1.
-SGAP_CHANNELS = {"facebook", "instagram", "pinterest", "linkedin", "twitter", "threads", "bluesky", "mastodon", "telegram", "google"}
-SGAP_ALIASES = {"x": "twitter", "fb": "facebook", "ig": "instagram", "gmb": "google", "google business": "google"}
-
-
-def sgap_ready() -> bool:
-    return bool(WP_URL and WP_USER and WP_APP_PASSWORD) and module_on("autopilot")
-
-
-def sgap_api(method: str, path: str, **kwargs):
-    """Kald pluginnets REST-API. Kaster requests.HTTPError ved fejl-svar."""
-    resp = HTTP.request(
-        method,
-        f"{WP_URL.rstrip('/')}/wp-json/sgap/v1{path}",
-        auth=(WP_USER, WP_APP_PASSWORD),
-        timeout=20,
-        **kwargs,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
-def sgap_channel(platform: str) -> str:
-    key = (platform or "").strip().lower()
-    key = SGAP_ALIASES.get(key, key)
-    return key if key in SGAP_CHANNELS else ""
-
-
-def sgap_error_text(exc: Exception) -> str:
-    status = getattr(getattr(exc, "response", None), "status_code", None)
-    if status in (401, 403):
-        return f"WordPress afviste login ({status}): WP_USER skal vaere administrator med et gyldigt Application Password"
-    if status == 404:
-        return "Autopilot-API'et findes ikke (404): er Steamgears Autopilot 7.5+ installeret og aktiveret?"
-    return f"Autopilot-pluginnet svarer ikke: {exc}"
-
-
-def sgap_snapshot() -> dict:
-    with get_db() as db:
-        row = db.execute("SELECT value FROM settings WHERE key='sgap_snapshot'").fetchone()
-    try:
-        return jsonlib.loads(row["value"]) if row and row["value"] else {}
-    except Exception:
-        return {}
-
-
-def sgap_sync() -> dict:
-    """Henter status fra pluginnet, gemmer et snapshot og alarmerer ved nye fejl eller nye kladder."""
-    if not sgap_ready():
-        return {}
-    previous = sgap_snapshot()
-    snap = {"checked_at": now_iso(), "ok": False, "error": "", "queue": {}, "channels": [], "pending_drafts": 0}
-    try:
-        stats = sgap_api("GET", "/stats", params={"days": 30})
-        drafts = sgap_api("GET", "/drafts", params={"status": "pending", "limit": 100})
-        snap["ok"] = True
-        snap["queue"] = {r["status"]: int(r["count"]) for r in stats.get("queue", [])}
-        channels = {}
-        for r in stats.get("events", []):
-            c = channels.setdefault(r["channel"], {"channel": r["channel"], "publish": 0, "click": 0, "order": 0, "revenue": 0.0})
-            if r["event_type"] in ("publish", "click", "order"):
-                c[r["event_type"]] = int(r["count"])
-            if r["event_type"] == "order":
-                c["revenue"] = round(float(r["value"] or 0), 2)
-        snap["channels"] = sorted(channels.values(), key=lambda c: (-c["revenue"], -c["click"]))
-        snap["pending_drafts"] = len(drafts) if isinstance(drafts, list) else 0
-    except Exception as e:
-        snap["error"] = sgap_error_text(e)
-    with get_db() as db:
-        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('sgap_snapshot', ?)", (jsonlib.dumps(snap),))
-        # Kun alarm naar noget AENDRER sig, saa Telegram ikke spammes hver halve time.
-        if snap["error"] and snap["error"] != previous.get("error"):
-            add_alarm(db, "autopilot", snap["error"], "advarsel")
-        if snap["ok"]:
-            failed, failed_before = snap["queue"].get("failed", 0), previous.get("queue", {}).get("failed", 0)
-            if failed > failed_before:
-                add_alarm(db, "autopilot", f"{failed - failed_before} opslag fejlede i Steamgears Autopilot (se Queue i WordPress)", "advarsel")
-            drafts_now, drafts_before = snap["pending_drafts"], previous.get("pending_drafts", 0)
-            if drafts_now > drafts_before:
-                add_alarm(db, "autopilot", f"{drafts_now} AI-kladde(r) venter paa godkendelse i WordPress", "info")
-    return snap
 
 
 async def job_sgap_sync():
@@ -2163,8 +884,8 @@ def startup_selftest_sync():
             db.execute("DELETE FROM _selftest")
     except Exception as e:
         fejl.append("DB-skrivetest: " + str(e)[:80])
-    if APP_TOKEN and not AIMLAPI_KEY:
-        fejl.append("AIMLAPI_KEY mangler - AI-artikler vil fejle")
+    if APP_TOKEN and not AI_KEY:
+        fejl.append(f"{AI_KEY_ENV} mangler - AI-artikler vil fejle")
     if ruter < 40:
         fejl.append("Kun " + str(ruter) + " ruter registreret (forventet 50+)")
     try:
@@ -2243,21 +964,10 @@ async def get_duplicates():
 
 
 # ---------- AI: interne links, meta/social, synlighed ----------
-def ai_chat(prompt: str, max_tokens: int = 1500):
-    resp = HTTP.post(
-        "https://api.aimlapi.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {AIMLAPI_KEY}", "Content-Type": "application/json"},
-        json={"model": AI_MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens},
-        timeout=120,
-    )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
-
-
 @app.post("/seo/linksuggest")
 async def suggest_internal_links():
-    if not AIMLAPI_KEY:
-        return JSONResponse({"ok": False, "error": "AIMLAPI_KEY ikke sat"})
+    if not AI_KEY:
+        return JSONResponse({"ok": False, "error": f"{AI_KEY_ENV} ikke sat"})
     with get_db() as db:
         pages = db.execute("SELECT url, title, h1, words FROM seopages ORDER BY score DESC LIMIT 40").fetchall()
         kws = [r["keyword"] for r in db.execute("SELECT keyword FROM keywords LIMIT 20").fetchall()]
@@ -2287,8 +997,8 @@ async def suggest_internal_links():
 
 
 def rewrite_meta_sync(url: str, title: str, desc: str, keyword: str):
-    if not AIMLAPI_KEY:
-        return {"error": "AIMLAPI_KEY ikke sat"}
+    if not AI_KEY:
+        return {"error": f"{AI_KEY_ENV} ikke sat"}
     prompt = (
         "Du er en SEO-ekspert for " + TRACK_DOMAIN + ". Optimer denne side:\n"
         "URL: " + url + "\n"
@@ -2343,7 +1053,7 @@ async def seo_rewrite(request: Request):
 
 @app.post("/articles/meta")
 async def generate_meta(id: int = Form(...)):
-    if not AIMLAPI_KEY:
+    if not AI_KEY:
         return RedirectResponse("/", status_code=303)
     with get_db() as db:
         art = db.execute("SELECT * FROM articles WHERE id=?", (id,)).fetchone()
@@ -2375,7 +1085,7 @@ async def generate_meta(id: int = Form(...)):
 
 @app.post("/ai/visibility")
 async def ai_visibility(question: str = Form(...)):
-    if not AIMLAPI_KEY:
+    if not AI_KEY:
         return RedirectResponse("/", status_code=303)
     question = question.strip()
     if not question:
@@ -2781,7 +1491,9 @@ async def dashboard(request: Request):
         "gsc_days": gsc_days,
         "gsc_queries": gsc_queries,
         "drift_rows": drift_rows,
-        "ai_enabled": bool(AIMLAPI_KEY),
+        "ai_enabled": bool(AI_KEY),
+        "ai_provider": AI_PROVIDER,
+        "ai_model": get_ai_model(),
         "wp_enabled": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "serpapi_enabled": bool(SERPAPI_KEY),
         "telegram_enabled": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
@@ -2832,9 +1544,9 @@ def strategy_check_sync(key: str):
     # AI-noegle (artikel-strategier: kritisk; backlink: til AI-drafts)
     if is_backlink:
         add(bool(SERPAPI_KEY), "SERPAPI_KEY: " + ("OK" if SERPAPI_KEY else "MANGLER (prospecting kan ikke kore)"), kritisk=True)
-        add(bool(AIMLAPI_KEY), "AIMLAPI_KEY (AI-outreach-drafts): " + ("OK" if AIMLAPI_KEY else "mangler - drafts skrives manuelt"))
+        add(bool(AI_KEY), f"{AI_KEY_ENV} (AI-outreach-drafts): " + ("OK" if AI_KEY else "mangler - drafts skrives manuelt"))
     else:
-        add(bool(AIMLAPI_KEY), "AIMLAPI_KEY (AI-artikler): " + ("OK" if AIMLAPI_KEY else "MANGLER (generering falder tilbage til skabelon)"), kritisk=True)
+        add(bool(AI_KEY), f"{AI_KEY_ENV} (AI-artikler): " + ("OK" if AI_KEY else "MANGLER (generering falder tilbage til skabelon)"), kritisk=True)
         add(bool(SERPAPI_KEY), "SERPAPI_KEY (konkurrent-analyse): " + ("OK" if SERPAPI_KEY else "mangler - prompten kobrer uden SERP-kontekst"))
 
     # WordPress-push
@@ -2892,6 +1604,18 @@ async def settings_strategy(request: Request):
     return RedirectResponse("/", status_code=303)
 
 
+@app.post("/settings/ai-model")
+async def settings_ai_model(request: Request):
+    form = await request.form()
+    model = str(form.get("model", "")).strip()
+    with get_db() as db:
+        if model:
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ai_model', ?)", (model,))
+        else:
+            db.execute("DELETE FROM settings WHERE key='ai_model'")
+    return RedirectResponse("/", status_code=303)
+
+
 @app.post("/notes/add")
 async def add_note(content: str = Form(...)):
     if content.strip():
@@ -2939,7 +1663,8 @@ async def health():
         "schema_ok": schema_ok,
         "budget": {s: {"used": u, "limit": l} for s, (u, l) in budget_usage().items()},
         "version": APP_VERSION,
-        "ai": bool(AIMLAPI_KEY),
+        "ai": bool(AI_KEY),
+        "ai_provider": AI_PROVIDER,
         "wordpress": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "serpapi": bool(SERPAPI_KEY),
         "telegram": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),

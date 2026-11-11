@@ -3,7 +3,7 @@ set -e
 PROJECT_DIR="$HOME/command-center"
 
 echo "⚡ Command Center v7.10 - installerer i $PROJECT_DIR..."
-mkdir -p "$PROJECT_DIR/app/templates" "$PROJECT_DIR/app/data" "$PROJECT_DIR/app/static" "$PROJECT_DIR/deploy" "$PROJECT_DIR/scripts"
+mkdir -p "$PROJECT_DIR/app/templates" "$PROJECT_DIR/app/data" "$PROJECT_DIR/app/static" "$PROJECT_DIR/app/services" "$PROJECT_DIR/deploy" "$PROJECT_DIR/scripts"
 echo "📄 requirements.txt..."
 cat << 'EOF_REQ' > "$PROJECT_DIR/requirements.txt"
 fastapi==0.115.6
@@ -22,9 +22,13 @@ cat << 'EOF_ENVDOT' > "$PROJECT_DIR/.env.example"
 # Login-token for hele dashboardet (OBBLIGATORISK pa VPS!)
 APP_TOKEN=
 JUNO_TOKEN=                              # Junos egen noegle til automatisk API-push (laeg den fra copy-siden her)
-# AI-artikler: din aimlapi-noegle
+# AI-artikler: aimlapi (standard) eller OpenRouter — begge er OpenAI-kompatible.
+# OPENROUTER_KEY sat + tom AI_PROVIDER = OpenRouter vaelges automatisk.
+AI_PROVIDER=
 AIMLAPI_KEY=
-AI_MODEL=google/gemini-3-8-flash
+OPENROUTER_KEY=
+# Tom = providerens standard (aimlapi: anthropic/claude-3-5-sonnet, openrouter: anthropic/claude-3.5-sonnet)
+AI_MODEL=
 # WordPress-push + Steamgears Autopilot-bro (Application Password for en ADMINISTRATOR: WP Admin > Users > Profile)
 WP_URL=https://steamgears.eu
 WP_USER=
@@ -86,31 +90,41 @@ import json as jsonlib
 import subprocess
 import sys
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "data", "center.db")
-STATIC_DIR = os.path.join(BASE_DIR, "static")
+# --- Funktioner flyttet ud (v8.0 M4). Gen-eksporteres, saa app.main er uaendret. ---
+from app.core import (
+    AI_KEY, AI_KEY_ENV, AI_MODEL, AI_PROVIDER, API_BUDGETS, APP_TOKEN,
+    get_ai_model,
+    APP_VERSION, BASE_DIR, BRIDGE_POLL_MINUTES, BudgetAdapter,
+    BudgetExceeded, DB_PATH, GITHUB_REPO, GITHUB_TOKEN,
+    HTTP, JUNO_TOKEN, LINKCHECK_LIMIT, MODULES,
+    PSI_API_KEY, SCHEMA_VERSION, SERPAPI_KEY, SSL_WARN_DAYS,
+    STATIC_DIR, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TRACK_DOMAIN,
+    WP_APP_PASSWORD, WP_URL, WP_USER, _MODULE_CACHE,
+    _WAL_SET, _adapter, _safe, cleanup_old_data,
+    ai_chat, create_indexes, get_db, init_db, init_schema,
+    load_dotenv, migrate_db, module_on, modules_state,
+    normalize_url, now_iso, report_schema_version, safe_request,
+    schema_version, set_module, stamp_schema_version,
+)
+from app.services.alarms import add_alarm, notify_telegram
+from app.services.budget import budget_service, budget_spend, budget_usage
+from app.services.wp import (
+    SGAP_ALIASES, SGAP_CHANNELS, sgap_api, sgap_channel,
+    sgap_error_text, sgap_ready, sgap_snapshot, sgap_sync,
+    wp_push_draft,
+)
+from app.services.content import (
+    DEFAULT_STRATEGY, EMAIL_RE, QUALITY_MIN_WORDS, STRATEGIES,
+    TEMPLATE_ARTICLE, autopilot_sync, classify_site, generate_article_ai,
+    get_active_strategy, prospect_sync, quality_check, serp_competitor_context,
+)
+from app.services.audit import (
+    CRAWL_STATE, _check, analyze_page, check_links_sync,
+    crawl_competitor, deep_extras, discover_competitors_sync, psi_fetch,
+    site_crawl_sync,
+)
 
-# --- Konfiguration via miljoevariabler / .env ---
-APP_TOKEN = os.environ.get("APP_TOKEN", "").strip()          # login-token (tom = ingen auth, lokal tilstand)
-JUNO_TOKEN = os.environ.get("JUNO_TOKEN", "").strip()
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()     # GitHub-token: pull-bro + selv-opdatering
-GITHUB_REPO = os.environ.get("GITHUB_REPO", "humle93/command-center").strip()
-BRIDGE_POLL_MINUTES = int(os.environ.get("BRIDGE_POLL_MINUTES", "60"))  # hvor ofte CC henter bridge-filer
-AIMLAPI_KEY = os.environ.get("AIMLAPI_KEY", "").strip()      # AI-artikelgenerator (gemini via aimlapi)
-AI_MODEL = os.environ.get("AI_MODEL", "google/gemini-3-8-flash")
-WP_URL = os.environ.get("WP_URL", "").strip()                # fx https://steamgears.eu
-WP_USER = os.environ.get("WP_USER", "").strip()
-WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "").strip()
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "").strip()
-TRACK_DOMAIN = os.environ.get("TRACK_DOMAIN", "steamgears.eu").strip()
-SSL_WARN_DAYS = int(os.environ.get("SSL_WARN_DAYS", "30"))
-LINKCHECK_LIMIT = int(os.environ.get("LINKCHECK_LIMIT", "25"))
-PSI_API_KEY = os.environ.get("PSI_API_KEY", "").strip()   # Google PageSpeed API (gratis noegle)
 
-APP_VERSION = "7.10.0"
-SCHEMA_VERSION = 1  # v8.0: bumpes naar init_db/migrate_db aendrer tabeller eller kolonner
 app = FastAPI(title="Command Center Engine", version=APP_VERSION)
 # Git does not keep empty folders, so a fresh clone has no app/static: create it or startup fails.
 os.makedirs(STATIC_DIR, exist_ok=True)
@@ -120,405 +134,8 @@ scheduler = AsyncIOScheduler(timezone="Europe/Copenhagen")
 executor = ThreadPoolExecutor(max_workers=8)
 
 
-def load_dotenv(path=None):
-    path = path or os.path.join(os.path.dirname(BASE_DIR), ".env")
-    if not os.path.exists(path):
-        return
-    for line in open(path):
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        os.environ.setdefault(key.strip(), val.strip())
-
-
-load_dotenv()
-APP_TOKEN = os.environ.get("APP_TOKEN", "").strip()
-AIMLAPI_KEY = os.environ.get("AIMLAPI_KEY", "").strip()
-WP_URL = os.environ.get("WP_URL", "").strip()
-WP_USER = os.environ.get("WP_USER", "").strip()
-WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "").strip()
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "").strip()
-TRACK_DOMAIN = os.environ.get("TRACK_DOMAIN", "steamgears.eu").strip()
-
-
-_WAL_SET = False
-
-
-@contextmanager
-def get_db():
-    global _WAL_SET
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=15)  # timeout = busy timeout (15 s)
-    conn.row_factory = sqlite3.Row
-    if not _WAL_SET:
-        # WAL is a property of the database file: setting it once per process is enough.
-        conn.execute("PRAGMA journal_mode=WAL")
-        _WAL_SET = True
-    conn.execute("PRAGMA synchronous=NORMAL")
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-def init_db():
-    with get_db() as db:
-        db.executescript("""
-        CREATE TABLE IF NOT EXISTS schema_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        );
-        CREATE TABLE IF NOT EXISTS domains (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            url TEXT UNIQUE NOT NULL,
-            status TEXT DEFAULT 'Ukendt',
-            response_time TEXT DEFAULT '-',
-            ssl_days TEXT DEFAULT '-',
-            last_checked TEXT,
-            last_error TEXT
-        );
-        CREATE TABLE IF NOT EXISTS check_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            domain_id INTEGER NOT NULL,
-            status TEXT,
-            response_time INTEGER,
-            ssl_days INTEGER,
-            checked_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS competitors (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            url TEXT NOT NULL,
-            crawled_info TEXT DEFAULT 'Ikke scannet endnu',
-            status TEXT DEFAULT 'Aktiv',
-            found_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS articles (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            keyword TEXT,
-            content TEXT,
-            status TEXT DEFAULT 'Kladde',
-            source TEXT DEFAULT 'skabelon',
-            wp_link TEXT,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS linkcheck (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            url TEXT NOT NULL,
-            result TEXT,
-            checked_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS socialqueue (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            platform TEXT NOT NULL,
-            message TEXT NOT NULL,
-            status TEXT DEFAULT 'Klar i ko',
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS notes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            content TEXT,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS keywords (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            keyword TEXT UNIQUE NOT NULL,
-            position INTEGER,
-            target_url TEXT,
-            checked_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS alarms (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            type TEXT NOT NULL,
-            message TEXT NOT NULL,
-            severity TEXT DEFAULT 'info',
-            resolved INTEGER DEFAULT 0,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS gsc_daily (
-            day TEXT PRIMARY KEY,
-            clicks INTEGER,
-            impressions INTEGER,
-            ctr REAL,
-            avg_position REAL
-        );
-        CREATE TABLE IF NOT EXISTS gsc_queries (
-            day TEXT NOT NULL,
-            query TEXT NOT NULL,
-            clicks INTEGER,
-            impressions INTEGER,
-            position REAL,
-            PRIMARY KEY (day, query)
-        );
-        CREATE TABLE IF NOT EXISTS drift (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            checked_at TEXT,
-            orders INTEGER,
-            revenue REAL,
-            woo_status TEXT,
-            checkout_status TEXT,
-            notes TEXT
-        );
-        CREATE TABLE IF NOT EXISTS seopages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_id INTEGER,
-            url TEXT NOT NULL,
-            http_status INTEGER,
-            title TEXT,
-            meta_len INTEGER,
-            h1 TEXT,
-            words INTEGER,
-            score INTEGER,
-            issues TEXT,
-            crawled_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS crawl_runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            host TEXT,
-            robots_ok INTEGER DEFAULT 0,
-            sitemap_ok INTEGER DEFAULT 0,
-            sitemap_urls INTEGER DEFAULT 0,
-            pages INTEGER DEFAULT 0,
-            avg_score INTEGER,
-            started_at TEXT,
-            finished_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS monitors (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            url TEXT NOT NULL,
-            type TEXT NOT NULL DEFAULT 'contains',
-            expected TEXT NOT NULL,
-            last_status TEXT DEFAULT 'Ikke tjekket',
-            last_result TEXT,
-            last_checked TEXT
-        );
-        CREATE TABLE IF NOT EXISTS ai_visibility (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            question TEXT NOT NULL,
-            mention_found INTEGER DEFAULT 0,
-            snippet TEXT,
-            answer TEXT,
-            checked_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS health_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            host TEXT,
-            avg_score INTEGER,
-            pages INTEGER,
-            run_id INTEGER,
-            checked_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS internal_links (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            from_url TEXT,
-            to_url TEXT,
-            anchor TEXT,
-            reason TEXT,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS keyword_ideas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            keyword TEXT,
-            idea TEXT,
-            source TEXT,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS content_gap (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            keyword TEXT NOT NULL,
-            stats_json TEXT,
-            top_titles TEXT,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS outreach (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT NOT NULL,
-            source_url TEXT,
-            found_at TEXT,
-            UNIQUE(email, source_url)
-        );
-        CREATE TABLE IF NOT EXISTS backlink_prospects (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            keyword TEXT NOT NULL,
-            site TEXT,
-            url TEXT,
-            type TEXT,
-            email TEXT,
-            draft TEXT,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS visibility (
-            day TEXT PRIMARY KEY,
-            score REAL
-        );
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        );
-        CREATE TABLE IF NOT EXISTS keyword_difficulty (
-            keyword TEXT PRIMARY KEY,
-            difficulty INTEGER,
-            domains INTEGER,
-            authority INTEGER,
-            ads INTEGER,
-            avg_words INTEGER,
-            top_domains TEXT,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS auth_sessions (
-            sid_hash TEXT PRIMARY KEY,
-            created_at TEXT,
-            expires_at TEXT,
-            ip TEXT
-        );
-        """)
-
-
-def _safe(fn):
-    """Koer en init-funktion uden at lade importen crashe (opstart-stabilitet)."""
-    try:
-        fn()
-    except Exception as e:
-        print("[cc] init-fejl (proever igen om 5s):", repr(e), flush=True)
-        import time as _t
-        _t.sleep(5)
-        try:
-            fn()
-        except Exception as e2:
-            print("[cc] init-fejl fortsaetter (app starter alligevel):", repr(e2), flush=True)
-
-
-def migrate_db():
-    with get_db() as db:
-        cols = {}
-        for table, want in {
-            "articles": ["meta_title", "meta_desc"],
-            "seopages": ["content_hash", "redirects"],
-            "crawl_runs": ["sitemap_broken", "sitemap_missing"],
-        }.items():
-            existing = [r[1] for r in db.execute(f"PRAGMA table_info({table})").fetchall()]
-            for c in want:
-                if c not in existing:
-                    db.execute(f"ALTER TABLE {table} ADD COLUMN {c} TEXT")
-
-
-
-def create_indexes():
-    with get_db() as db:
-        for stmt in [
-            "CREATE INDEX IF NOT EXISTS idx_seopages_run ON seopages(run_id)",
-            "CREATE INDEX IF NOT EXISTS idx_gsc_daily_day ON gsc_daily(day)",
-            "CREATE INDEX IF NOT EXISTS idx_gsc_q ON gsc_queries(query)",
-            "CREATE INDEX IF NOT EXISTS idx_alarms_open ON alarms(resolved, id)",
-            "CREATE INDEX IF NOT EXISTS idx_hist_domain ON check_history(domain_id, id)",
-            "CREATE INDEX IF NOT EXISTS idx_health_time ON health_history(checked_at)",
-            "CREATE INDEX IF NOT EXISTS idx_crawl_time ON crawl_runs(started_at)",
-            "CREATE INDEX IF NOT EXISTS kw_ideas_kw ON keyword_ideas(keyword)",
-        ]:
-            db.execute(stmt)
-        db.execute("ANALYZE")
-
-
-def schema_version() -> int:
-    """Schema-versionen der er stemplet i databasen (0 = ikke stemplet / ukendt)."""
-    try:
-        with get_db() as db:
-            row = db.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
-        return int(row["value"]) if row else 0
-    except Exception:
-        return 0
-
-
-def stamp_schema_version():
-    with get_db() as db:
-        db.execute(
-            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', ?)",
-            (str(SCHEMA_VERSION),),
-        )
-
-
-def init_schema():
-    """Byg og migrer schemaet i raekkefoelge — stemplet saettes kun naar alle trin gik igennem.
-
-    Fejler et trin, bliver versionen i DB ikke opdateret, og naeste opstart (og /health)
-    kan se forskellen. Foer stod hvert trin med sit eget _safe()-kald, saa en fejlet
-    migrering kunne fortsaette i aevig tid uden at nogen opdagede det.
-    """
-    init_db()
-    migrate_db()
-    create_indexes()
-    stamp_schema_version()
-
-
-def report_schema_version():
-    """Goer version-mismatch synligt: skarp loglinje + alarm i UI'et."""
-    have = schema_version()
-    if have == SCHEMA_VERSION:
-        return
-    msg = (f"Database-schema er version {have or 'ukendt'}, koden forventer {SCHEMA_VERSION} — "
-           "en migrering er ikke gennemfoert (se serverloggen)")
-    print("[cc] SCHEMA-ADVARSEL:", msg, flush=True)
-    try:
-        # now_iso() er defineret laengere nede i filen, og denne koeres ved import.
-        with get_db() as db:
-            db.execute(
-                "INSERT INTO alarms (type, message, severity, created_at) VALUES (?, ?, ?, ?)",
-                ("schema", msg[:300], "kritisk", datetime.now().isoformat(timespec="seconds")),
-            )
-    except Exception:
-        pass
-
-
 _safe(init_schema)
 _safe(report_schema_version)
-
-
-MODULES = ["domains", "keywords", "ai", "monitors", "social", "links", "bridge", "spy", "wp_push", "telegram", "growth", "autopilot"]
-
-
-_MODULE_CACHE = {"at": 0.0, "states": {}}
-
-
-def modules_state() -> dict:
-    """On/off for every module from one query, cached for 10 s (cleared by set_module)."""
-    if time.time() - _MODULE_CACHE["at"] > 10:
-        try:
-            with get_db() as db:
-                rows = db.execute("SELECT key, value FROM settings WHERE key LIKE 'module\\_%' ESCAPE '\\'").fetchall()
-            stored = {r["key"][len("module_"):]: r["value"] == "on" for r in rows}
-        except Exception:
-            stored = {}
-        _MODULE_CACHE.update(at=time.time(), states={m: stored.get(m, True) for m in MODULES})
-    return _MODULE_CACHE["states"]
-
-
-def module_on(name: str) -> bool:
-    return modules_state().get(name, True)
-
-
-def set_module(name: str, state: str):
-    with get_db() as db:
-        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", ("module_" + name, state))
-    _MODULE_CACHE["at"] = 0.0
-
-
-def cleanup_old_data():
-    """Daglig oprydning: gamle maalinger rulles af, DB holdes sund."""
-    with get_db() as db:
-        db.execute("DELETE FROM check_history WHERE checked_at < datetime('now', '-90 days')")
-        db.execute("DELETE FROM alarms WHERE resolved=1 AND created_at < datetime('now', '-30 days')")
-        db.execute("DELETE FROM health_history WHERE checked_at < datetime('now', '-180 days')")
-        db.execute("DELETE FROM keyword_ideas WHERE created_at < datetime('now', '-180 days')")
-        db.execute("DELETE FROM auth_sessions WHERE expires_at < ?", (now_iso(),))
 
 
 # ---------- Auth ----------
@@ -589,7 +206,7 @@ def is_juno(request: Request) -> bool:
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
     request.state.insecure = (request.headers.get("x-forwarded-proto", "https") == "http" and (request.client.host if request.client else "") not in ("127.0.0.1", "::1"))
-    public = ("/login", "/health", "/static")
+    public = ("/login", "/landing", "/health", "/static")
     if APP_TOKEN and not any(path.startswith(p) for p in public) and not is_authed(request):
         if path.startswith("/api/") and is_juno(request):
             juno_forbidden = ("/api/bridge", "/api/duplicates", "/api/visibility", "/api/health-history")
@@ -605,6 +222,11 @@ async def auth_middleware(request: Request, call_next):
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
     return templates.TemplateResponse("login.html", {"request": request, "error": ""})
+
+
+@app.get("/landing", response_class=HTMLResponse)
+async def landing_page(request: Request):
+    return templates.TemplateResponse("landing.html", {"request": request})
 
 
 @app.post("/login")
@@ -662,114 +284,11 @@ _LOGIN_FAILS: dict = {}  # v7.9: IP -> (antal fejl, laas-til)
 
 
 # ---------- Hjaelpere ----------
-def normalize_url(url: str) -> str:
-    url = (url or "").strip()
-    if not url:
-        raise ValueError("URL mangler")
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
-    parsed = urlparse(url)
-    if not parsed.netloc or "." not in parsed.netloc:
-        raise ValueError("Ugyldig URL")
-    return url.rstrip("/")
 
 
 # ---------- API-budget (v8-plan): maanedligt loft for betalte API'er ----------
 # Taeller hvert kald til SerpAPI og AI (aimlapi) pr. kalendermaaned og stopper dem ved loftet,
 # saa en loekke eller fejl aldrig kan braende kreditter af. 0 = intet loft.
-API_BUDGETS = {
-    "serpapi": ("serpapi.com", int(os.environ.get("SERPAPI_MONTHLY_LIMIT", "1000") or 0)),
-    "ai": ("aimlapi.com", int(os.environ.get("AI_MONTHLY_LIMIT", "3000") or 0)),
-}
-
-
-class BudgetExceeded(requests.RequestException):
-    """Kaldet blev ikke sendt: maanedens API-budget er brugt."""
-
-
-def budget_service(url: str) -> str:
-    host = (urlparse(url).hostname or "").lower()
-    for service, (domain, _limit) in API_BUDGETS.items():
-        if host == domain or host.endswith("." + domain):
-            return service
-    return ""
-
-
-def budget_usage() -> dict:
-    """{service: (brugt, loft)} for indevaerende maaned."""
-    month = datetime.now().strftime("%Y-%m")
-    with get_db() as db:
-        rows = {r["key"]: int(r["value"]) for r in db.execute(
-            "SELECT key, value FROM settings WHERE key LIKE ?", (f"budget_{month}_%",)
-        ).fetchall()}
-    return {s: (rows.get(f"budget_{month}_{s}", 0), limit) for s, (_d, limit) in API_BUDGETS.items()}
-
-
-def budget_spend(service: str):
-    """Taeller et kald; kaster BudgetExceeded hvis loftet er naaet. Alarmerer en gang ved 80 % og 100 %."""
-    limit = API_BUDGETS[service][1]
-    month = datetime.now().strftime("%Y-%m")
-    key = f"budget_{month}_{service}"
-    with get_db() as db:
-        row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-        used = int(row["value"]) if row else 0
-        if limit and used >= limit:
-            raise BudgetExceeded(f"{service}: maanedens budget paa {limit} kald er brugt (saet {service.upper()}_MONTHLY_LIMIT i .env)")
-        used += 1
-        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(used)))
-        if limit and used == int(limit * 0.8):
-            add_alarm(db, "budget", f"{service}: 80 % af maanedens API-budget brugt ({used}/{limit})", "advarsel")
-        if limit and used == limit:
-            add_alarm(db, "budget", f"{service}: maanedens API-budget er brugt ({limit} kald) - kald stoppes til den 1.", "kritisk")
-
-
-class BudgetAdapter(requests.adapters.HTTPAdapter):
-    def send(self, request, **kwargs):
-        service = budget_service(request.url)
-        if service:
-            budget_spend(service)
-        return super().send(request, **kwargs)
-
-
-HTTP = requests.Session()
-_adapter = BudgetAdapter(pool_connections=10, pool_maxsize=20)
-HTTP.mount("https://", _adapter)
-HTTP.mount("http://", _adapter)
-
-
-def safe_request(url: str, timeout: int = 6):
-    return HTTP.get(
-        url,
-        timeout=timeout,
-        allow_redirects=True,
-        headers={"User-Agent": "Mozilla/5.0 CommandCenter/7.4"},
-    )
-
-
-def now_iso():
-    return datetime.now().isoformat(timespec="seconds")
-
-
-def add_alarm(db, type_: str, message: str, severity: str = "info"):
-    db.execute(
-        "INSERT INTO alarms (type, message, severity, created_at) VALUES (?, ?, ?, ?)",
-        (type_, message, severity, now_iso()),
-    )
-    notify_telegram(f"[{severity.upper()}] {type_}: {message}")
-
-
-def notify_telegram(text: str):
-    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
-        return False
-    try:
-        HTTP.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": text},
-            timeout=8,
-        )
-        return True
-    except Exception:
-        return False
 
 
 # ---------- Domene-tjek ----------
@@ -873,199 +392,6 @@ async def domain_history(domain_id: int):
 
 
 # ---------- SEO: deep audit (RankMath/Yoast-stil) ----------
-def _check(name, ok, weight, info=""):
-    return {"name": name, "ok": bool(ok), "weight": weight, "info": info}
-
-
-def analyze_page(url: str, keyword: str = "", html: str = None, status_code: int = None, ms: int = None):
-    """Dyb sideanalyse i stil med RankMath Pro / Yoast Premium."""
-    keyword = (keyword or "").strip().lower()
-    items = []
-    try:
-        if html is None:
-            url = normalize_url(url)
-            t0 = datetime.now()
-            response = safe_request(url, timeout=10)
-            ms = int((datetime.now() - t0).total_seconds() * 1000)
-            status_code = response.status_code
-            html = response.text
-        soup = BeautifulSoup(html, "html.parser")
-
-        # --- Grundlaeggende ---
-        items.append(_check("HTTP 200", status_code == 200, 3, f"status {status_code}"))
-        is_https = url.startswith("https://")
-        items.append(_check("HTTPS", is_https, 3))
-        title = soup.find("title")
-        title_text = title.get_text(strip=True) if title else ""
-        title_len = len(title_text)
-        items.append(_check("Titel findes", bool(title_text), 3))
-        items.append(_check("Titel-laengde 30-60", 30 <= title_len <= 60, 2, f"{title_len} tegn"))
-        meta = soup.find("meta", attrs={"name": "description"})
-        meta_text = (meta.get("content", "").strip() if meta else "")
-        meta_len = len(meta_text)
-        items.append(_check("Meta description findes", bool(meta_text), 3))
-        items.append(_check("Meta description 70-160", 70 <= meta_len <= 160, 2, f"{meta_len} tegn"))
-        h1s = soup.find_all("h1")
-        items.append(_check("Praecis een H1", len(h1s) == 1, 3, f"{len(h1s)} stk"))
-        h2s = soup.find_all("h2")
-        items.append(_check("Min. 2 H2-underoverskrifter", len(h2s) >= 2, 2, f"{len(h2s)} stk"))
-        h1_text = h1s[0].get_text(strip=True).lower() if h1s else ""
-        viewport = soup.find("meta", attrs={"name": "viewport"})
-        items.append(_check("Viewport (mobil)", bool(viewport), 3))
-        robots_meta = soup.find("meta", attrs={"name": "robots"})
-        noindex = robots_meta and "noindex" in (robots_meta.get("content", "") or "").lower()
-        items.append(_check("Ikke noindex", not noindex, 3, "noindex!" if noindex else ""))
-        canonical = soup.find("link", rel=lambda v: v and "canonical" in v)
-        items.append(_check("Canonical", bool(canonical), 2))
-        jsonlds = soup.find_all("script", attrs={"type": "application/ld+json"})
-        schema_types = []
-        for s in jsonlds:
-            try:
-                import json as _json
-                d = _json.loads(s.string or "{}")
-                g = d.get("@graph") or [d]
-                for node in g:
-                    t = node.get("@type")
-                    if isinstance(t, list):
-                        schema_types.extend(t)
-                    elif t:
-                        schema_types.append(t)
-            except Exception:
-                pass
-        items.append(_check("JSON-LD schema", bool(jsonlds), 2, ", ".join(schema_types[:3])))
-        og_title = soup.find("meta", attrs={"property": "og:title"})
-        og_img = soup.find("meta", attrs={"property": "og:image"})
-        items.append(_check("Open Graph", bool(og_title), 1, "med billede" if og_img else "uden billede"))
-        twitter = soup.find("meta", attrs={"name": re.compile("twitter:card", re.I)})
-        items.append(_check("Twitter card", bool(twitter), 1))
-        favicon = soup.find("link", rel=lambda v: v and "icon" in v)
-        items.append(_check("Favicon", bool(favicon), 1))
-        html_tag = soup.find("html")
-        lang = html_tag.get("lang") if html_tag else None
-        items.append(_check("lang-attribut", bool(lang), 1, lang or ""))
-        images = soup.find_all("img")
-        no_alt = [img for img in images if not img.get("alt", "").strip()]
-        items.append(_check("Billeder har alt-tekst", len(no_alt) == 0, 2, f"{len(no_alt)} mangler af {len(images)}"))
-
-        # --- Indhold ---
-        for tag in soup(["script", "style", "noscript"]):
-            tag.decompose()
-        text = soup.get_text(" ", strip=True)
-        words = re.findall(r"[\w\u00C0-\u024F']+", text)
-        wc = len(words)
-        items.append(_check("Mindst 300 ord", wc >= 300, 3, f"{wc} ord"))
-        sentences = [s for s in re.split(r"[.!?]+\s", text) if len(s.strip()) > 2]
-        avg_sent = round(wc / max(len(sentences), 1), 1)
-        items.append(_check("Lesbarhed: saetninger < 25 ord", avg_sent < 25, 1, f"snit {avg_sent} ord"))
-        def _syllables(w):
-            w = w.lower()
-            groups = re.findall(r"[aeiouyaeiouy]+", w)
-            return max(len(groups), 1)
-        try:
-            syl = sum(_syllables(w) for w in words)
-            flesch = round(206.835 - 1.015 * (wc / max(len(sentences), 1)) - 84.6 * (syl / max(wc, 1)))
-            items.append(_check("Flesch-lesbarhed > 50", flesch > 50, 1, f"score {flesch}"))
-        except Exception:
-            pass
-        paragraphs = [p for p in soup.find_all("p") if len(p.get_text(strip=True)) > 20]
-        long_paras = 0
-        for p in paragraphs:
-            if len(re.findall(r"[\w']+", p.get_text())) > 150:
-                long_paras += 1
-        items.append(_check("Korte afsnit (< 150 ord)", long_paras == 0, 1, f"{long_paras} lange"))
-        links_all = [a.get("href", "") for a in soup.find_all("a", href=True)]
-        host = urlparse(url).netloc if url else ""
-        internal = [l for l in links_all if l.startswith("/") or (host and host in l)]
-        external = [l for l in links_all if l.startswith("http") and host and host not in l]
-        items.append(_check("Min. 3 interne links", len(internal) >= 3, 2, f"{len(internal)} stk"))
-        items.append(_check("Min. 1 eksternt link", len(external) >= 1, 1, f"{len(external)} stk"))
-        mixed = is_https and "http://" in html.replace("http://www.w3.org", "")
-        items.append(_check("Intet mixed content", not mixed, 2))
-
-        # --- Focus keyword (som RankMath) ---
-        if keyword:
-            kw = re.sub(r"\s+", " ", keyword)
-            items.append(_check("Keyword i titel", kw in title_text.lower(), 3, title_text[:60]))
-            items.append(_check("Keyword i meta description", kw in meta_text.lower(), 2))
-            slug = urllib.parse.unquote(urlparse(url).path.lower()) if url else ""
-            items.append(_check("Keyword i URL", kw.replace(" ", "-") in slug or kw in slug, 2, slug[:40]))
-            items.append(_check("Keyword i H1", kw in h1_text, 2))
-            first10 = " ".join(words[: max(int(wc * 0.1), 20)]).lower()
-            items.append(_check("Keyword i foerste 10 % af teksten", kw in first10, 2))
-            density = (text.lower().count(kw) * max(len(kw.split()), 1)) / max(wc, 1) * 100
-            items.append(_check("Keyword density 0,5-3 %", 0.5 <= density <= 3.0, 2, f"{density:.1f} %"))
-
-        # --- Hastighed ---
-        if ms is not None:
-            items.append(_check("Svartid < 1500 ms", ms < 1500, 2, f"{ms} ms"))
-
-        total_weight = sum(c["weight"] for c in items)
-        earned = sum(c["weight"] for c in items if c["ok"])
-        score = round(earned / total_weight * 100) if total_weight else 0
-        return {
-            "score": score,
-            "items": [{"ok": c["ok"], "text": c["name"] + (f" ({c['info']})" if c["info"] else "")} for c in items],
-            "raw": items,
-            "title": title_text, "meta": meta_text, "h1": h1_text,
-            "words": wc, "internal": len(internal), "external": len(external),
-        }
-    except Exception as e:
-        return {"score": 0, "items": [{"ok": False, "text": f"Fejl: {e}"}], "raw": [],
-                "title": "", "meta": "", "h1": "", "words": 0, "internal": 0, "external": 0}
-
-
-def psi_fetch(url: str):
-    if not PSI_API_KEY:
-        return None
-    try:
-        r = HTTP.get(
-            "https://www.googleapis.com/pagespeedonline/v5/runPagespeed",
-            params={"url": url, "key": PSI_API_KEY, "strategy": "mobile"},
-            timeout=60,
-        )
-        r.raise_for_status()
-        d = r.json()
-        lr = d.get("lighthouseResult", {})
-        cats = lr.get("categories", {}).get("performance", {}).get("score")
-        audits = lr.get("audits", {})
-        lcp = audits.get("largest-contentful-paint", {}).get("displayValue", "")
-        cls = audits.get("cumulative-layout-shift", {}).get("displayValue", "")
-        return {"perf": round((cats or 0) * 100), "lcp": lcp, "cls": cls}
-    except Exception:
-        return None
-
-
-def deep_extras(url: str):
-    """Dyb-niveau: status paa eksterne links + billeder uden alt-tekst."""
-    items = []
-    try:
-        r = safe_request(url, timeout=12)
-        soup = BeautifulSoup(r.text, "html.parser")
-        base = url
-        ext_links = []
-        seen = set()
-        for a_ in soup.find_all("a", href=True):
-            href = urllib.parse.urljoin(base, a_["href"].split("#")[0])
-            d = urlparse(href).netloc
-            if d and d != urlparse(base).netloc and href not in seen:
-                seen.add(href)
-                ext_links.append(href)
-            if len(ext_links) >= 8:
-                break
-        broken = 0
-        for link in ext_links:
-            try:
-                lr = safe_request(link, timeout=8)
-                if lr.status_code >= 400:
-                    broken += 1
-            except Exception:
-                broken += 1
-        items.append({"ok": broken == 0, "text": f"Eksterne links: {len(ext_links)} tjekket, {broken} brodne"})
-        no_alt = [im for im in soup.find_all("img") if not (im.get("alt") or "").strip()]
-        items.append({"ok": len(no_alt) == 0, "text": f"Billeder uden alt-tekst: {len(no_alt)}"})
-    except Exception as e:
-        items.append({"ok": False, "text": "Dyb-scan fejlede: " + str(e)[:100]})
-    return items
 
 
 @app.post("/seo/audit")
@@ -1100,125 +426,6 @@ async def run_seo_audit(request: Request):
 
 
 # ---------- SEO: site-crawler ----------
-CRAWL_STATE = {"running": False, "done": 0, "total": 0, "start": "", "error": None, "avg": None}
-
-
-def site_crawl_sync(start_url: str, max_pages: int = 30):
-    try:
-        start_url = normalize_url(start_url)
-        host = urlparse(start_url).netloc
-        with get_db() as db:
-            db.execute("DELETE FROM seopages")
-            db.execute("DELETE FROM crawl_runs")
-        # robots.txt + sitemap.xml
-        robots_ok = sitemap_ok = False
-        sitemap_count = 0
-        try:
-            r = safe_request(f"https://{host}/robots.txt", timeout=8)
-            robots_ok = (r.status_code == 200)
-            m = re.search(r"Sitemap:\s*(\S+)", r.text, re.I)
-            sitemap_url = m.group(1) if m else f"https://{host}/sitemap.xml"
-            r2 = safe_request(sitemap_url, timeout=10)
-            if r2.status_code == 200:
-                sm = BeautifulSoup(r2.text, "html.parser")
-                sitemap_count = len(sm.find_all("loc"))
-                sitemap_ok = sitemap_count > 0
-        except Exception:
-            pass
-        with get_db() as db:
-            db.execute(
-                "INSERT INTO crawl_runs (host, robots_ok, sitemap_ok, sitemap_urls, started_at) VALUES (?,?,?,?,?)",
-                (host, int(robots_ok), int(sitemap_ok), sitemap_count, now_iso()),
-            )
-            run_id = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-
-        queue = [start_url]
-        seen = set()
-        CRAWL_STATE.update({"running": True, "done": 0, "total": max_pages, "start": start_url, "error": None, "avg": None})
-        total_score = 0
-        pages_saved = 0
-        while queue and len(seen) < max_pages:
-            current = queue.pop(0)
-            if current in seen:
-                continue
-            seen.add(current)
-            resp = None
-            try:
-                t0 = datetime.now()
-                resp = safe_request(current, timeout=10)
-                ms = int((datetime.now() - t0).total_seconds() * 1000)
-                res = analyze_page(current, "", html=resp.text if resp.status_code == 200 else None,
-                                   status_code=resp.status_code, ms=ms)
-                status = resp.status_code
-            except Exception:
-                res = {"score": 0, "title": "", "meta": "", "h1": "", "words": 0, "raw": []}
-                status = 0
-            issues = [c["name"] for c in res.get("raw", []) if not c["ok"]]
-            redirects = ""
-            if resp is not None and resp.history:
-                redirects = " -> ".join([str(r.status_code) for r in resp.history] + [str(resp.status_code)]) +                             " | " + " -> ".join([r.url for r in resp.history] + [resp.url])
-            content_hash = ""
-            if resp is not None and resp.status_code == 200:
-                psoup2 = BeautifulSoup(resp.text, "html.parser")
-                for t in psoup2(["script", "style", "noscript"]):
-                    t.decompose()
-                content_hash = hashlib.md5(" ".join(psoup2.get_text().split()).encode()).hexdigest()
-            with get_db() as db:
-                db.execute(
-                    "INSERT INTO seopages (run_id, url, http_status, title, meta_len, h1, words, score, issues, redirects, content_hash, crawled_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (run_id, current, status, res.get("title", "")[:200], len(res.get("meta", "")),
-                     res.get("h1", "")[:200], res.get("words", 0), res["score"],
-                     "; ".join(issues[:8]), redirects[:300], content_hash, now_iso()),
-                )
-            if resp is not None and resp.status_code < 400:
-                total_score += res["score"]
-                pages_saved += 1
-                try:
-                    psoup = BeautifulSoup(resp.text, "html.parser")
-                    for a in psoup.find_all("a", href=True):
-                        href = urllib.parse.urljoin(current, a["href"].split("#")[0])
-                        ph = urlparse(href)
-                        if ph.netloc == host and ph.scheme.startswith("http") and href not in seen:
-                            queue.append(href)
-                except Exception:
-                    pass
-            CRAWL_STATE["done"] = len(seen)
-            time.sleep(0.4)
-        avg = round(total_score / pages_saved) if pages_saved else 0
-        # sitemap-validering: tjek foerste 50 sitemap-URLs for 404/fejl
-        sitemap_broken = []
-        sitemap_missing = 0
-        if sitemap_ok:
-            try:
-                sm_urls = []
-                r3 = safe_request(sitemap_url, timeout=10)
-                for loc in BeautifulSoup(r3.text, "html.parser").find_all("loc"):
-                    sm_urls.append(loc.get_text(strip=True))
-                for su in sm_urls[:50]:
-                    try:
-                        rr = safe_request(su, timeout=8)
-                        if rr.status_code >= 400:
-                            sitemap_broken.append(f"{su} ({rr.status_code})")
-                    except Exception:
-                        sitemap_broken.append(f"{su} (timeout)")
-                    time.sleep(0.2)
-            except Exception:
-                pass
-        with get_db() as db:
-            db.execute("UPDATE crawl_runs SET pages=?, avg_score=?, finished_at=?, sitemap_broken=?, sitemap_missing=? WHERE id=?",
-                       (pages_saved, avg, now_iso(), "; ".join(sitemap_broken[:10]) if sitemap_broken else "",
-                        max(sitemap_count - pages_saved, 0) if sitemap_ok else 0, run_id))
-            db.execute("INSERT INTO health_history (host, avg_score, pages, run_id, checked_at) VALUES (?,?,?,?,?)",
-                       (host, avg, pages_saved, run_id, now_iso()))
-            if sitemap_broken:
-                add_alarm(db, "sitemap", f"{len(sitemap_broken)} sitemap-URLs fejler (foerste 50 tjekket)", "advarsel")
-        CRAWL_STATE.update({"running": False, "avg": avg})
-        return {"ok": True, "pages": pages_saved, "avg_score": avg, "robots_ok": robots_ok,
-                "sitemap_ok": sitemap_ok, "sitemap_urls": sitemap_count}
-    except Exception as e:
-        CRAWL_STATE.update({"running": False, "error": str(e)[:200]})
-        return {"ok": False, "error": str(e)[:200]}
 
 
 @app.post("/seo/crawl/delete")
@@ -1308,38 +515,6 @@ async def redirect_audit():
     return JSONResponse({"with_redirects": len(rows), "chains": chains, "loops": loops, "insecure": insecure})
 
 # ---------- SERP & konkurrenter ----------# ---------- SERP & konkurrenter ----------
-def discover_competitors_sync(keyword: str):
-    try:
-        query = urllib.parse.quote_plus(keyword)
-        response = safe_request(f"https://html.duckduckgo.com/html/?q={query}", timeout=10)
-        soup = BeautifulSoup(response.text, "html.parser")
-        found = []
-        for anchor in soup.select("a.result__url[href]"):
-            href = anchor.get("href", "")
-            if "uddg=" in href:
-                parsed = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
-                href = parsed.get("uddg", [href])[0]
-            if href.startswith("http") and "duckduckgo.com" not in href:
-                domain = urlparse(href).netloc
-                if domain and domain not in [item[0] for item in found]:
-                    found.append((domain, href))
-                if len(found) >= 5:
-                    break
-        if not found:
-            raise RuntimeError("Ingen resultater (DuckDuckGo blokerede muligvis - proev igen eller brug Juno/SerpAPI)")
-        with get_db() as db:
-            for domain, url in found:
-                info = crawl_competitor(url)
-                db.execute(
-                    "INSERT INTO competitors (name, url, crawled_info, found_at) VALUES (?,?,?,?)",
-                    (domain, url, info, now_iso()),
-                )
-        return {"ok": True, "count": len(found), "error": None}
-    except Exception as e:
-        err = str(e)[:200]
-        with get_db() as db:
-            add_alarm(db, "serp-scan", f"Konkurrent-scan '{keyword}' fejlede: {err}", "advarsel")
-        return {"ok": False, "count": 0, "error": err}
 
 
 @app.post("/serp/discover")
@@ -1352,23 +527,6 @@ async def discover(keyword: str = Form(...)):
     return RedirectResponse("/", status_code=303)
 
 
-def crawl_competitor(url: str):
-    try:
-        url = normalize_url(url)
-        response = safe_request(url)
-        if response.status_code != 200:
-            return f"HTTP-fejl {response.status_code}"
-        soup = BeautifulSoup(response.text, "html.parser")
-        title = soup.title.get_text(strip=True) if soup.title else "Ingen titel"
-        meta = soup.find("meta", attrs={"name": "description"})
-        description = meta.get("content", "").strip() if meta else "Ingen beskrivelse"
-        h1 = soup.find("h1")
-        h1_text = h1.get_text(strip=True) if h1 else "Ingen H1"
-        return f"Titel: {title[:80]} | H1: {h1_text[:60]} | Beskrivelse: {description[:100]}"
-    except Exception as e:
-        return f"Fejl: {e}"
-
-
 @app.post("/competitors/delete")
 async def delete_competitor(id: int = Form(...)):
     with get_db() as db:
@@ -1377,137 +535,9 @@ async def delete_competitor(id: int = Form(...)):
 
 
 # ---------- Artikler (AI + WordPress) ----------
-TEMPLATE_ARTICLE = """
-<h2>Hvad er {keyword}?</h2>
-<p>{keyword} er et emne, hvor god struktur, klar information og brugervenligt indhold gor en stor forskel.</p>
-<h3>Hvorfor er {keyword} vigtigt?</h3>
-<ul><li>Det hjaelper besogende med hurtigt at finde relevant information.</li><li>Godt struktureret indhold understotter sogemaskineforstaelse.</li></ul>
-<h3>Sadan kommer du i gang</h3>
-<ol><li>Definer malgruppen og deres behov.</li><li>Lav en klar side med overskrifter, korte afsnit og relevante links.</li><li>Tilfoj FAQ, interne links og relevant struktureret data.</li></ol>
-<h3>Konklusion</h3>
-<p>Med fokus paa kvalitet, struktur og brugerbehov kan indhold om {keyword} skabe langtidsholdbar vaerdi.</p>
-"""
-
-
-def serp_competitor_context(keyword: str, n: int = 5):
-    """Hent top-SERP-resultater som konkurrent-kontekst til artikelgenerering."""
-    if not SERPAPI_KEY:
-        return ""
-    try:
-        r = HTTP.get(
-            "https://serpapi.com/search",
-            params={"engine": "google", "q": keyword, "num": 10, "api_key": SERPAPI_KEY},
-            timeout=30,
-        )
-        r.raise_for_status()
-        org = r.json().get("organic_results") or []
-        lines = []
-        for it in org[:n]:
-            t = (it.get("title") or "").strip()
-            sn = (it.get("snippet") or "").strip()
-            if t:
-                lines.append(f"- {t}: {sn}" if sn else f"- {t}")
-        if not lines:
-            return ""
-        return "\n".join(lines)
-    except Exception:
-        return ""
 
 
 # ---------- SEO-strategier (v7.8) ----------
-STRATEGIES = {
-    "adsense": {
-        "label": "AdSense-indkomst",
-        "desc": "Long-tail informationsartikler, volumen forst, rolig CTA",
-        "words": "1000-1400",
-        "style": (
-            "Artikeltypen er LANG og informationsrig (1000-1400 ord). Maalgruppe: laesere fra "
-            "Google-sogninger der vil vide noget. Dybdegaaende sektioner, tabel eller liste med "
-            "konkrete data, FAQ-sektion med 4-5 spoergsmaal. Roelig, nyttig tone; hojst 1 diskret "
-            "produktlink. Fokus: laesetid, laesbarhed og reelle svar."
-        ),
-        "autopilot": "artikel",
-    },
-    "affiliate": {
-        "label": "Affiliate",
-        "desc": "Buyer-intent (best/vs/review), sammenligningstabeller, CTA-tung",
-        "words": "900-1200",
-        "style": (
-            "Artikeltypen er koebeside-venlig (900-1200 ord). Keywordet er typisk buyer-intent "
-            "(best, vs, review, hvor kan man koebe). Indhold: sammenligningstabel med 3-5 produkter/"
-            "valg, fordele-ulemper-lister, tydelig men aeldelig CTA efter hver stor sektion, FAQ med "
-            "4 koeb-relaterede spoergsmaal. Fokus: hjaelp laeseren at vælge."
-        ),
-        "autopilot": "artikel",
-    },
-    "backlinks": {
-        "label": "Backlink-vÃ¦kst",
-        "desc": "Link-vÃ¦rdigt indhold + prospector/outreach autopilot",
-        "words": "700-1000",
-        "style": (
-            "Artikeltypen er link-venlig (700-1000 ord): lister ('10 bedste ...'), checklister, "
-            "begynder-guides og ressourcesider andre sider naturligt vil linke til. Klar struktur, "
-            "citervenlige facts, faerre produktlinks. Autopiloten koerer ogsa backlink-prospecting "
-            "paa keywords i denne strategi."
-        ),
-        "autopilot": "backlink",
-    },
-}
-DEFAULT_STRATEGY = "adsense"
-
-
-def get_active_strategy() -> dict:
-    try:
-        with get_db() as db:
-            row = db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone()
-        key = row["value"] if row else DEFAULT_STRATEGY
-    except Exception:
-        key = DEFAULT_STRATEGY
-    return STRATEGIES.get(key, STRATEGIES[DEFAULT_STRATEGY])
-
-
-def generate_article_ai(keyword: str, strategy: dict = None):
-    st = strategy or get_active_strategy()
-    competitors = serp_competitor_context(keyword)
-    if competitors:
-        comp_block = (
-            "TOP 5 KONKURRENTER PA GOOGLE FOR DETA KEYWORD (titel + snippet):\n"
-            f"{competitors}\n\n"
-            "DIN OPGAVE: Skriv en artikel der er MAERKBART BEDRE end disse resultater. "
-            "Dæk alt hvad konkurrenterne dækker (content gap), og tilføj mere: konkrete "
-            "materialer, prisestimater, trin-for-trin, praktiske detaljer. "
-            "Byg KUN pa faktuelle, verifikbare oplysninger - ingen opdigtede tal, "
-            "ingen tom fyldstof-saetninger ('in today's world', 'look no further' osv. "
-            "er forbudt). Hver saetning skal give laeseren ny, brugbar info."
-        )
-    else:
-        comp_block = (
-            "KVALITETSKRAV: Byg KUN pa faktuelle, verifikbare oplysninger om emnet - "
-            "ingen opdigtede tal eller statistik. Ingen tom fyldstof-saetninger. "
-            "Hver saetning skal give laeseren konkret, brugbar info (materialer, "
-            "prisniveauer, trin, fejl man skal undga). Mål: bedre end de nuværende "
-            "topresultater pa Google for dette keyword."
-        )
-    prompt = (
-        f"Write an SEO-optimized blog article draft in English about '{keyword}' for a steampunk "
-        f"cosplay & merchandise webshop. Output raw HTML (h2/h3/p/ul/ol only, no <html> wrapper). "
-        f"Include: engaging intro, 3-4 H2 sections, a bullet list, an FAQ section, "
-        f"and a short conclusion. Around {st['words']} words. No images. Natural, helpful tone.\n\n"
-        f"STRATEGI ({st['label']}): {st['style']}\n\n"
-        f"{comp_block}"
-    )
-    resp = HTTP.post(
-        "https://api.aimlapi.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {AIMLAPI_KEY}", "Content-Type": "application/json"},
-        json={
-            "model": AI_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 3000,
-        },
-        timeout=120,
-    )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
 
 
 @app.post("/articles/generate")
@@ -1519,13 +549,13 @@ async def create_article(keyword: str = Form(...)):
     title = f"Guide: {keyword} i 2027"
     content = TEMPLATE_ARTICLE.format(keyword=keyword)
     err = None
-    if AIMLAPI_KEY:
+    if AI_KEY:
         try:
             loop = asyncio.get_event_loop()
             st_active = get_active_strategy()
             content = await loop.run_in_executor(executor, generate_article_ai, keyword, st_active)
             title = f"Guide: {keyword}"
-            source = f"AI ({AI_MODEL})"
+            source = f"AI ({get_ai_model()})"
         except Exception as e:
             err = str(e)[:200]
     with get_db() as db:
@@ -1571,141 +601,9 @@ async def delete_article(id: int = Form(...)):
 
 
 # ---------- Artikel-kvalitetsgate (v8-plan) ----------
-QUALITY_MIN_WORDS = int(os.environ.get("QUALITY_MIN_WORDS", "400") or 0)
-
-
-def quality_check(content: str, keyword: str) -> dict:
-    """Deterministisk tjek foer en artikel maa blive WP-kladde.
-    Blokerer: for faa ord (min. QUALITY_MIN_WORDS, eller 80 % af SERP-gennemsnittet fra Content Gap),
-    fokus-keyword mangler, under 2 H2-overskrifter. Advarer: faerre end 2 interne links."""
-    soup = BeautifulSoup(content or "", "html.parser")
-    text = soup.get_text(" ", strip=True)
-    words = len(text.split())
-    min_words = QUALITY_MIN_WORDS
-    try:
-        with get_db() as db:
-            gap = db.execute("SELECT stats_json FROM content_gap WHERE keyword=? ORDER BY id DESC LIMIT 1", (keyword,)).fetchone()
-        avg = jsonlib.loads(gap["stats_json"]).get("summary", {}).get("avg_words", 0) if gap and gap["stats_json"] else 0
-        if avg:
-            min_words = max(min_words, int(avg * 0.8))
-    except Exception:
-        pass
-    h2 = len(soup.find_all("h2")) or len([l for l in (content or "").splitlines() if l.startswith("## ")])
-    internal = 0
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if href.startswith("/") or (TRACK_DOMAIN and TRACK_DOMAIN in href):
-            internal += 1
-    errors, warnings = [], []
-    if words < min_words:
-        errors.append(f"for kort: {words} ord (min. {min_words})")
-    if keyword and keyword.lower() not in text.lower():
-        errors.append(f"fokus-keyword '{keyword}' mangler")
-    if h2 < 2:
-        errors.append(f"kun {h2} H2-overskrift(er), min. 2")
-    if internal < 2:
-        warnings.append(f"kun {internal} interne link(s), anbefalet min. 2")
-    return {"passed": not errors, "words": words, "min_words": min_words, "h2": h2, "internal_links": internal,
-            "errors": errors, "warnings": warnings}
 
 
 # ---------- Growth Pack (v7.7): autopilot + backlink-prospector ----------
-def wp_push_draft(title: str, content: str):
-    resp = HTTP.post(
-        f"{WP_URL.rstrip('/')}/wp-json/wp/v2/posts",
-        auth=(WP_USER, WP_APP_PASSWORD),
-        json={"title": title, "content": content, "status": "draft"},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json().get("id")
-
-
-def autopilot_sync():
-    """Growth-autopilot: vaelg aeldste ubrugte keyword-idee -> AI-artikel -> (valgfrit) WP-kladde."""
-    if not AIMLAPI_KEY:
-        with get_db() as db:
-            add_alarm(db, "growth", "Autopilot sprang over: AIMLAPI_KEY mangler", "advarsel")
-        return "no-ai"
-    with get_db() as db:
-        row = db.execute(
-            "SELECT id, idea FROM keyword_ideas WHERE idea IS NOT NULL AND idea != '' "
-            "AND idea NOT IN (SELECT keyword FROM articles) ORDER BY id ASC LIMIT 1"
-        ).fetchone()
-    if not row:
-        # Idea-puljen er tom: sow nye via Google-autocomplete fra eksisterende keywords
-        try:
-            with get_db() as db:
-                seeds = [r["keyword"] for r in db.execute("SELECT DISTINCT keyword FROM keywords LIMIT 5").fetchall()]
-            if not seeds:
-                seeds = ["steampunk costume", "steampunk goggles"]
-            import urllib.parse as _up
-            newideas = []
-            for seed in seeds[:3]:
-                rr = HTTP.get(
-                    "https://suggestqueries.google.com/complete/search",
-                    params={"client": "firefox", "q": seed, "hl": "en"},
-                    timeout=10,
-                )
-                for sug in (rr.json()[1] or [])[:5]:
-                    if sug.lower() != seed.lower():
-                        newideas.append(sug)
-            with get_db() as db:
-                for ni in dict.fromkeys(newideas):
-                    db.execute("INSERT OR IGNORE INTO keyword_ideas (keyword, idea, source, created_at) VALUES (?,?,?,?)",
-                               (ni.split()[0] if ni else "", ni, "autopilot", now_iso()))
-            with get_db() as db:
-                row = db.execute(
-                    "SELECT id, idea FROM keyword_ideas WHERE idea IS NOT NULL AND idea != '' "
-                    "AND idea NOT IN (SELECT keyword FROM articles) ORDER BY id ASC LIMIT 1"
-                ).fetchone()
-        except Exception as e:
-            with get_db() as db:
-                add_alarm(db, "growth", f"Autopilot kunne ikke hente nye ideer: {str(e)[:120]}", "advarsel")
-            return "no-ideas"
-        if not row:
-            return "no-ideas"
-    idea = row["idea"].strip()
-    st_auto = get_active_strategy()
-    if st_auto.get("autopilot") == "backlink":
-        try:
-            prospect_sync(idea)
-        except Exception as e:
-            with get_db() as db:
-                add_alarm(db, "growth", f"Autopilot-prospecting fejlede for '{idea}': {str(e)[:120]}", "advarsel")
-        with get_db() as db:
-            db.execute("DELETE FROM keyword_ideas WHERE id=?", (row["id"],))
-        return "backlink-prospect"
-    try:
-        content = generate_article_ai(idea, st_auto)
-    except Exception as e:
-        with get_db() as db:
-            add_alarm(db, "growth", f"Autopilot-generering fejlede for '{idea}': {str(e)[:150]}", "advarsel")
-        return "ai-fail"
-    title = f"Guide: {idea}"
-    with get_db() as db:
-        cur = db.execute(
-            "INSERT INTO articles (title, keyword, content, source, created_at) VALUES (?,?,?,?,?)",
-            (title, idea, content, "Autopilot", now_iso()),
-        )
-        art_id = cur.lastrowid
-        db.execute("DELETE FROM keyword_ideas WHERE id=?", (row["id"],))
-    gate = quality_check(content, idea)
-    if not gate["passed"]:
-        with get_db() as db:
-            db.execute("UPDATE articles SET status=? WHERE id=?", ("Stoppet af kvalitetsgate: " + "; ".join(gate["errors"]), art_id))
-            add_alarm(db, "kvalitet", f"Autopilot-artikel #{art_id} ('{idea}') blev ikke sendt til WP: " + "; ".join(gate["errors"]), "advarsel")
-        return f"quality-blocked:{art_id}"
-    if WP_URL and WP_USER and WP_APP_PASSWORD and module_on("wp_push"):
-        try:
-            wp_id = wp_push_draft(title, content)
-            link = f"{WP_URL.rstrip('/')}/wp-admin/post.php?post={wp_id}&action=edit"
-            with get_db() as db:
-                db.execute("UPDATE articles SET status='Sendt til WP (kladde)', wp_link=? WHERE id=?", (link, art_id))
-        except Exception as e:
-            with get_db() as db:
-                add_alarm(db, "growth", f"Autopilot WP-push fejlede for #{art_id}: {str(e)[:150]}", "advarsel")
-    return f"ok:{art_id}"
 
 
 async def run_autopilot():
@@ -1726,70 +624,6 @@ async def job_growth_autopilot():
     await run_autopilot()
 
 
-def classify_site(url: str):
-    u = (url or "").lower()
-    if any(x in u for x in ("/blog/", ".blogspot", "medium.com", "substack.com")):
-        return "blog"
-    if any(x in u for x in ("directory", "liste", "resources", "tools")):
-        return "liste"
-    if any(x in u for x in ("forum", "reddit.com", "quora.com")):
-        return "forum"
-    return "artikel"
-
-
-EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
-
-def prospect_sync(keyword: str):
-    if not SERPAPI_KEY:
-        with get_db() as db:
-            add_alarm(db, "growth", "Backlink-prospector: SERPAPI_KEY mangler", "advarsel")
-        return
-    r = HTTP.get(
-        "https://serpapi.com/search",
-        params={"engine": "google", "q": keyword, "num": 10, "api_key": SERPAPI_KEY},
-        timeout=20,
-    )
-    results = (r.json().get("organic_results") or [])[:10]
-    for res in results:
-        url = res.get("link") or ""
-        if not url or urlparse(url).netloc in (TRACK_DOMAIN, "www." + TRACK_DOMAIN):
-            continue
-        site = urlparse(url).netloc
-        stype = classify_site(url)
-        email, draft = None, None
-        try:
-            resp = safe_request(url, timeout=6)
-            found = EMAIL_RE.findall(resp.text or "")
-            email = next((e for e in found if not any(x in e.lower() for x in (".png", ".jpg", ".webp", ".svg", "example.com", "sentry"))), None)
-        except Exception:
-            pass
-        if AIMLAPI_KEY and email:
-            try:
-                prompt = (
-                    f"Write a short (max 120 words) friendly outreach email in English to {email} "
-                    f"who runs {site}. Suggest a steampunk cosplay guide or resource relevant to "
-                    f"their page about '{keyword}' as a reason to add a link to our site {TRACK_DOMAIN}. "
-                    f"Output only the email body."
-                )
-                resp2 = HTTP.post(
-                    "https://api.aimlapi.com/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {AIMLAPI_KEY}", "Content-Type": "application/json"},
-                    json={"model": AI_MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": 3000},
-                    timeout=60,
-                )
-                draft = resp2.json()["choices"][0]["message"]["content"]
-            except Exception:
-                draft = None
-        if not draft:
-            draft = (f"Hej! Vi har lavet en guide om '{keyword}' paa {TRACK_DOMAIN}, som dine laesere "
-                     f"maaske kan bruge. Maa vi linke den ind? (Skabelon-draft - saet AIMLAPI_KEY for AI-drafts)")
-        with get_db() as db:
-            db.execute(
-                "INSERT INTO backlink_prospects (keyword, site, url, type, email, draft, created_at) VALUES (?,?,?,?,?,?,?)",
-                (keyword, site, url, stype, email, draft, now_iso()),
-            )
-
-
 @app.post("/backlinks/prospect")
 async def backlink_prospect(keyword: str = Form(...)):
     keyword = keyword.strip()
@@ -1807,35 +641,6 @@ async def backlink_delete(id: int = Form(...)):
 
 
 # ---------- Linktjek ----------
-def check_links_sync(url: str):
-    try:
-        url = normalize_url(url)
-        response = safe_request(url)
-        soup = BeautifulSoup(response.text, "html.parser")
-        links = [a["href"] for a in soup.find_all("a", href=True)]
-        external = [l for l in links if l.startswith("http")]
-        checked = 0
-        broken = 0
-        broken_list = []
-        for link in external[:LINKCHECK_LIMIT]:
-            checked += 1
-            try:
-                result = safe_request(link, timeout=5)
-                if result.status_code >= 400:
-                    broken += 1
-                    broken_list.append(f"{link} ({result.status_code})")
-            except Exception:
-                broken += 1
-                broken_list.append(f"{link} (timeout)")
-        result_text = (
-            f"Fandt {len(links)} links. Eksterne: {len(external)}. "
-            f"Tjekkede: {checked}. Broedte/muligt fejlende: {broken}."
-        )
-        if broken:
-            result_text += " | " + "; ".join(broken_list[:5])
-        return {"ok": True, "text": result_text, "broken": broken, "url": url, "error": None}
-    except Exception as e:
-        return {"ok": False, "text": f"Fejl: {e}", "broken": 0, "url": url, "error": str(e)[:200]}
 
 
 @app.post("/links/check")
@@ -1889,86 +694,6 @@ async def export_social_csv():
 # ---------- Steamgears Autopilot-bro (WordPress-pluginnet steamgears-autopilot >= 7.5) ----------
 # CC kalder pluginnets REST-API (/wp-json/sgap/v1) med samme WP_USER/WP_APP_PASSWORD som WordPress-push.
 # Retningen er altid CC -> site: sitet kan ikke naa CC, der kun lytter paa 127.0.0.1.
-SGAP_CHANNELS = {"facebook", "instagram", "pinterest", "linkedin", "twitter", "threads", "bluesky", "mastodon", "telegram", "google"}
-SGAP_ALIASES = {"x": "twitter", "fb": "facebook", "ig": "instagram", "gmb": "google", "google business": "google"}
-
-
-def sgap_ready() -> bool:
-    return bool(WP_URL and WP_USER and WP_APP_PASSWORD) and module_on("autopilot")
-
-
-def sgap_api(method: str, path: str, **kwargs):
-    """Kald pluginnets REST-API. Kaster requests.HTTPError ved fejl-svar."""
-    resp = HTTP.request(
-        method,
-        f"{WP_URL.rstrip('/')}/wp-json/sgap/v1{path}",
-        auth=(WP_USER, WP_APP_PASSWORD),
-        timeout=20,
-        **kwargs,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
-def sgap_channel(platform: str) -> str:
-    key = (platform or "").strip().lower()
-    key = SGAP_ALIASES.get(key, key)
-    return key if key in SGAP_CHANNELS else ""
-
-
-def sgap_error_text(exc: Exception) -> str:
-    status = getattr(getattr(exc, "response", None), "status_code", None)
-    if status in (401, 403):
-        return f"WordPress afviste login ({status}): WP_USER skal vaere administrator med et gyldigt Application Password"
-    if status == 404:
-        return "Autopilot-API'et findes ikke (404): er Steamgears Autopilot 7.5+ installeret og aktiveret?"
-    return f"Autopilot-pluginnet svarer ikke: {exc}"
-
-
-def sgap_snapshot() -> dict:
-    with get_db() as db:
-        row = db.execute("SELECT value FROM settings WHERE key='sgap_snapshot'").fetchone()
-    try:
-        return jsonlib.loads(row["value"]) if row and row["value"] else {}
-    except Exception:
-        return {}
-
-
-def sgap_sync() -> dict:
-    """Henter status fra pluginnet, gemmer et snapshot og alarmerer ved nye fejl eller nye kladder."""
-    if not sgap_ready():
-        return {}
-    previous = sgap_snapshot()
-    snap = {"checked_at": now_iso(), "ok": False, "error": "", "queue": {}, "channels": [], "pending_drafts": 0}
-    try:
-        stats = sgap_api("GET", "/stats", params={"days": 30})
-        drafts = sgap_api("GET", "/drafts", params={"status": "pending", "limit": 100})
-        snap["ok"] = True
-        snap["queue"] = {r["status"]: int(r["count"]) for r in stats.get("queue", [])}
-        channels = {}
-        for r in stats.get("events", []):
-            c = channels.setdefault(r["channel"], {"channel": r["channel"], "publish": 0, "click": 0, "order": 0, "revenue": 0.0})
-            if r["event_type"] in ("publish", "click", "order"):
-                c[r["event_type"]] = int(r["count"])
-            if r["event_type"] == "order":
-                c["revenue"] = round(float(r["value"] or 0), 2)
-        snap["channels"] = sorted(channels.values(), key=lambda c: (-c["revenue"], -c["click"]))
-        snap["pending_drafts"] = len(drafts) if isinstance(drafts, list) else 0
-    except Exception as e:
-        snap["error"] = sgap_error_text(e)
-    with get_db() as db:
-        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('sgap_snapshot', ?)", (jsonlib.dumps(snap),))
-        # Kun alarm naar noget AENDRER sig, saa Telegram ikke spammes hver halve time.
-        if snap["error"] and snap["error"] != previous.get("error"):
-            add_alarm(db, "autopilot", snap["error"], "advarsel")
-        if snap["ok"]:
-            failed, failed_before = snap["queue"].get("failed", 0), previous.get("queue", {}).get("failed", 0)
-            if failed > failed_before:
-                add_alarm(db, "autopilot", f"{failed - failed_before} opslag fejlede i Steamgears Autopilot (se Queue i WordPress)", "advarsel")
-            drafts_now, drafts_before = snap["pending_drafts"], previous.get("pending_drafts", 0)
-            if drafts_now > drafts_before:
-                add_alarm(db, "autopilot", f"{drafts_now} AI-kladde(r) venter paa godkendelse i WordPress", "info")
-    return snap
 
 
 async def job_sgap_sync():
@@ -2218,8 +943,8 @@ def startup_selftest_sync():
             db.execute("DELETE FROM _selftest")
     except Exception as e:
         fejl.append("DB-skrivetest: " + str(e)[:80])
-    if APP_TOKEN and not AIMLAPI_KEY:
-        fejl.append("AIMLAPI_KEY mangler - AI-artikler vil fejle")
+    if APP_TOKEN and not AI_KEY:
+        fejl.append(f"{AI_KEY_ENV} mangler - AI-artikler vil fejle")
     if ruter < 40:
         fejl.append("Kun " + str(ruter) + " ruter registreret (forventet 50+)")
     try:
@@ -2298,21 +1023,10 @@ async def get_duplicates():
 
 
 # ---------- AI: interne links, meta/social, synlighed ----------
-def ai_chat(prompt: str, max_tokens: int = 1500):
-    resp = HTTP.post(
-        "https://api.aimlapi.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {AIMLAPI_KEY}", "Content-Type": "application/json"},
-        json={"model": AI_MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens},
-        timeout=120,
-    )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
-
-
 @app.post("/seo/linksuggest")
 async def suggest_internal_links():
-    if not AIMLAPI_KEY:
-        return JSONResponse({"ok": False, "error": "AIMLAPI_KEY ikke sat"})
+    if not AI_KEY:
+        return JSONResponse({"ok": False, "error": f"{AI_KEY_ENV} ikke sat"})
     with get_db() as db:
         pages = db.execute("SELECT url, title, h1, words FROM seopages ORDER BY score DESC LIMIT 40").fetchall()
         kws = [r["keyword"] for r in db.execute("SELECT keyword FROM keywords LIMIT 20").fetchall()]
@@ -2342,8 +1056,8 @@ async def suggest_internal_links():
 
 
 def rewrite_meta_sync(url: str, title: str, desc: str, keyword: str):
-    if not AIMLAPI_KEY:
-        return {"error": "AIMLAPI_KEY ikke sat"}
+    if not AI_KEY:
+        return {"error": f"{AI_KEY_ENV} ikke sat"}
     prompt = (
         "Du er en SEO-ekspert for " + TRACK_DOMAIN + ". Optimer denne side:\n"
         "URL: " + url + "\n"
@@ -2398,7 +1112,7 @@ async def seo_rewrite(request: Request):
 
 @app.post("/articles/meta")
 async def generate_meta(id: int = Form(...)):
-    if not AIMLAPI_KEY:
+    if not AI_KEY:
         return RedirectResponse("/", status_code=303)
     with get_db() as db:
         art = db.execute("SELECT * FROM articles WHERE id=?", (id,)).fetchone()
@@ -2430,7 +1144,7 @@ async def generate_meta(id: int = Form(...)):
 
 @app.post("/ai/visibility")
 async def ai_visibility(question: str = Form(...)):
-    if not AIMLAPI_KEY:
+    if not AI_KEY:
         return RedirectResponse("/", status_code=303)
     question = question.strip()
     if not question:
@@ -2836,7 +1550,9 @@ async def dashboard(request: Request):
         "gsc_days": gsc_days,
         "gsc_queries": gsc_queries,
         "drift_rows": drift_rows,
-        "ai_enabled": bool(AIMLAPI_KEY),
+        "ai_enabled": bool(AI_KEY),
+        "ai_provider": AI_PROVIDER,
+        "ai_model": get_ai_model(),
         "wp_enabled": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "serpapi_enabled": bool(SERPAPI_KEY),
         "telegram_enabled": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
@@ -2887,9 +1603,9 @@ def strategy_check_sync(key: str):
     # AI-noegle (artikel-strategier: kritisk; backlink: til AI-drafts)
     if is_backlink:
         add(bool(SERPAPI_KEY), "SERPAPI_KEY: " + ("OK" if SERPAPI_KEY else "MANGLER (prospecting kan ikke kore)"), kritisk=True)
-        add(bool(AIMLAPI_KEY), "AIMLAPI_KEY (AI-outreach-drafts): " + ("OK" if AIMLAPI_KEY else "mangler - drafts skrives manuelt"))
+        add(bool(AI_KEY), f"{AI_KEY_ENV} (AI-outreach-drafts): " + ("OK" if AI_KEY else "mangler - drafts skrives manuelt"))
     else:
-        add(bool(AIMLAPI_KEY), "AIMLAPI_KEY (AI-artikler): " + ("OK" if AIMLAPI_KEY else "MANGLER (generering falder tilbage til skabelon)"), kritisk=True)
+        add(bool(AI_KEY), f"{AI_KEY_ENV} (AI-artikler): " + ("OK" if AI_KEY else "MANGLER (generering falder tilbage til skabelon)"), kritisk=True)
         add(bool(SERPAPI_KEY), "SERPAPI_KEY (konkurrent-analyse): " + ("OK" if SERPAPI_KEY else "mangler - prompten kobrer uden SERP-kontekst"))
 
     # WordPress-push
@@ -2947,6 +1663,18 @@ async def settings_strategy(request: Request):
     return RedirectResponse("/", status_code=303)
 
 
+@app.post("/settings/ai-model")
+async def settings_ai_model(request: Request):
+    form = await request.form()
+    model = str(form.get("model", "")).strip()
+    with get_db() as db:
+        if model:
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ai_model', ?)", (model,))
+        else:
+            db.execute("DELETE FROM settings WHERE key='ai_model'")
+    return RedirectResponse("/", status_code=303)
+
+
 @app.post("/notes/add")
 async def add_note(content: str = Form(...)):
     if content.strip():
@@ -2994,7 +1722,8 @@ async def health():
         "schema_ok": schema_ok,
         "budget": {s: {"used": u, "limit": l} for s, (u, l) in budget_usage().items()},
         "version": APP_VERSION,
-        "ai": bool(AIMLAPI_KEY),
+        "ai": bool(AI_KEY),
+        "ai_provider": AI_PROVIDER,
         "wordpress": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "serpapi": bool(SERPAPI_KEY),
         "telegram": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
@@ -3045,6 +1774,1756 @@ app.add_middleware(GZipMiddleware, minimum_size=500)
 app.router.lifespan_context = lifespan
 EOF_MAIN
 
+echo "📄 app/core.py..."
+cat << 'EOF_CORE' > "$PROJECT_DIR/app/core.py"
+"""Konfiguration, database og schema for Command Center.
+
+Modulet indeholder det, baade ruterne og services-modulerne har brug for:
+.env-konstanter, SQLite-adgangen, schema-opbygningen og de smaa hjaelpere.
+Det maa ikke importere fra app.main eller app.services (det ville give en cirkulaer import)."""
+from contextlib import contextmanager
+from datetime import datetime
+from urllib.parse import urlparse
+import os
+import requests
+import sqlite3
+import time
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+DB_PATH = os.path.join(BASE_DIR, "data", "center.db")
+
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+
+APP_TOKEN = os.environ.get("APP_TOKEN", "").strip()          # login-token (tom = ingen auth, lokal tilstand)
+
+JUNO_TOKEN = os.environ.get("JUNO_TOKEN", "").strip()
+
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()     # GitHub-token: pull-bro + selv-opdatering
+
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "humle93/command-center").strip()
+
+BRIDGE_POLL_MINUTES = int(os.environ.get("BRIDGE_POLL_MINUTES", "60"))  # hvor ofte CC henter bridge-filer
+
+AIMLAPI_KEY = os.environ.get("AIMLAPI_KEY", "").strip()      # AI-provider: aimlapi (OpenAI-kompatibel)
+
+OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY", "").strip()  # AI-provider: OpenRouter (OpenAI-kompatibel)
+
+AI_PROVIDER = os.environ.get("AI_PROVIDER", "").strip().lower()  # "aimlapi" eller "openrouter"; tom = auto
+
+AI_MODEL = os.environ.get("AI_MODEL", "")
+
+WP_URL = os.environ.get("WP_URL", "").strip()                # fx https://steamgears.eu
+
+WP_USER = os.environ.get("WP_USER", "").strip()
+
+WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "").strip()
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+
+SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "").strip()
+
+TRACK_DOMAIN = os.environ.get("TRACK_DOMAIN", "steamgears.eu").strip()
+
+SSL_WARN_DAYS = int(os.environ.get("SSL_WARN_DAYS", "30"))
+
+LINKCHECK_LIMIT = int(os.environ.get("LINKCHECK_LIMIT", "25"))
+
+PSI_API_KEY = os.environ.get("PSI_API_KEY", "").strip()   # Google PageSpeed API (gratis noegle)
+
+APP_VERSION = "7.10.0"
+
+SCHEMA_VERSION = 1  # v8.0: bumpes naar init_db/migrate_db aendrer tabeller eller kolonner
+
+def load_dotenv(path=None):
+    path = path or os.path.join(os.path.dirname(BASE_DIR), ".env")
+    if not os.path.exists(path):
+        return
+    for line in open(path):
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        os.environ.setdefault(key.strip(), val.strip())
+
+load_dotenv()
+
+APP_TOKEN = os.environ.get("APP_TOKEN", "").strip()
+
+AIMLAPI_KEY = os.environ.get("AIMLAPI_KEY", "").strip()
+
+WP_URL = os.environ.get("WP_URL", "").strip()
+
+WP_USER = os.environ.get("WP_USER", "").strip()
+
+WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "").strip()
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+
+SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "").strip()
+
+TRACK_DOMAIN = os.environ.get("TRACK_DOMAIN", "steamgears.eu").strip()
+
+# AI-provider: aimlapi og OpenRouter deler OpenAI's /chat/completions-format, saa kun
+# noegle, base-URL og standardmodel skifter. Er OPENROUTER_KEY sat, vaelges OpenRouter
+# automatisk — AI_PROVIDER kan altid overrule valget.
+OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY", "").strip()
+
+AI_PROVIDER = os.environ.get("AI_PROVIDER", "").strip().lower() or ("openrouter" if OPENROUTER_KEY else "aimlapi")
+
+if AI_PROVIDER not in ("aimlapi", "openrouter"):
+    AI_PROVIDER = "aimlapi"
+
+AI_KEY_ENV = "OPENROUTER_KEY" if AI_PROVIDER == "openrouter" else "AIMLAPI_KEY"
+
+AI_KEY = OPENROUTER_KEY if AI_PROVIDER == "openrouter" else AIMLAPI_KEY
+
+AI_BASE_URL = "https://openrouter.ai/api/v1" if AI_PROVIDER == "openrouter" else "https://api.aimlapi.com/v1"
+
+AI_MODEL = os.environ.get("AI_MODEL", "").strip() or ("anthropic/claude-3.5-sonnet" if AI_PROVIDER == "openrouter" else "anthropic/claude-3-5-sonnet")
+
+
+def ai_chat(prompt: str, max_tokens: int = 1500, temperature=None, timeout: int = 120) -> str:
+    """Send en prompt til den valgte AI-provider og returner svarets tekst.
+
+    HTTP er den budget-taellende session, saa kaldet rammer API_BUDGETS["ai"].
+    """
+    payload = {"model": get_ai_model(), "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens}
+    if temperature is not None:
+        payload["temperature"] = temperature
+    resp = HTTP.post(
+        AI_BASE_URL + "/chat/completions",
+        headers={"Authorization": f"Bearer {AI_KEY}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
+
+_WAL_SET = False
+
+@contextmanager
+def get_db():
+    global _WAL_SET
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=15)  # timeout = busy timeout (15 s)
+    conn.row_factory = sqlite3.Row
+    if not _WAL_SET:
+        # WAL is a property of the database file: setting it once per process is enough.
+        conn.execute("PRAGMA journal_mode=WAL")
+        _WAL_SET = True
+    conn.execute("PRAGMA synchronous=NORMAL")
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+def init_db():
+    with get_db() as db:
+        db.executescript("""
+        CREATE TABLE IF NOT EXISTS schema_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+        CREATE TABLE IF NOT EXISTS domains (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT UNIQUE NOT NULL,
+            status TEXT DEFAULT 'Ukendt',
+            response_time TEXT DEFAULT '-',
+            ssl_days TEXT DEFAULT '-',
+            last_checked TEXT,
+            last_error TEXT
+        );
+        CREATE TABLE IF NOT EXISTS check_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            domain_id INTEGER NOT NULL,
+            status TEXT,
+            response_time INTEGER,
+            ssl_days INTEGER,
+            checked_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS competitors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            crawled_info TEXT DEFAULT 'Ikke scannet endnu',
+            status TEXT DEFAULT 'Aktiv',
+            found_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS articles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            keyword TEXT,
+            content TEXT,
+            status TEXT DEFAULT 'Kladde',
+            source TEXT DEFAULT 'skabelon',
+            wp_link TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS linkcheck (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT NOT NULL,
+            result TEXT,
+            checked_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS socialqueue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            platform TEXT NOT NULL,
+            message TEXT NOT NULL,
+            status TEXT DEFAULT 'Klar i ko',
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS keywords (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            keyword TEXT UNIQUE NOT NULL,
+            position INTEGER,
+            target_url TEXT,
+            checked_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS alarms (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            type TEXT NOT NULL,
+            message TEXT NOT NULL,
+            severity TEXT DEFAULT 'info',
+            resolved INTEGER DEFAULT 0,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS gsc_daily (
+            day TEXT PRIMARY KEY,
+            clicks INTEGER,
+            impressions INTEGER,
+            ctr REAL,
+            avg_position REAL
+        );
+        CREATE TABLE IF NOT EXISTS gsc_queries (
+            day TEXT NOT NULL,
+            query TEXT NOT NULL,
+            clicks INTEGER,
+            impressions INTEGER,
+            position REAL,
+            PRIMARY KEY (day, query)
+        );
+        CREATE TABLE IF NOT EXISTS drift (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            checked_at TEXT,
+            orders INTEGER,
+            revenue REAL,
+            woo_status TEXT,
+            checkout_status TEXT,
+            notes TEXT
+        );
+        CREATE TABLE IF NOT EXISTS seopages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER,
+            url TEXT NOT NULL,
+            http_status INTEGER,
+            title TEXT,
+            meta_len INTEGER,
+            h1 TEXT,
+            words INTEGER,
+            score INTEGER,
+            issues TEXT,
+            crawled_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS crawl_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            host TEXT,
+            robots_ok INTEGER DEFAULT 0,
+            sitemap_ok INTEGER DEFAULT 0,
+            sitemap_urls INTEGER DEFAULT 0,
+            pages INTEGER DEFAULT 0,
+            avg_score INTEGER,
+            started_at TEXT,
+            finished_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS monitors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            type TEXT NOT NULL DEFAULT 'contains',
+            expected TEXT NOT NULL,
+            last_status TEXT DEFAULT 'Ikke tjekket',
+            last_result TEXT,
+            last_checked TEXT
+        );
+        CREATE TABLE IF NOT EXISTS ai_visibility (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            question TEXT NOT NULL,
+            mention_found INTEGER DEFAULT 0,
+            snippet TEXT,
+            answer TEXT,
+            checked_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS health_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            host TEXT,
+            avg_score INTEGER,
+            pages INTEGER,
+            run_id INTEGER,
+            checked_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS internal_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_url TEXT,
+            to_url TEXT,
+            anchor TEXT,
+            reason TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS keyword_ideas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            keyword TEXT,
+            idea TEXT,
+            source TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS content_gap (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            keyword TEXT NOT NULL,
+            stats_json TEXT,
+            top_titles TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS outreach (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            source_url TEXT,
+            found_at TEXT,
+            UNIQUE(email, source_url)
+        );
+        CREATE TABLE IF NOT EXISTS backlink_prospects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            keyword TEXT NOT NULL,
+            site TEXT,
+            url TEXT,
+            type TEXT,
+            email TEXT,
+            draft TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS visibility (
+            day TEXT PRIMARY KEY,
+            score REAL
+        );
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+        CREATE TABLE IF NOT EXISTS keyword_difficulty (
+            keyword TEXT PRIMARY KEY,
+            difficulty INTEGER,
+            domains INTEGER,
+            authority INTEGER,
+            ads INTEGER,
+            avg_words INTEGER,
+            top_domains TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+            sid_hash TEXT PRIMARY KEY,
+            created_at TEXT,
+            expires_at TEXT,
+            ip TEXT
+        );
+        """)
+
+def _safe(fn):
+    """Koer en init-funktion uden at lade importen crashe (opstart-stabilitet)."""
+    try:
+        fn()
+    except Exception as e:
+        print("[cc] init-fejl (proever igen om 5s):", repr(e), flush=True)
+        import time as _t
+        _t.sleep(5)
+        try:
+            fn()
+        except Exception as e2:
+            print("[cc] init-fejl fortsaetter (app starter alligevel):", repr(e2), flush=True)
+
+def migrate_db():
+    with get_db() as db:
+        cols = {}
+        for table, want in {
+            "articles": ["meta_title", "meta_desc"],
+            "seopages": ["content_hash", "redirects"],
+            "crawl_runs": ["sitemap_broken", "sitemap_missing"],
+        }.items():
+            existing = [r[1] for r in db.execute(f"PRAGMA table_info({table})").fetchall()]
+            for c in want:
+                if c not in existing:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {c} TEXT")
+
+def create_indexes():
+    with get_db() as db:
+        for stmt in [
+            "CREATE INDEX IF NOT EXISTS idx_seopages_run ON seopages(run_id)",
+            "CREATE INDEX IF NOT EXISTS idx_gsc_daily_day ON gsc_daily(day)",
+            "CREATE INDEX IF NOT EXISTS idx_gsc_q ON gsc_queries(query)",
+            "CREATE INDEX IF NOT EXISTS idx_alarms_open ON alarms(resolved, id)",
+            "CREATE INDEX IF NOT EXISTS idx_hist_domain ON check_history(domain_id, id)",
+            "CREATE INDEX IF NOT EXISTS idx_health_time ON health_history(checked_at)",
+            "CREATE INDEX IF NOT EXISTS idx_crawl_time ON crawl_runs(started_at)",
+            "CREATE INDEX IF NOT EXISTS kw_ideas_kw ON keyword_ideas(keyword)",
+        ]:
+            db.execute(stmt)
+        db.execute("ANALYZE")
+
+def schema_version() -> int:
+    """Schema-versionen der er stemplet i databasen (0 = ikke stemplet / ukendt)."""
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
+        return int(row["value"]) if row else 0
+    except Exception:
+        return 0
+
+def stamp_schema_version():
+    with get_db() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+
+def init_schema():
+    """Byg og migrer schemaet i raekkefoelge — stemplet saettes kun naar alle trin gik igennem.
+
+    Fejler et trin, bliver versionen i DB ikke opdateret, og naeste opstart (og /health)
+    kan se forskellen. Foer stod hvert trin med sit eget _safe()-kald, saa en fejlet
+    migrering kunne fortsaette i aevig tid uden at nogen opdagede det.
+    """
+    init_db()
+    migrate_db()
+    create_indexes()
+    stamp_schema_version()
+
+def report_schema_version():
+    """Goer version-mismatch synligt: skarp loglinje + alarm i UI'et."""
+    have = schema_version()
+    if have == SCHEMA_VERSION:
+        return
+    msg = (f"Database-schema er version {have or 'ukendt'}, koden forventer {SCHEMA_VERSION} — "
+           "en migrering er ikke gennemfoert (se serverloggen)")
+    print("[cc] SCHEMA-ADVARSEL:", msg, flush=True)
+    try:
+        # now_iso() er defineret laengere nede i filen, og denne koeres ved import.
+        with get_db() as db:
+            db.execute(
+                "INSERT INTO alarms (type, message, severity, created_at) VALUES (?, ?, ?, ?)",
+                ("schema", msg[:300], "kritisk", datetime.now().isoformat(timespec="seconds")),
+            )
+    except Exception:
+        pass
+
+MODULES = ["domains", "keywords", "ai", "monitors", "social", "links", "bridge", "spy", "wp_push", "telegram", "growth", "autopilot"]
+
+_MODULE_CACHE = {"at": 0.0, "states": {}}
+
+def modules_state() -> dict:
+    """On/off for every module from one query, cached for 10 s (cleared by set_module)."""
+    if time.time() - _MODULE_CACHE["at"] > 10:
+        try:
+            with get_db() as db:
+                rows = db.execute("SELECT key, value FROM settings WHERE key LIKE 'module\\_%' ESCAPE '\\'").fetchall()
+            stored = {r["key"][len("module_"):]: r["value"] == "on" for r in rows}
+        except Exception:
+            stored = {}
+        _MODULE_CACHE.update(at=time.time(), states={m: stored.get(m, True) for m in MODULES})
+    return _MODULE_CACHE["states"]
+
+def module_on(name: str) -> bool:
+    return modules_state().get(name, True)
+
+def set_module(name: str, state: str):
+    with get_db() as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", ("module_" + name, state))
+    _MODULE_CACHE["at"] = 0.0
+
+def cleanup_old_data():
+    """Daglig oprydning: gamle maalinger rulles af, DB holdes sund."""
+    with get_db() as db:
+        db.execute("DELETE FROM check_history WHERE checked_at < datetime('now', '-90 days')")
+        db.execute("DELETE FROM alarms WHERE resolved=1 AND created_at < datetime('now', '-30 days')")
+        db.execute("DELETE FROM health_history WHERE checked_at < datetime('now', '-180 days')")
+        db.execute("DELETE FROM keyword_ideas WHERE created_at < datetime('now', '-180 days')")
+        db.execute("DELETE FROM auth_sessions WHERE expires_at < ?", (now_iso(),))
+
+def normalize_url(url: str) -> str:
+    url = (url or "").strip()
+    if not url:
+        raise ValueError("URL mangler")
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    parsed = urlparse(url)
+    if not parsed.netloc or "." not in parsed.netloc:
+        raise ValueError("Ugyldig URL")
+    return url.rstrip("/")
+
+API_BUDGETS = {
+    "serpapi": ("serpapi.com", int(os.environ.get("SERPAPI_MONTHLY_LIMIT", "1000") or 0)),
+    "ai": ("openrouter.ai" if AI_PROVIDER == "openrouter" else "aimlapi.com", int(os.environ.get("AI_MONTHLY_LIMIT", "3000") or 0)),
+}
+
+class BudgetExceeded(requests.RequestException):
+    """Kaldet blev ikke sendt: maanedens API-budget er brugt."""
+
+class BudgetAdapter(requests.adapters.HTTPAdapter):
+    def send(self, request, **kwargs):
+        # Importeres her og ikke i toppen: app.services.budget importerer app.core,
+        # saa et top-import ville give en cirkulaer import.
+        from app.services.budget import budget_service, budget_spend
+
+        service = budget_service(request.url)
+        if service:
+            budget_spend(service)
+        return super().send(request, **kwargs)
+
+HTTP = requests.Session()
+
+_adapter = BudgetAdapter(pool_connections=10, pool_maxsize=20)
+
+HTTP.mount("https://", _adapter)
+
+HTTP.mount("http://", _adapter)
+
+def safe_request(url: str, timeout: int = 6):
+    return HTTP.get(
+        url,
+        timeout=timeout,
+        allow_redirects=True,
+        headers={"User-Agent": "Mozilla/5.0 CommandCenter/7.4"},
+    )
+
+def now_iso():
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def get_ai_model() -> str:
+    """Aktiv AI-model: DB-override (settings.ai_model) hvis sat, ellers env/default.
+
+    Laeser fra settings-tabellen, saa modellen kan skiftes i dashboardet uden
+    at redigere .env. Fejl giver stille fallback til AI_MODEL.
+    """
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT value FROM settings WHERE key='ai_model'").fetchone()
+        if row and (row["value"] or "").strip():
+            return row["value"].strip()
+    except Exception:
+        pass
+    return AI_MODEL
+EOF_CORE
+
+echo "📄 app/services/..."
+cat << 'EOF_SVC_INIT' > "$PROJECT_DIR/app/services/__init__.py"
+"""Rene funktioner udtrukket fra app/main.py (v8.0 M4)."""
+EOF_SVC_INIT
+
+cat << 'EOF_SVC_ALARMS' > "$PROJECT_DIR/app/services/alarms.py"
+"""Alarmer og Telegram-varsling.
+
+Alarmer skrives til tabellen alarms, saa de kan ses i UI'et, og sendes videre til
+Telegram hvis noeglen er sat. Modulet kender kun app.core."""
+from app.core import HTTP
+from app.core import TELEGRAM_BOT_TOKEN
+from app.core import TELEGRAM_CHAT_ID
+from app.core import now_iso
+def add_alarm(db, type_: str, message: str, severity: str = "info"):
+    db.execute(
+        "INSERT INTO alarms (type, message, severity, created_at) VALUES (?, ?, ?, ?)",
+        (type_, message, severity, now_iso()),
+    )
+    notify_telegram(f"[{severity.upper()}] {type_}: {message}")
+
+def notify_telegram(text: str):
+    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+        return False
+    try:
+        HTTP.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": text},
+            timeout=8,
+        )
+        return True
+    except Exception:
+        return False
+EOF_SVC_ALARMS
+
+cat << 'EOF_SVC_BUDGET' > "$PROJECT_DIR/app/services/budget.py"
+"""API-budget: maanedligt loft pr. betalt tjeneste.
+
+Kald taelles i settings-tabellen pr. maaned, saa en loekke eller fejl ikke kan
+braende kreditter af. Selve taellingen sker i app.core (HTTP-adapteren), mens
+rapporteringen til /health ligger her."""
+from app.core import API_BUDGETS
+from app.core import BudgetExceeded
+from app.core import get_db
+from app.services.alarms import add_alarm
+from datetime import datetime
+from urllib.parse import urlparse
+def budget_service(url: str) -> str:
+    host = (urlparse(url).hostname or "").lower()
+    for service, (domain, _limit) in API_BUDGETS.items():
+        if host == domain or host.endswith("." + domain):
+            return service
+    return ""
+
+def budget_usage() -> dict:
+    """{service: (brugt, loft)} for indevaerende maaned."""
+    month = datetime.now().strftime("%Y-%m")
+    with get_db() as db:
+        rows = {r["key"]: int(r["value"]) for r in db.execute(
+            "SELECT key, value FROM settings WHERE key LIKE ?", (f"budget_{month}_%",)
+        ).fetchall()}
+    return {s: (rows.get(f"budget_{month}_{s}", 0), limit) for s, (_d, limit) in API_BUDGETS.items()}
+
+def budget_spend(service: str):
+    """Taeller et kald; kaster BudgetExceeded hvis loftet er naaet. Alarmerer en gang ved 80 % og 100 %."""
+    limit = API_BUDGETS[service][1]
+    month = datetime.now().strftime("%Y-%m")
+    key = f"budget_{month}_{service}"
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        used = int(row["value"]) if row else 0
+        if limit and used >= limit:
+            raise BudgetExceeded(f"{service}: maanedens budget paa {limit} kald er brugt (saet {service.upper()}_MONTHLY_LIMIT i .env)")
+        used += 1
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(used)))
+        if limit and used == int(limit * 0.8):
+            add_alarm(db, "budget", f"{service}: 80 % af maanedens API-budget brugt ({used}/{limit})", "advarsel")
+        if limit and used == limit:
+            add_alarm(db, "budget", f"{service}: maanedens API-budget er brugt ({limit} kald) - kald stoppes til den 1.", "kritisk")
+EOF_SVC_BUDGET
+
+cat << 'EOF_SVC_WP' > "$PROJECT_DIR/app/services/wp.py"
+"""WordPress- og SGAP-broen.
+
+Alt der taler med WordPress (kladde-push) og social-gap-plugin'et samles her, saa
+ruterne i main.py kun beskaeftiger sig med HTTP-svaret."""
+from app.core import HTTP
+from app.core import WP_APP_PASSWORD
+from app.core import WP_URL
+from app.core import WP_USER
+from app.core import get_db
+from app.core import module_on
+from app.core import now_iso
+from app.services.alarms import add_alarm
+import json as jsonlib
+def wp_push_draft(title: str, content: str):
+    resp = HTTP.post(
+        f"{WP_URL.rstrip('/')}/wp-json/wp/v2/posts",
+        auth=(WP_USER, WP_APP_PASSWORD),
+        json={"title": title, "content": content, "status": "draft"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json().get("id")
+
+SGAP_CHANNELS = {"facebook", "instagram", "pinterest", "linkedin", "twitter", "threads", "bluesky", "mastodon", "telegram", "google"}
+
+SGAP_ALIASES = {"x": "twitter", "fb": "facebook", "ig": "instagram", "gmb": "google", "google business": "google"}
+
+def sgap_ready() -> bool:
+    return bool(WP_URL and WP_USER and WP_APP_PASSWORD) and module_on("autopilot")
+
+def sgap_api(method: str, path: str, **kwargs):
+    """Kald pluginnets REST-API. Kaster requests.HTTPError ved fejl-svar."""
+    resp = HTTP.request(
+        method,
+        f"{WP_URL.rstrip('/')}/wp-json/sgap/v1{path}",
+        auth=(WP_USER, WP_APP_PASSWORD),
+        timeout=20,
+        **kwargs,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+def sgap_channel(platform: str) -> str:
+    key = (platform or "").strip().lower()
+    key = SGAP_ALIASES.get(key, key)
+    return key if key in SGAP_CHANNELS else ""
+
+def sgap_error_text(exc: Exception) -> str:
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status in (401, 403):
+        return f"WordPress afviste login ({status}): WP_USER skal vaere administrator med et gyldigt Application Password"
+    if status == 404:
+        return "Autopilot-API'et findes ikke (404): er Steamgears Autopilot 7.5+ installeret og aktiveret?"
+    return f"Autopilot-pluginnet svarer ikke: {exc}"
+
+def sgap_snapshot() -> dict:
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key='sgap_snapshot'").fetchone()
+    try:
+        return jsonlib.loads(row["value"]) if row and row["value"] else {}
+    except Exception:
+        return {}
+
+def sgap_sync() -> dict:
+    """Henter status fra pluginnet, gemmer et snapshot og alarmerer ved nye fejl eller nye kladder."""
+    if not sgap_ready():
+        return {}
+    previous = sgap_snapshot()
+    snap = {"checked_at": now_iso(), "ok": False, "error": "", "queue": {}, "channels": [], "pending_drafts": 0}
+    try:
+        stats = sgap_api("GET", "/stats", params={"days": 30})
+        drafts = sgap_api("GET", "/drafts", params={"status": "pending", "limit": 100})
+        snap["ok"] = True
+        snap["queue"] = {r["status"]: int(r["count"]) for r in stats.get("queue", [])}
+        channels = {}
+        for r in stats.get("events", []):
+            c = channels.setdefault(r["channel"], {"channel": r["channel"], "publish": 0, "click": 0, "order": 0, "revenue": 0.0})
+            if r["event_type"] in ("publish", "click", "order"):
+                c[r["event_type"]] = int(r["count"])
+            if r["event_type"] == "order":
+                c["revenue"] = round(float(r["value"] or 0), 2)
+        snap["channels"] = sorted(channels.values(), key=lambda c: (-c["revenue"], -c["click"]))
+        snap["pending_drafts"] = len(drafts) if isinstance(drafts, list) else 0
+    except Exception as e:
+        snap["error"] = sgap_error_text(e)
+    with get_db() as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('sgap_snapshot', ?)", (jsonlib.dumps(snap),))
+        # Kun alarm naar noget AENDRER sig, saa Telegram ikke spammes hver halve time.
+        if snap["error"] and snap["error"] != previous.get("error"):
+            add_alarm(db, "autopilot", snap["error"], "advarsel")
+        if snap["ok"]:
+            failed, failed_before = snap["queue"].get("failed", 0), previous.get("queue", {}).get("failed", 0)
+            if failed > failed_before:
+                add_alarm(db, "autopilot", f"{failed - failed_before} opslag fejlede i Steamgears Autopilot (se Queue i WordPress)", "advarsel")
+            drafts_now, drafts_before = snap["pending_drafts"], previous.get("pending_drafts", 0)
+            if drafts_now > drafts_before:
+                add_alarm(db, "autopilot", f"{drafts_now} AI-kladde(r) venter paa godkendelse i WordPress", "info")
+    return snap
+EOF_SVC_WP
+
+cat << 'EOF_SVC_CONTENT' > "$PROJECT_DIR/app/services/content.py"
+"""Indholdsproduktion: strategi, AI-udkast, kvalitetsgate og autopilot.
+
+Modulet indeholder de tunge, rene funktioner bag /articles og autopiloten. De
+skriver i databasen via app.core og bruger app.services.wp til at pushe kladder."""
+from app.core import AI_KEY
+from app.core import AI_KEY_ENV
+from app.core import ai_chat
+from app.core import HTTP
+from app.core import SERPAPI_KEY
+from app.core import TRACK_DOMAIN
+from app.core import WP_APP_PASSWORD
+from app.core import WP_URL
+from app.core import WP_USER
+from app.core import get_db
+from app.core import module_on
+from app.core import now_iso
+from app.core import safe_request
+from app.services.alarms import add_alarm
+from app.services.wp import wp_push_draft
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse
+import json as jsonlib
+import os
+import re
+TEMPLATE_ARTICLE = """
+<h2>Hvad er {keyword}?</h2>
+<p>{keyword} er et emne, hvor god struktur, klar information og brugervenligt indhold gor en stor forskel.</p>
+<h3>Hvorfor er {keyword} vigtigt?</h3>
+<ul><li>Det hjaelper besogende med hurtigt at finde relevant information.</li><li>Godt struktureret indhold understotter sogemaskineforstaelse.</li></ul>
+<h3>Sadan kommer du i gang</h3>
+<ol><li>Definer malgruppen og deres behov.</li><li>Lav en klar side med overskrifter, korte afsnit og relevante links.</li><li>Tilfoj FAQ, interne links og relevant struktureret data.</li></ol>
+<h3>Konklusion</h3>
+<p>Med fokus paa kvalitet, struktur og brugerbehov kan indhold om {keyword} skabe langtidsholdbar vaerdi.</p>
+"""
+
+def serp_competitor_context(keyword: str, n: int = 5):
+    """Hent top-SERP-resultater som konkurrent-kontekst til artikelgenerering."""
+    if not SERPAPI_KEY:
+        return ""
+    try:
+        r = HTTP.get(
+            "https://serpapi.com/search",
+            params={"engine": "google", "q": keyword, "num": 10, "api_key": SERPAPI_KEY},
+            timeout=30,
+        )
+        r.raise_for_status()
+        org = r.json().get("organic_results") or []
+        lines = []
+        for it in org[:n]:
+            t = (it.get("title") or "").strip()
+            sn = (it.get("snippet") or "").strip()
+            if t:
+                lines.append(f"- {t}: {sn}" if sn else f"- {t}")
+        if not lines:
+            return ""
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+STRATEGIES = {
+    "adsense": {
+        "label": "AdSense-indkomst",
+        "desc": "Long-tail informationsartikler, volumen forst, rolig CTA",
+        "words": "1000-1400",
+        "style": (
+            "Artikeltypen er LANG og informationsrig (1000-1400 ord). Maalgruppe: laesere fra "
+            "Google-sogninger der vil vide noget. Dybdegaaende sektioner, tabel eller liste med "
+            "konkrete data, FAQ-sektion med 4-5 spoergsmaal. Roelig, nyttig tone; hojst 1 diskret "
+            "produktlink. Fokus: laesetid, laesbarhed og reelle svar."
+        ),
+        "autopilot": "artikel",
+    },
+    "affiliate": {
+        "label": "Affiliate",
+        "desc": "Buyer-intent (best/vs/review), sammenligningstabeller, CTA-tung",
+        "words": "900-1200",
+        "style": (
+            "Artikeltypen er koebeside-venlig (900-1200 ord). Keywordet er typisk buyer-intent "
+            "(best, vs, review, hvor kan man koebe). Indhold: sammenligningstabel med 3-5 produkter/"
+            "valg, fordele-ulemper-lister, tydelig men aeldelig CTA efter hver stor sektion, FAQ med "
+            "4 koeb-relaterede spoergsmaal. Fokus: hjaelp laeseren at vælge."
+        ),
+        "autopilot": "artikel",
+    },
+    "backlinks": {
+        "label": "Backlink-vÃ¦kst",
+        "desc": "Link-vÃ¦rdigt indhold + prospector/outreach autopilot",
+        "words": "700-1000",
+        "style": (
+            "Artikeltypen er link-venlig (700-1000 ord): lister ('10 bedste ...'), checklister, "
+            "begynder-guides og ressourcesider andre sider naturligt vil linke til. Klar struktur, "
+            "citervenlige facts, faerre produktlinks. Autopiloten koerer ogsa backlink-prospecting "
+            "paa keywords i denne strategi."
+        ),
+        "autopilot": "backlink",
+    },
+}
+
+DEFAULT_STRATEGY = "adsense"
+
+def get_active_strategy() -> dict:
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT value FROM settings WHERE key='active_strategy'").fetchone()
+        key = row["value"] if row else DEFAULT_STRATEGY
+    except Exception:
+        key = DEFAULT_STRATEGY
+    return STRATEGIES.get(key, STRATEGIES[DEFAULT_STRATEGY])
+
+def generate_article_ai(keyword: str, strategy: dict = None):
+    st = strategy or get_active_strategy()
+    competitors = serp_competitor_context(keyword)
+    if competitors:
+        comp_block = (
+            "TOP 5 KONKURRENTER PA GOOGLE FOR DETA KEYWORD (titel + snippet):\n"
+            f"{competitors}\n\n"
+            "DIN OPGAVE: Skriv en artikel der er MAERKBART BEDRE end disse resultater. "
+            "Dæk alt hvad konkurrenterne dækker (content gap), og tilføj mere: konkrete "
+            "materialer, prisestimater, trin-for-trin, praktiske detaljer. "
+            "Byg KUN pa faktuelle, verifikbare oplysninger - ingen opdigtede tal, "
+            "ingen tom fyldstof-saetninger ('in today's world', 'look no further' osv. "
+            "er forbudt). Hver saetning skal give laeseren ny, brugbar info."
+        )
+    else:
+        comp_block = (
+            "KVALITETSKRAV: Byg KUN pa faktuelle, verifikbare oplysninger om emnet - "
+            "ingen opdigtede tal eller statistik. Ingen tom fyldstof-saetninger. "
+            "Hver saetning skal give laeseren konkret, brugbar info (materialer, "
+            "prisniveauer, trin, fejl man skal undga). Mål: bedre end de nuværende "
+            "topresultater pa Google for dette keyword."
+        )
+    prompt = (
+        f"Write an SEO-optimized blog article draft in English about '{keyword}' for a steampunk "
+        f"cosplay & merchandise webshop. Output raw HTML (h2/h3/p/ul/ol only, no <html> wrapper). "
+        f"Include: engaging intro, 3-4 H2 sections, a bullet list, an FAQ section, "
+        f"and a short conclusion. Around {st['words']} words. No images. Natural, helpful tone.\n\n"
+        f"STRATEGI ({st['label']}): {st['style']}\n\n"
+        f"{comp_block}"
+    )
+    return ai_chat(prompt, max_tokens=3000)
+
+QUALITY_MIN_WORDS = int(os.environ.get("QUALITY_MIN_WORDS", "400") or 0)
+
+def quality_check(content: str, keyword: str) -> dict:
+    """Deterministisk tjek foer en artikel maa blive WP-kladde.
+    Blokerer: for faa ord (min. QUALITY_MIN_WORDS, eller 80 % af SERP-gennemsnittet fra Content Gap),
+    fokus-keyword mangler, under 2 H2-overskrifter. Advarer: faerre end 2 interne links."""
+    soup = BeautifulSoup(content or "", "html.parser")
+    text = soup.get_text(" ", strip=True)
+    words = len(text.split())
+    min_words = QUALITY_MIN_WORDS
+    try:
+        with get_db() as db:
+            gap = db.execute("SELECT stats_json FROM content_gap WHERE keyword=? ORDER BY id DESC LIMIT 1", (keyword,)).fetchone()
+        avg = jsonlib.loads(gap["stats_json"]).get("summary", {}).get("avg_words", 0) if gap and gap["stats_json"] else 0
+        if avg:
+            min_words = max(min_words, int(avg * 0.8))
+    except Exception:
+        pass
+    h2 = len(soup.find_all("h2")) or len([l for l in (content or "").splitlines() if l.startswith("## ")])
+    internal = 0
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if href.startswith("/") or (TRACK_DOMAIN and TRACK_DOMAIN in href):
+            internal += 1
+    errors, warnings = [], []
+    if words < min_words:
+        errors.append(f"for kort: {words} ord (min. {min_words})")
+    if keyword and keyword.lower() not in text.lower():
+        errors.append(f"fokus-keyword '{keyword}' mangler")
+    if h2 < 2:
+        errors.append(f"kun {h2} H2-overskrift(er), min. 2")
+    if internal < 2:
+        warnings.append(f"kun {internal} interne link(s), anbefalet min. 2")
+    return {"passed": not errors, "words": words, "min_words": min_words, "h2": h2, "internal_links": internal,
+            "errors": errors, "warnings": warnings}
+
+def autopilot_sync():
+    """Growth-autopilot: vaelg aeldste ubrugte keyword-idee -> AI-artikel -> (valgfrit) WP-kladde."""
+    if not AI_KEY:
+        with get_db() as db:
+            add_alarm(db, "growth", f"Autopilot sprang over: {AI_KEY_ENV} mangler", "advarsel")
+        return "no-ai"
+    with get_db() as db:
+        row = db.execute(
+            "SELECT id, idea FROM keyword_ideas WHERE idea IS NOT NULL AND idea != '' "
+            "AND idea NOT IN (SELECT keyword FROM articles) ORDER BY id ASC LIMIT 1"
+        ).fetchone()
+    if not row:
+        # Idea-puljen er tom: sow nye via Google-autocomplete fra eksisterende keywords
+        try:
+            with get_db() as db:
+                seeds = [r["keyword"] for r in db.execute("SELECT DISTINCT keyword FROM keywords LIMIT 5").fetchall()]
+            if not seeds:
+                seeds = ["steampunk costume", "steampunk goggles"]
+            import urllib.parse as _up
+            newideas = []
+            for seed in seeds[:3]:
+                rr = HTTP.get(
+                    "https://suggestqueries.google.com/complete/search",
+                    params={"client": "firefox", "q": seed, "hl": "en"},
+                    timeout=10,
+                )
+                for sug in (rr.json()[1] or [])[:5]:
+                    if sug.lower() != seed.lower():
+                        newideas.append(sug)
+            with get_db() as db:
+                for ni in dict.fromkeys(newideas):
+                    db.execute("INSERT OR IGNORE INTO keyword_ideas (keyword, idea, source, created_at) VALUES (?,?,?,?)",
+                               (ni.split()[0] if ni else "", ni, "autopilot", now_iso()))
+            with get_db() as db:
+                row = db.execute(
+                    "SELECT id, idea FROM keyword_ideas WHERE idea IS NOT NULL AND idea != '' "
+                    "AND idea NOT IN (SELECT keyword FROM articles) ORDER BY id ASC LIMIT 1"
+                ).fetchone()
+        except Exception as e:
+            with get_db() as db:
+                add_alarm(db, "growth", f"Autopilot kunne ikke hente nye ideer: {str(e)[:120]}", "advarsel")
+            return "no-ideas"
+        if not row:
+            return "no-ideas"
+    idea = row["idea"].strip()
+    st_auto = get_active_strategy()
+    if st_auto.get("autopilot") == "backlink":
+        try:
+            prospect_sync(idea)
+        except Exception as e:
+            with get_db() as db:
+                add_alarm(db, "growth", f"Autopilot-prospecting fejlede for '{idea}': {str(e)[:120]}", "advarsel")
+        with get_db() as db:
+            db.execute("DELETE FROM keyword_ideas WHERE id=?", (row["id"],))
+        return "backlink-prospect"
+    try:
+        content = generate_article_ai(idea, st_auto)
+    except Exception as e:
+        with get_db() as db:
+            add_alarm(db, "growth", f"Autopilot-generering fejlede for '{idea}': {str(e)[:150]}", "advarsel")
+        return "ai-fail"
+    title = f"Guide: {idea}"
+    with get_db() as db:
+        cur = db.execute(
+            "INSERT INTO articles (title, keyword, content, source, created_at) VALUES (?,?,?,?,?)",
+            (title, idea, content, "Autopilot", now_iso()),
+        )
+        art_id = cur.lastrowid
+        db.execute("DELETE FROM keyword_ideas WHERE id=?", (row["id"],))
+    gate = quality_check(content, idea)
+    if not gate["passed"]:
+        with get_db() as db:
+            db.execute("UPDATE articles SET status=? WHERE id=?", ("Stoppet af kvalitetsgate: " + "; ".join(gate["errors"]), art_id))
+            add_alarm(db, "kvalitet", f"Autopilot-artikel #{art_id} ('{idea}') blev ikke sendt til WP: " + "; ".join(gate["errors"]), "advarsel")
+        return f"quality-blocked:{art_id}"
+    if WP_URL and WP_USER and WP_APP_PASSWORD and module_on("wp_push"):
+        try:
+            wp_id = wp_push_draft(title, content)
+            link = f"{WP_URL.rstrip('/')}/wp-admin/post.php?post={wp_id}&action=edit"
+            with get_db() as db:
+                db.execute("UPDATE articles SET status='Sendt til WP (kladde)', wp_link=? WHERE id=?", (link, art_id))
+        except Exception as e:
+            with get_db() as db:
+                add_alarm(db, "growth", f"Autopilot WP-push fejlede for #{art_id}: {str(e)[:150]}", "advarsel")
+    return f"ok:{art_id}"
+
+def classify_site(url: str):
+    u = (url or "").lower()
+    if any(x in u for x in ("/blog/", ".blogspot", "medium.com", "substack.com")):
+        return "blog"
+    if any(x in u for x in ("directory", "liste", "resources", "tools")):
+        return "liste"
+    if any(x in u for x in ("forum", "reddit.com", "quora.com")):
+        return "forum"
+    return "artikel"
+
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+
+def prospect_sync(keyword: str):
+    if not SERPAPI_KEY:
+        with get_db() as db:
+            add_alarm(db, "growth", "Backlink-prospector: SERPAPI_KEY mangler", "advarsel")
+        return
+    r = HTTP.get(
+        "https://serpapi.com/search",
+        params={"engine": "google", "q": keyword, "num": 10, "api_key": SERPAPI_KEY},
+        timeout=20,
+    )
+    results = (r.json().get("organic_results") or [])[:10]
+    for res in results:
+        url = res.get("link") or ""
+        if not url or urlparse(url).netloc in (TRACK_DOMAIN, "www." + TRACK_DOMAIN):
+            continue
+        site = urlparse(url).netloc
+        stype = classify_site(url)
+        email, draft = None, None
+        try:
+            resp = safe_request(url, timeout=6)
+            found = EMAIL_RE.findall(resp.text or "")
+            email = next((e for e in found if not any(x in e.lower() for x in (".png", ".jpg", ".webp", ".svg", "example.com", "sentry"))), None)
+        except Exception:
+            pass
+        if AI_KEY and email:
+            try:
+                prompt = (
+                    f"Write a short (max 120 words) friendly outreach email in English to {email} "
+                    f"who runs {site}. Suggest a steampunk cosplay guide or resource relevant to "
+                    f"their page about '{keyword}' as a reason to add a link to our site {TRACK_DOMAIN}. "
+                    f"Output only the email body."
+                )
+                draft = ai_chat(prompt, max_tokens=3000, timeout=60)
+            except Exception:
+                draft = None
+        if not draft:
+            draft = (f"Hej! Vi har lavet en guide om '{keyword}' paa {TRACK_DOMAIN}, som dine laesere "
+                     f"maaske kan bruge. Maa vi linke den ind? (Skabelon-draft - saet {AI_KEY_ENV} for AI-drafts)")
+        with get_db() as db:
+            db.execute(
+                "INSERT INTO backlink_prospects (keyword, site, url, type, email, draft, created_at) VALUES (?,?,?,?,?,?,?)",
+                (keyword, site, url, stype, email, draft, now_iso()),
+            )
+EOF_SVC_CONTENT
+
+cat << 'EOF_SVC_AUDIT' > "$PROJECT_DIR/app/services/audit.py"
+"""SEO-audit og crawl.
+
+Sideanalyse, PageSpeed, crawl og link-tjek - det der kan koeres uden en HTTP-request
+fra brugeren. Ruterne i main.py kalder funktionerne herfra."""
+from app.core import HTTP
+from app.core import LINKCHECK_LIMIT
+from app.core import PSI_API_KEY
+from app.core import get_db
+from app.core import normalize_url
+from app.core import now_iso
+from app.core import safe_request
+from app.services.alarms import add_alarm
+from bs4 import BeautifulSoup
+from datetime import datetime
+from urllib.parse import urlparse
+import hashlib
+import re
+import time
+import urllib.parse
+def _check(name, ok, weight, info=""):
+    return {"name": name, "ok": bool(ok), "weight": weight, "info": info}
+
+def analyze_page(url: str, keyword: str = "", html: str = None, status_code: int = None, ms: int = None):
+    """Dyb sideanalyse i stil med RankMath Pro / Yoast Premium."""
+    keyword = (keyword or "").strip().lower()
+    items = []
+    try:
+        if html is None:
+            url = normalize_url(url)
+            t0 = datetime.now()
+            response = safe_request(url, timeout=10)
+            ms = int((datetime.now() - t0).total_seconds() * 1000)
+            status_code = response.status_code
+            html = response.text
+        soup = BeautifulSoup(html, "html.parser")
+
+        # --- Grundlaeggende ---
+        items.append(_check("HTTP 200", status_code == 200, 3, f"status {status_code}"))
+        is_https = url.startswith("https://")
+        items.append(_check("HTTPS", is_https, 3))
+        title = soup.find("title")
+        title_text = title.get_text(strip=True) if title else ""
+        title_len = len(title_text)
+        items.append(_check("Titel findes", bool(title_text), 3))
+        items.append(_check("Titel-laengde 30-60", 30 <= title_len <= 60, 2, f"{title_len} tegn"))
+        meta = soup.find("meta", attrs={"name": "description"})
+        meta_text = (meta.get("content", "").strip() if meta else "")
+        meta_len = len(meta_text)
+        items.append(_check("Meta description findes", bool(meta_text), 3))
+        items.append(_check("Meta description 70-160", 70 <= meta_len <= 160, 2, f"{meta_len} tegn"))
+        h1s = soup.find_all("h1")
+        items.append(_check("Praecis een H1", len(h1s) == 1, 3, f"{len(h1s)} stk"))
+        h2s = soup.find_all("h2")
+        items.append(_check("Min. 2 H2-underoverskrifter", len(h2s) >= 2, 2, f"{len(h2s)} stk"))
+        h1_text = h1s[0].get_text(strip=True).lower() if h1s else ""
+        viewport = soup.find("meta", attrs={"name": "viewport"})
+        items.append(_check("Viewport (mobil)", bool(viewport), 3))
+        robots_meta = soup.find("meta", attrs={"name": "robots"})
+        noindex = robots_meta and "noindex" in (robots_meta.get("content", "") or "").lower()
+        items.append(_check("Ikke noindex", not noindex, 3, "noindex!" if noindex else ""))
+        canonical = soup.find("link", rel=lambda v: v and "canonical" in v)
+        items.append(_check("Canonical", bool(canonical), 2))
+        jsonlds = soup.find_all("script", attrs={"type": "application/ld+json"})
+        schema_types = []
+        for s in jsonlds:
+            try:
+                import json as _json
+                d = _json.loads(s.string or "{}")
+                g = d.get("@graph") or [d]
+                for node in g:
+                    t = node.get("@type")
+                    if isinstance(t, list):
+                        schema_types.extend(t)
+                    elif t:
+                        schema_types.append(t)
+            except Exception:
+                pass
+        items.append(_check("JSON-LD schema", bool(jsonlds), 2, ", ".join(schema_types[:3])))
+        og_title = soup.find("meta", attrs={"property": "og:title"})
+        og_img = soup.find("meta", attrs={"property": "og:image"})
+        items.append(_check("Open Graph", bool(og_title), 1, "med billede" if og_img else "uden billede"))
+        twitter = soup.find("meta", attrs={"name": re.compile("twitter:card", re.I)})
+        items.append(_check("Twitter card", bool(twitter), 1))
+        favicon = soup.find("link", rel=lambda v: v and "icon" in v)
+        items.append(_check("Favicon", bool(favicon), 1))
+        html_tag = soup.find("html")
+        lang = html_tag.get("lang") if html_tag else None
+        items.append(_check("lang-attribut", bool(lang), 1, lang or ""))
+        images = soup.find_all("img")
+        no_alt = [img for img in images if not img.get("alt", "").strip()]
+        items.append(_check("Billeder har alt-tekst", len(no_alt) == 0, 2, f"{len(no_alt)} mangler af {len(images)}"))
+
+        # --- Indhold ---
+        for tag in soup(["script", "style", "noscript"]):
+            tag.decompose()
+        text = soup.get_text(" ", strip=True)
+        words = re.findall(r"[\w\u00C0-\u024F']+", text)
+        wc = len(words)
+        items.append(_check("Mindst 300 ord", wc >= 300, 3, f"{wc} ord"))
+        sentences = [s for s in re.split(r"[.!?]+\s", text) if len(s.strip()) > 2]
+        avg_sent = round(wc / max(len(sentences), 1), 1)
+        items.append(_check("Lesbarhed: saetninger < 25 ord", avg_sent < 25, 1, f"snit {avg_sent} ord"))
+        def _syllables(w):
+            w = w.lower()
+            groups = re.findall(r"[aeiouyaeiouy]+", w)
+            return max(len(groups), 1)
+        try:
+            syl = sum(_syllables(w) for w in words)
+            flesch = round(206.835 - 1.015 * (wc / max(len(sentences), 1)) - 84.6 * (syl / max(wc, 1)))
+            items.append(_check("Flesch-lesbarhed > 50", flesch > 50, 1, f"score {flesch}"))
+        except Exception:
+            pass
+        paragraphs = [p for p in soup.find_all("p") if len(p.get_text(strip=True)) > 20]
+        long_paras = 0
+        for p in paragraphs:
+            if len(re.findall(r"[\w']+", p.get_text())) > 150:
+                long_paras += 1
+        items.append(_check("Korte afsnit (< 150 ord)", long_paras == 0, 1, f"{long_paras} lange"))
+        links_all = [a.get("href", "") for a in soup.find_all("a", href=True)]
+        host = urlparse(url).netloc if url else ""
+        internal = [l for l in links_all if l.startswith("/") or (host and host in l)]
+        external = [l for l in links_all if l.startswith("http") and host and host not in l]
+        items.append(_check("Min. 3 interne links", len(internal) >= 3, 2, f"{len(internal)} stk"))
+        items.append(_check("Min. 1 eksternt link", len(external) >= 1, 1, f"{len(external)} stk"))
+        mixed = is_https and "http://" in html.replace("http://www.w3.org", "")
+        items.append(_check("Intet mixed content", not mixed, 2))
+
+        # --- Focus keyword (som RankMath) ---
+        if keyword:
+            kw = re.sub(r"\s+", " ", keyword)
+            items.append(_check("Keyword i titel", kw in title_text.lower(), 3, title_text[:60]))
+            items.append(_check("Keyword i meta description", kw in meta_text.lower(), 2))
+            slug = urllib.parse.unquote(urlparse(url).path.lower()) if url else ""
+            items.append(_check("Keyword i URL", kw.replace(" ", "-") in slug or kw in slug, 2, slug[:40]))
+            items.append(_check("Keyword i H1", kw in h1_text, 2))
+            first10 = " ".join(words[: max(int(wc * 0.1), 20)]).lower()
+            items.append(_check("Keyword i foerste 10 % af teksten", kw in first10, 2))
+            density = (text.lower().count(kw) * max(len(kw.split()), 1)) / max(wc, 1) * 100
+            items.append(_check("Keyword density 0,5-3 %", 0.5 <= density <= 3.0, 2, f"{density:.1f} %"))
+
+        # --- Hastighed ---
+        if ms is not None:
+            items.append(_check("Svartid < 1500 ms", ms < 1500, 2, f"{ms} ms"))
+
+        total_weight = sum(c["weight"] for c in items)
+        earned = sum(c["weight"] for c in items if c["ok"])
+        score = round(earned / total_weight * 100) if total_weight else 0
+        return {
+            "score": score,
+            "items": [{"ok": c["ok"], "text": c["name"] + (f" ({c['info']})" if c["info"] else "")} for c in items],
+            "raw": items,
+            "title": title_text, "meta": meta_text, "h1": h1_text,
+            "words": wc, "internal": len(internal), "external": len(external),
+        }
+    except Exception as e:
+        return {"score": 0, "items": [{"ok": False, "text": f"Fejl: {e}"}], "raw": [],
+                "title": "", "meta": "", "h1": "", "words": 0, "internal": 0, "external": 0}
+
+def psi_fetch(url: str):
+    if not PSI_API_KEY:
+        return None
+    try:
+        r = HTTP.get(
+            "https://www.googleapis.com/pagespeedonline/v5/runPagespeed",
+            params={"url": url, "key": PSI_API_KEY, "strategy": "mobile"},
+            timeout=60,
+        )
+        r.raise_for_status()
+        d = r.json()
+        lr = d.get("lighthouseResult", {})
+        cats = lr.get("categories", {}).get("performance", {}).get("score")
+        audits = lr.get("audits", {})
+        lcp = audits.get("largest-contentful-paint", {}).get("displayValue", "")
+        cls = audits.get("cumulative-layout-shift", {}).get("displayValue", "")
+        return {"perf": round((cats or 0) * 100), "lcp": lcp, "cls": cls}
+    except Exception:
+        return None
+
+def deep_extras(url: str):
+    """Dyb-niveau: status paa eksterne links + billeder uden alt-tekst."""
+    items = []
+    try:
+        r = safe_request(url, timeout=12)
+        soup = BeautifulSoup(r.text, "html.parser")
+        base = url
+        ext_links = []
+        seen = set()
+        for a_ in soup.find_all("a", href=True):
+            href = urllib.parse.urljoin(base, a_["href"].split("#")[0])
+            d = urlparse(href).netloc
+            if d and d != urlparse(base).netloc and href not in seen:
+                seen.add(href)
+                ext_links.append(href)
+            if len(ext_links) >= 8:
+                break
+        broken = 0
+        for link in ext_links:
+            try:
+                lr = safe_request(link, timeout=8)
+                if lr.status_code >= 400:
+                    broken += 1
+            except Exception:
+                broken += 1
+        items.append({"ok": broken == 0, "text": f"Eksterne links: {len(ext_links)} tjekket, {broken} brodne"})
+        no_alt = [im for im in soup.find_all("img") if not (im.get("alt") or "").strip()]
+        items.append({"ok": len(no_alt) == 0, "text": f"Billeder uden alt-tekst: {len(no_alt)}"})
+    except Exception as e:
+        items.append({"ok": False, "text": "Dyb-scan fejlede: " + str(e)[:100]})
+    return items
+
+CRAWL_STATE = {"running": False, "done": 0, "total": 0, "start": "", "error": None, "avg": None}
+
+def site_crawl_sync(start_url: str, max_pages: int = 30):
+    try:
+        start_url = normalize_url(start_url)
+        host = urlparse(start_url).netloc
+        with get_db() as db:
+            db.execute("DELETE FROM seopages")
+            db.execute("DELETE FROM crawl_runs")
+        # robots.txt + sitemap.xml
+        robots_ok = sitemap_ok = False
+        sitemap_count = 0
+        try:
+            r = safe_request(f"https://{host}/robots.txt", timeout=8)
+            robots_ok = (r.status_code == 200)
+            m = re.search(r"Sitemap:\s*(\S+)", r.text, re.I)
+            sitemap_url = m.group(1) if m else f"https://{host}/sitemap.xml"
+            r2 = safe_request(sitemap_url, timeout=10)
+            if r2.status_code == 200:
+                sm = BeautifulSoup(r2.text, "html.parser")
+                sitemap_count = len(sm.find_all("loc"))
+                sitemap_ok = sitemap_count > 0
+        except Exception:
+            pass
+        with get_db() as db:
+            db.execute(
+                "INSERT INTO crawl_runs (host, robots_ok, sitemap_ok, sitemap_urls, started_at) VALUES (?,?,?,?,?)",
+                (host, int(robots_ok), int(sitemap_ok), sitemap_count, now_iso()),
+            )
+            run_id = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+        queue = [start_url]
+        seen = set()
+        CRAWL_STATE.update({"running": True, "done": 0, "total": max_pages, "start": start_url, "error": None, "avg": None})
+        total_score = 0
+        pages_saved = 0
+        while queue and len(seen) < max_pages:
+            current = queue.pop(0)
+            if current in seen:
+                continue
+            seen.add(current)
+            resp = None
+            try:
+                t0 = datetime.now()
+                resp = safe_request(current, timeout=10)
+                ms = int((datetime.now() - t0).total_seconds() * 1000)
+                res = analyze_page(current, "", html=resp.text if resp.status_code == 200 else None,
+                                   status_code=resp.status_code, ms=ms)
+                status = resp.status_code
+            except Exception:
+                res = {"score": 0, "title": "", "meta": "", "h1": "", "words": 0, "raw": []}
+                status = 0
+            issues = [c["name"] for c in res.get("raw", []) if not c["ok"]]
+            redirects = ""
+            if resp is not None and resp.history:
+                redirects = " -> ".join([str(r.status_code) for r in resp.history] + [str(resp.status_code)]) +                             " | " + " -> ".join([r.url for r in resp.history] + [resp.url])
+            content_hash = ""
+            if resp is not None and resp.status_code == 200:
+                psoup2 = BeautifulSoup(resp.text, "html.parser")
+                for t in psoup2(["script", "style", "noscript"]):
+                    t.decompose()
+                content_hash = hashlib.md5(" ".join(psoup2.get_text().split()).encode()).hexdigest()
+            with get_db() as db:
+                db.execute(
+                    "INSERT INTO seopages (run_id, url, http_status, title, meta_len, h1, words, score, issues, redirects, content_hash, crawled_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (run_id, current, status, res.get("title", "")[:200], len(res.get("meta", "")),
+                     res.get("h1", "")[:200], res.get("words", 0), res["score"],
+                     "; ".join(issues[:8]), redirects[:300], content_hash, now_iso()),
+                )
+            if resp is not None and resp.status_code < 400:
+                total_score += res["score"]
+                pages_saved += 1
+                try:
+                    psoup = BeautifulSoup(resp.text, "html.parser")
+                    for a in psoup.find_all("a", href=True):
+                        href = urllib.parse.urljoin(current, a["href"].split("#")[0])
+                        ph = urlparse(href)
+                        if ph.netloc == host and ph.scheme.startswith("http") and href not in seen:
+                            queue.append(href)
+                except Exception:
+                    pass
+            CRAWL_STATE["done"] = len(seen)
+            time.sleep(0.4)
+        avg = round(total_score / pages_saved) if pages_saved else 0
+        # sitemap-validering: tjek foerste 50 sitemap-URLs for 404/fejl
+        sitemap_broken = []
+        sitemap_missing = 0
+        if sitemap_ok:
+            try:
+                sm_urls = []
+                r3 = safe_request(sitemap_url, timeout=10)
+                for loc in BeautifulSoup(r3.text, "html.parser").find_all("loc"):
+                    sm_urls.append(loc.get_text(strip=True))
+                for su in sm_urls[:50]:
+                    try:
+                        rr = safe_request(su, timeout=8)
+                        if rr.status_code >= 400:
+                            sitemap_broken.append(f"{su} ({rr.status_code})")
+                    except Exception:
+                        sitemap_broken.append(f"{su} (timeout)")
+                    time.sleep(0.2)
+            except Exception:
+                pass
+        with get_db() as db:
+            db.execute("UPDATE crawl_runs SET pages=?, avg_score=?, finished_at=?, sitemap_broken=?, sitemap_missing=? WHERE id=?",
+                       (pages_saved, avg, now_iso(), "; ".join(sitemap_broken[:10]) if sitemap_broken else "",
+                        max(sitemap_count - pages_saved, 0) if sitemap_ok else 0, run_id))
+            db.execute("INSERT INTO health_history (host, avg_score, pages, run_id, checked_at) VALUES (?,?,?,?,?)",
+                       (host, avg, pages_saved, run_id, now_iso()))
+            if sitemap_broken:
+                add_alarm(db, "sitemap", f"{len(sitemap_broken)} sitemap-URLs fejler (foerste 50 tjekket)", "advarsel")
+        CRAWL_STATE.update({"running": False, "avg": avg})
+        return {"ok": True, "pages": pages_saved, "avg_score": avg, "robots_ok": robots_ok,
+                "sitemap_ok": sitemap_ok, "sitemap_urls": sitemap_count}
+    except Exception as e:
+        CRAWL_STATE.update({"running": False, "error": str(e)[:200]})
+        return {"ok": False, "error": str(e)[:200]}
+
+def discover_competitors_sync(keyword: str):
+    try:
+        query = urllib.parse.quote_plus(keyword)
+        response = safe_request(f"https://html.duckduckgo.com/html/?q={query}", timeout=10)
+        soup = BeautifulSoup(response.text, "html.parser")
+        found = []
+        for anchor in soup.select("a.result__url[href]"):
+            href = anchor.get("href", "")
+            if "uddg=" in href:
+                parsed = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+                href = parsed.get("uddg", [href])[0]
+            if href.startswith("http") and "duckduckgo.com" not in href:
+                domain = urlparse(href).netloc
+                if domain and domain not in [item[0] for item in found]:
+                    found.append((domain, href))
+                if len(found) >= 5:
+                    break
+        if not found:
+            raise RuntimeError("Ingen resultater (DuckDuckGo blokerede muligvis - proev igen eller brug Juno/SerpAPI)")
+        with get_db() as db:
+            for domain, url in found:
+                info = crawl_competitor(url)
+                db.execute(
+                    "INSERT INTO competitors (name, url, crawled_info, found_at) VALUES (?,?,?,?)",
+                    (domain, url, info, now_iso()),
+                )
+        return {"ok": True, "count": len(found), "error": None}
+    except Exception as e:
+        err = str(e)[:200]
+        with get_db() as db:
+            add_alarm(db, "serp-scan", f"Konkurrent-scan '{keyword}' fejlede: {err}", "advarsel")
+        return {"ok": False, "count": 0, "error": err}
+
+def crawl_competitor(url: str):
+    try:
+        url = normalize_url(url)
+        response = safe_request(url)
+        if response.status_code != 200:
+            return f"HTTP-fejl {response.status_code}"
+        soup = BeautifulSoup(response.text, "html.parser")
+        title = soup.title.get_text(strip=True) if soup.title else "Ingen titel"
+        meta = soup.find("meta", attrs={"name": "description"})
+        description = meta.get("content", "").strip() if meta else "Ingen beskrivelse"
+        h1 = soup.find("h1")
+        h1_text = h1.get_text(strip=True) if h1 else "Ingen H1"
+        return f"Titel: {title[:80]} | H1: {h1_text[:60]} | Beskrivelse: {description[:100]}"
+    except Exception as e:
+        return f"Fejl: {e}"
+
+def check_links_sync(url: str):
+    try:
+        url = normalize_url(url)
+        response = safe_request(url)
+        soup = BeautifulSoup(response.text, "html.parser")
+        links = [a["href"] for a in soup.find_all("a", href=True)]
+        external = [l for l in links if l.startswith("http")]
+        checked = 0
+        broken = 0
+        broken_list = []
+        for link in external[:LINKCHECK_LIMIT]:
+            checked += 1
+            try:
+                result = safe_request(link, timeout=5)
+                if result.status_code >= 400:
+                    broken += 1
+                    broken_list.append(f"{link} ({result.status_code})")
+            except Exception:
+                broken += 1
+                broken_list.append(f"{link} (timeout)")
+        result_text = (
+            f"Fandt {len(links)} links. Eksterne: {len(external)}. "
+            f"Tjekkede: {checked}. Broedte/muligt fejlende: {broken}."
+        )
+        if broken:
+            result_text += " | " + "; ".join(broken_list[:5])
+        return {"ok": True, "text": result_text, "broken": broken, "url": url, "error": None}
+    except Exception as e:
+        return {"ok": False, "text": f"Fejl: {e}", "broken": 0, "url": url, "error": str(e)[:200]}
+EOF_SVC_AUDIT
+
+echo "🎨 app/static/theme.css..."
+cat << 'EOF_THEME_CSS' > "$PROJECT_DIR/app/static/theme.css"
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&family=Inter:wght@400;500;600&display=swap');
+
+/* Command Center - tema "Messing & Laeder" (v8.0).
+   Paletten ligger som RGB-tripletter, saa Tailwind kan bruge den med /opacity.
+   Tailwinds farvenavne mappes over paa paletten i app/static/theme.js, saa
+   markup (zinc-900, emerald-400, ...) ikke skal aendres. Ret farver HER. */
+:root {
+  color-scheme: dark;
+
+  /* Moerk, varm graa: sidebaggrund, kort, linjer og tekst */
+  --cc-ink-50: 251 247 239;
+  --cc-ink-100: 244 236 224;
+  --cc-ink-200: 232 220 203;
+  --cc-ink-300: 210 196 177;
+  --cc-ink-400: 171 155 136;
+  --cc-ink-500: 138 122 105;
+  --cc-ink-600: 85 72 62;
+  --cc-ink-700: 60 51 44;
+  --cc-ink-800: 43 36 32;
+  --cc-ink-900: 23 19 16;
+  --cc-ink-950: 15 12 10;
+
+  /* Messing: primaer accent (knapper, links, aktiv fane) */
+  --cc-brass-50: 251 245 228;
+  --cc-brass-100: 244 231 195;
+  --cc-brass-200: 233 212 154;
+  --cc-brass-300: 221 192 120;
+  --cc-brass-400: 207 168 81;
+  --cc-brass-500: 185 143 49;
+  --cc-brass-600: 154 116 37;
+  --cc-brass-700: 123 90 31;
+  --cc-brass-800: 96 70 28;
+  --cc-brass-900: 75 55 24;
+  --cc-brass-950: 42 30 12;
+
+  /* Kobber: advarsler og "bemaerk vaerdi" */
+  --cc-copper-50: 253 244 234;
+  --cc-copper-100: 250 231 210;
+  --cc-copper-200: 245 211 176;
+  --cc-copper-300: 231 185 138;
+  --cc-copper-400: 220 154 92;
+  --cc-copper-500: 198 127 61;
+  --cc-copper-600: 168 101 48;
+  --cc-copper-700: 134 80 42;
+  --cc-copper-800: 107 65 40;
+  --cc-copper-900: 88 56 38;
+  --cc-copper-950: 47 29 19;
+
+  /* Okseblod: fejl og kritiske alarmer */
+  --cc-oxblood-50: 251 240 237;
+  --cc-oxblood-100: 246 224 219;
+  --cc-oxblood-200: 238 195 186;
+  --cc-oxblood-300: 221 160 147;
+  --cc-oxblood-400: 207 133 116;
+  --cc-oxblood-500: 185 98 76;
+  --cc-oxblood-600: 156 72 55;
+  --cc-oxblood-700: 126 56 44;
+  --cc-oxblood-800: 97 44 36;
+  --cc-oxblood-900: 74 35 29;
+  --cc-oxblood-950: 42 18 14;
+
+  /* Irr/pakina: sekundaer accent (AI-vaerktoejer, shruggede ting) */
+  --cc-patina-50: 240 247 245;
+  --cc-patina-100: 220 235 231;
+  --cc-patina-200: 187 215 207;
+  --cc-patina-300: 168 203 192;
+  --cc-patina-400: 133 179 166;
+  --cc-patina-500: 95 149 135;
+  --cc-patina-600: 74 123 111;
+  --cc-patina-700: 61 99 90;
+  --cc-patina-800: 51 79 73;
+  --cc-patina-900: 42 64 59;
+  --cc-patina-950: 21 34 32;
+
+  --cc-font-display: "Cormorant Garamond", "Iowan Old Style", Georgia, serif;
+  --cc-font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --cc-hairline: rgb(var(--cc-brass-500) / .22);
+  --cc-glow: 0 30px 70px -40px rgb(0 0 0 / .95);
+}
+
+/* --- Grundflade: moerkt læder med to varme lyspunkter og let korn ---------- */
+body {
+  font-family: var(--cc-font-sans);
+  background-color: rgb(var(--cc-ink-950));
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E"),
+    radial-gradient(1100px 540px at 8% -12%, rgb(var(--cc-brass-400) / .10), transparent 62%),
+    radial-gradient(820px 460px at 102% -4%, rgb(var(--cc-copper-400) / .07), transparent 58%),
+    radial-gradient(900px 700px at 50% 118%, rgb(var(--cc-brass-500) / .05), transparent 60%);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection { background: rgb(var(--cc-brass-400) / .28); color: rgb(var(--cc-ink-50)); }
+
+html { scroll-behavior: smooth; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: rgb(var(--cc-ink-950)); }
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgb(var(--cc-brass-700)), rgb(var(--cc-ink-700)));
+  border-radius: 8px;
+  border: 2px solid rgb(var(--cc-ink-950));
+}
+::-webkit-scrollbar-thumb:hover { background: linear-gradient(180deg, rgb(var(--cc-brass-500)), rgb(var(--cc-brass-800))); }
+
+/* --- Typografi: graveret serif til overskrifter, ren sans til data --------- */
+.cc-wordmark {
+  font-family: var(--cc-font-display);
+  font-weight: 600;
+  letter-spacing: .2em;
+  text-transform: uppercase;
+}
+
+header h1 { font-family: var(--cc-font-display); letter-spacing: .22em; text-transform: uppercase; }
+header h1 span { letter-spacing: .14em; }
+
+/* Kort-overskrifter er "eyebrow"-labels: nu som graveret messingplade */
+h2.text-xs.uppercase {
+  font-family: var(--cc-font-display);
+  font-weight: 600;
+  letter-spacing: .2em;
+  color: rgb(var(--cc-brass-200) / .92);
+}
+
+th {
+  font-family: var(--cc-font-display);
+  font-weight: 600;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  font-size: .64rem;
+  color: rgb(var(--cc-brass-300) / .78);
+}
+
+/* --- Header og navigation ------------------------------------------------- */
+header {
+  background-image: linear-gradient(180deg, rgb(var(--cc-ink-900) / .92), rgb(var(--cc-ink-950) / .72));
+  box-shadow: inset 0 -1px 0 var(--cc-hairline);
+  backdrop-filter: blur(12px);
+}
+
+header p { letter-spacing: .04em; }
+
+nav {
+  background-image: linear-gradient(180deg, rgb(var(--cc-ink-900) / .82), rgb(var(--cc-ink-950) / .70));
+  box-shadow: 0 1px 0 var(--cc-hairline), 0 22px 40px -30px rgb(0 0 0 / .9);
+  backdrop-filter: blur(12px);
+}
+
+nav button {
+  letter-spacing: .06em;
+  border-radius: .55rem;
+  white-space: nowrap;
+}
+
+/* Fanestriben scroller vandret; skjul scrollbaren (den sidder paa nav'ens indre div) */
+nav > div { scrollbar-width: none; }
+nav > div::-webkit-scrollbar { display: none; }
+
+/* --- Kort og indre flader ------------------------------------------------- */
+.bg-zinc-900.border {
+  background-image: linear-gradient(180deg, rgb(var(--cc-brass-300) / .045), transparent 42%);
+  box-shadow: var(--cc-glow), inset 0 1px 0 rgb(255 238 205 / .05);
+  border-color: rgb(var(--cc-ink-700) / .85);
+}
+
+.bg-zinc-900.border:hover { border-color: rgb(var(--cc-brass-600) / .55); }
+
+.bg-zinc-950.border {
+  background-image: linear-gradient(180deg, rgb(var(--cc-ink-50) / .022), transparent 60%);
+  box-shadow: inset 0 1px 0 rgb(0 0 0 / .35);
+  border-color: rgb(var(--cc-ink-800) / .9);
+}
+
+b, strong, .font-bold { letter-spacing: .01em; }
+
+/* --- Knapper: messingplade med svagt metal-skin --------------------------- */
+button, a, input, select, textarea { transition: background-color .16s ease, border-color .16s ease, color .16s ease, box-shadow .16s ease, filter .16s ease; }
+
+button[class*="emerald"] {
+  background-image: linear-gradient(180deg, rgb(var(--cc-brass-300) / .14), rgb(var(--cc-brass-600) / .05));
+  box-shadow: inset 0 1px 0 rgb(255 240 210 / .10);
+  letter-spacing: .03em;
+}
+button[class*="emerald"]:hover {
+  background-image: linear-gradient(180deg, rgb(var(--cc-brass-300) / .22), rgb(var(--cc-brass-600) / .08));
+  border-color: rgb(var(--cc-brass-400) / .55);
+}
+
+button[class*="rose"]:hover { border-color: rgb(var(--cc-oxblood-400) / .45); }
+button:active { transform: translateY(1px); }
+
+a:hover { text-decoration-color: rgb(var(--cc-brass-400) / .7); }
+
+/* --- Felter --------------------------------------------------------------- */
+input.border-zinc-800:focus,
+select.border-zinc-800:focus,
+textarea.border-zinc-800:focus {
+  border-color: rgb(var(--cc-brass-400) / .65);
+  box-shadow: 0 0 0 3px rgb(var(--cc-brass-400) / .12);
+  outline: none;
+}
+
+input::placeholder, textarea::placeholder { color: rgb(var(--cc-ink-500) / .9); }
+
+:focus-visible { outline: 1px solid rgb(var(--cc-brass-300) / .85); outline-offset: 2px; }
+
+/* --- Tabeller og lister --------------------------------------------------- */
+thead tr { border-bottom: 1px solid var(--cc-hairline); }
+tbody tr { transition: background-color .12s ease; }
+tbody tr:hover { background: rgb(var(--cc-brass-400) / .055); }
+
+/* --- Smaa detaljer -------------------------------------------------------- */
+.spinner {
+  width: 16px; height: 16px;
+  border: 2px solid rgb(var(--cc-ink-700));
+  border-top-color: rgb(var(--cc-brass-400));
+  border-radius: 50%;
+  display: inline-block;
+  animation: ccspin .8s linear infinite;
+  vertical-align: -3px;
+}
+@keyframes ccspin { to { transform: rotate(360deg); } }
+
+kbd, code { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; }
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  * { animation: none !important; transition: none !important; }
+}
+
+@media (max-width: 640px) {
+  th, td { padding-top: .45rem; padding-bottom: .45rem; }
+  header h1.text-sm { font-size: .8rem; letter-spacing: .1em; white-space: nowrap; }
+  header h1 span { letter-spacing: .06em; }
+  /* Paa smalle skaerme faar handlingerne deres egen linje i stedet for at klippe */
+  header .max-w-7xl { flex-wrap: wrap; row-gap: .5rem; }
+}
+EOF_THEME_CSS
+
+cat << 'EOF_THEME_JS' > "$PROJECT_DIR/app/static/theme.js"
+/* Tailwind-farver -> temaets palet (se app/static/theme.css).
+   Skal indlaeses EFTER cdn.tailwindcss.com, saa markup som bg-zinc-900,
+   text-emerald-400 og border-rose-500/30 faar messing/læder-farverne uden at
+   klasserne i skabelonerne aendres. */
+(function () {
+  if (typeof tailwind === "undefined") return;
+
+  var SHADES = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950];
+
+  function scale(name) {
+    var out = {};
+    SHADES.forEach(function (s) {
+      out[s] = "rgb(var(--cc-" + name + "-" + s + ") / <alpha-value>)";
+    });
+    return out;
+  }
+
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          zinc: scale("ink"),      // graa flader og tekst -> varm lædergraa
+          emerald: scale("brass"), // primaer accent      -> messing
+          amber: scale("copper"),  // advarsler           -> kobber
+          rose: scale("oxblood"),  // fejl                -> okseblod
+          red: scale("oxblood"),
+          yellow: scale("brass"),
+          purple: scale("patina")  // AI/sekundaer        -> irr
+        },
+        fontFamily: {
+          sans: ['"Inter"', "ui-sans-serif", "system-ui", "-apple-system", '"Segoe UI"', "sans-serif"],
+          display: ['"Cormorant Garamond"', '"Iowan Old Style"', "Georgia", "serif"]
+        },
+        borderRadius: { xl: "0.55rem", "2xl": "0.8rem" }
+      }
+    }
+  };
+})();
+EOF_THEME_JS
+
 echo "📄 app/templates/dashboard.html..."
 cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 <!DOCTYPE html>
@@ -3054,39 +3533,22 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/static/theme.js?v=8"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <link rel="preconnect" href="https://cdn.tailwindcss.com" crossorigin>
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-    <meta name="theme-color" content="#09090b">
-    <style>
-      html { scroll-behavior: smooth; }
-      body { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
-      ::-webkit-scrollbar { width: 9px; height: 9px; }
-      ::-webkit-scrollbar-track { background: #09090b; }
-      ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 8px; }
-      ::-webkit-scrollbar-thumb:hover { background: #52525b; }
-      nav, header { backdrop-filter: blur(12px); }
-      tbody tr { transition: background-color .12s ease; }
-      tbody tr:hover { background: rgba(39,39,42,.45); }
-      button, a, input { transition: all .15s ease; }
-      input:focus-visible, button:focus-visible { outline: 2px solid #34d399; outline-offset: 1px; }
-      .spinner { width: 16px; height: 16px; border: 2px solid #3f3f46; border-top-color: #34d399; border-radius: 50%; display: inline-block; animation: ccspin .7s linear infinite; vertical-align: -3px; }
-      @keyframes ccspin { to { transform: rotate(360deg); } }
-      .bg-zinc-900:hover { border-color: #3f3f46; }
-      @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
-      @media (max-width: 640px) {
-        nav::-webkit-scrollbar { display: none; }
-        th, td { padding-top: .45rem; padding-bottom: .45rem; }
-      }
-    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="/static/theme.css?v=8">
+    <meta name="theme-color" content="#0f0c0a">
 </head>
 {% if insecure %}<div class="bg-yellow-600 text-black text-xs text-center py-1.5 px-4 font-semibold">&Uacute;t&uacute;n HTTPS &mdash; token sendes ukrypteret. S&aelig;t nginx + TLS op foran CC (se Install-dokumentationen).</div>{% endif %}
 <body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.10 PRO</span></h1>
+            <h1 class="cc-wordmark text-sm">⚡ Command Center <span class="text-emerald-400">v7.10 Pro</span></h1>
             <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
@@ -3118,7 +3580,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 
     {% if not ai_enabled or not wp_enabled or not auth_required %}
     <div class="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-3 text-xs text-amber-300">
-        Setup: AI {{ '✅' if ai_enabled else '❌ (AIMLAPI_KEY)' }} · WordPress {{ '✅' if wp_enabled else '❌ (WP_URL/WP_USER/WP_APP_PASSWORD)' }} · SerpAPI {{ '✅' if serpapi_enabled else '❌ (SERPAPI_KEY)' }} · Telegram {{ '✅' if telegram_enabled else '— (valgfrit)' }} · Login {{ '✅' if auth_required else '❌ (APP_TOKEN — sæt den, hvis dashboardet kører på en VPS!)' }} — se .env.example
+        Setup: AI {{ ('✅ (' + ai_provider + ')') if ai_enabled else '❌ (AIMLAPI_KEY/OPENROUTER_KEY)' }} · WordPress {{ '✅' if wp_enabled else '❌ (WP_URL/WP_USER/WP_APP_PASSWORD)' }} · SerpAPI {{ '✅' if serpapi_enabled else '❌ (SERPAPI_KEY)' }} · Telegram {{ '✅' if telegram_enabled else '— (valgfrit)' }} · Login {{ '✅' if auth_required else '❌ (APP_TOKEN — sæt den, hvis dashboardet kører på en VPS!)' }} — se .env.example
     </div>
     {% endif %}
 
@@ -3433,7 +3895,27 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             {% endif %}
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
-            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Generér artikel {{ '(AI: Gemini via aimlapi)' if ai_enabled else '(skabelon — sæt AIMLAPI_KEY for AI)' }}</h2>
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">AI-model</h2>
+            <p class="text-[10px] text-zinc-500 mb-3">Nuværende: <span class="text-zinc-300">{{ ai_model }}</span> (provider: {{ ai_provider }}). Skift uden at redigere .env — tom = standard.</p>
+            <form action="/settings/ai-model" method="POST" class="flex gap-2 items-center">
+                <input type="text" name="model" value="{{ ai_model }}" list="ai-models" placeholder="model-id..." class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <datalist id="ai-models">
+                    {% if ai_provider == 'openrouter' %}
+                    <option value="google/gemini-2.5-flash"></option>
+                    <option value="google/gemini-2.0-flash-001"></option>
+                    <option value="anthropic/claude-3.5-sonnet"></option>
+                    <option value="openai/gpt-4o-mini"></option>
+                    {% else %}
+                    <option value="anthropic/claude-3-5-sonnet"></option>
+                    <option value="openai/gpt-4o"></option>
+                    <option value="openai/gpt-4o-mini"></option>
+                    {% endif %}
+                </datalist>
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Gem</button>
+            </form>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Generér artikel {{ ('(AI via ' + ai_provider + ')') if ai_enabled else '(skabelon — sæt AIMLAPI_KEY eller OPENROUTER_KEY for AI)' }}</h2>
             <form action="/articles/generate" method="POST" class="flex gap-2">
                 <input type="text" name="keyword" placeholder="Emne / søgeord..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Generér</button>
@@ -3482,7 +3964,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">🔗 Backlink-prospector</h2>
-            <p class="text-xs text-zinc-500 mb-3">Søg keyword → top 10 i Google → type + kontakt-mail + AI-outreach-draft. Kræver SERPAPI_KEY (AIMLAPI_KEY for AI-drafts).</p>
+            <p class="text-xs text-zinc-500 mb-3">Søg keyword → top 10 i Google → type + kontakt-mail + AI-outreach-draft. Kræver SERPAPI_KEY (AIMLAPI_KEY eller OPENROUTER_KEY for AI-drafts).</p>
             <form action="/backlinks/prospect" method="POST" class="flex gap-2 mb-4">
                 <input type="text" name="keyword" placeholder="Keyword at finde links til..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Find muligheder</button>
@@ -3711,7 +4193,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                     <div class="text-zinc-500 truncate">{{ l.from_url }} → <span class="text-emerald-400">{{ l.to_url }}</span></div>
                 </div>
                 {% else %}
-                <p class="text-xs text-zinc-500">Ingen forslag endnu. Kør site-crawl først, og kræver AIMLAPI_KEY.</p>
+                <p class="text-xs text-zinc-500">Ingen forslag endnu. Kør site-crawl først, og kræver AIMLAPI_KEY eller OPENROUTER_KEY.</p>
                 {% endfor %}
             </div>
         </div>
@@ -3893,8 +4375,8 @@ function showHistory(domainId, url) {
         if (window.histChartInstance) window.histChartInstance.destroy();
         window.histChartInstance = new Chart(ctx, {
             type: 'line',
-            data: { labels: data.labels, datasets: [{ label: 'ms', data: data.ms, borderColor: '#34d399', tension: 0.3, pointRadius: 2 }] },
-            options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#71717a', font: { size: 9 } } }, y: { ticks: { color: '#71717a' } } } }
+            data: { labels: data.labels, datasets: [{ label: 'ms', data: data.ms, borderColor: '#cfa851', backgroundColor: 'rgba(207,168,81,0.10)', fill: true, tension: 0.3, pointRadius: 2 }] },
+            options: { plugins: { legend: { display: false } }, scales: { x: { grid: { color: 'rgba(210,196,177,0.07)' }, ticks: { color: '#8a7a69', font: { size: 9 } } }, y: { grid: { color: 'rgba(210,196,177,0.07)' }, ticks: { color: '#8a7a69' } } } }
         });
     });
 }
@@ -3905,8 +4387,8 @@ function loadHealth() {
         if (window.healthChartInstance) window.healthChartInstance.destroy();
         window.healthChartInstance = new Chart(document.getElementById('healthchart'), {
             type: 'line',
-            data: { labels: data.labels, datasets: [{ label: 'snitscore', data: data.scores, borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', fill: true, tension: 0.3 }] },
-            options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#71717a', font: { size: 9 } } }, y: { ticks: { color: '#71717a' }, min: 0, max: 100 } } }
+            data: { labels: data.labels, datasets: [{ label: 'snitscore', data: data.scores, borderColor: '#dc9a5c', backgroundColor: 'rgba(220,154,92,0.12)', fill: true, tension: 0.3 }] },
+            options: { plugins: { legend: { display: false } }, scales: { x: { grid: { color: 'rgba(210,196,177,0.07)' }, ticks: { color: '#8a7a69', font: { size: 9 } } }, y: { grid: { color: 'rgba(210,196,177,0.07)' }, ticks: { color: '#8a7a69' }, min: 0, max: 100 } } }
         });
     });
 }
@@ -3939,8 +4421,8 @@ function loadVis() {
         if (window.visChartInstance) window.visChartInstance.destroy();
         window.visChartInstance = new Chart(document.getElementById('vischart'), {
             type: 'line',
-            data: { labels: data.labels, datasets: [{ label: 'visibility %', data: data.scores, borderColor: '#34d399', backgroundColor: 'rgba(52,211,153,0.1)', fill: true, tension: 0.3 }] },
-            options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#71717a', font: { size: 9 } } }, y: { ticks: { color: '#71717a' }, min: 0, max: 100 } } }
+            data: { labels: data.labels, datasets: [{ label: 'visibility %', data: data.scores, borderColor: '#cfa851', backgroundColor: 'rgba(207,168,81,0.12)', fill: true, tension: 0.3 }] },
+            options: { plugins: { legend: { display: false } }, scales: { x: { grid: { color: 'rgba(210,196,177,0.07)' }, ticks: { color: '#8a7a69', font: { size: 9 } } }, y: { grid: { color: 'rgba(210,196,177,0.07)' }, ticks: { color: '#8a7a69' }, min: 0, max: 100 } } }
         });
     });
 }
@@ -3959,23 +4441,95 @@ cat << 'EOF_LOGIN' > "$PROJECT_DIR/app/templates/login.html"
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center — Login</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/static/theme.js?v=8"></script>
+    <link rel="preconnect" href="https://cdn.tailwindcss.com" crossorigin>
+    <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="/static/theme.css?v=8">
+    <meta name="theme-color" content="#0f0c0a">
 </head>
-<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans flex items-center justify-center">
-    <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-8 w-full max-w-sm space-y-4">
-        <h1 class="font-bold text-lg">⚡ COMMAND CENTER</h1>
-        <p class="text-xs text-zinc-400">Indtast din adgangstoken</p>
-        {% if error %}<p class="text-xs text-rose-400">{{ error }}</p>{% endif %}
-        <form action="/login" method="POST" class="space-y-3">
-            <input type="password" name="token" required autofocus
-                   class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
-            <button class="w-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">
-                Log ind
-            </button>
-        </form>
+<body class="bg-zinc-950 text-zinc-100 min-h-screen flex items-center justify-center p-4">
+    <div class="w-full max-w-sm">
+        <div class="text-center mb-5">
+            <h1 class="cc-wordmark text-lg text-zinc-100">⚡ Command Center</h1>
+            <p class="text-[11px] uppercase tracking-[0.28em] text-zinc-500 mt-1">Steamgears drift</p>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-8 space-y-4">
+            <div>
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Log ind</h2>
+                <p class="text-[11px] text-zinc-500 mt-1">Indtast din adgangstoken</p>
+            </div>
+            {% if error %}<p class="text-xs text-rose-400">{{ error }}</p>{% endif %}
+            <form action="/login" method="POST" class="space-y-3">
+                <input type="password" name="token" required autofocus
+                       class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <button class="w-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">
+                    Log ind
+                </button>
+            </form>
+        </div>
+        <p class="text-center text-[10px] uppercase tracking-[0.22em] text-zinc-600 mt-5">WordPress · SEO · Indhold</p>
     </div>
 </body>
 </html>
 EOF_LOGIN
+
+echo "📄 app/templates/landing.html..."
+cat << 'EOF_LANDING' > "$PROJECT_DIR/app/templates/landing.html"
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Command Center — SEO and operations for your sites</title>
+    <meta name="description" content="Command Center: one self-hosted place for uptime, SEO scanning, keyword tracking, article generation and alarms.">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/static/theme.js?v=8"></script>
+    <link rel="preconnect" href="https://cdn.tailwindcss.com" crossorigin>
+    <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="/static/theme.css?v=8">
+    <meta name="theme-color" content="#0f0c0a">
+</head>
+<body class="bg-zinc-950 text-zinc-100 min-h-screen">
+    <main class="max-w-4xl mx-auto px-6 py-16 space-y-14">
+        <header class="text-center space-y-4">
+            <h1 class="cc-wordmark text-3xl text-zinc-100">⚡ Command Center</h1>
+            <p class="text-[11px] uppercase tracking-[0.28em] text-zinc-500">SEO · Uptime · Content</p>
+            <p class="text-zinc-300 max-w-2xl mx-auto">
+                One self-hosted place to keep your websites healthy, visible in search and up to date.
+            </p>
+            <a href="/login" class="inline-block mt-4 bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">
+                Log in
+            </a>
+        </header>
+
+        <section class="grid gap-4 sm:grid-cols-2">
+            <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Uptime and SSL</h2>
+                <p class="text-sm text-zinc-300 mt-2">See the state of every site at a glance, with SSL certificate checks and link checks.</p>
+            </div>
+            <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">SEO scanner</h2>
+                <p class="text-sm text-zinc-300 mt-2">Crawl your sites, find SEO issues and follow keyword rankings over time.</p>
+            </div>
+            <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Articles</h2>
+                <p class="text-sm text-zinc-300 mt-2">Generate articles with AI and push them straight to WordPress.</p>
+            </div>
+            <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
+                <h2 class="text-xs uppercase tracking-wider text-zinc-400">Alarms</h2>
+                <p class="text-sm text-zinc-300 mt-2">Get notified through Telegram when something needs attention.</p>
+            </div>
+        </section>
+
+        <footer class="text-center text-[10px] uppercase tracking-[0.22em] text-zinc-600">
+            WordPress · SEO · Indhold
+        </footer>
+    </main>
+</body>
+</html>
+EOF_LANDING
 
 echo "📄 run.sh..."
 cat << 'EOF_RUNSH' > "$PROJECT_DIR/run.sh"
@@ -4047,7 +4601,7 @@ Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Y
 ## Funktioner
 - 🎛️ **Cockpit** — domæneovervågning (uptime, svartid, SSL), daglig drift-kort (Woo/checkout via Juno-bro)
 - 🔍 **SEO Scanner** — deep audit af enkelt side (20+ vægtede kontroller inkl. focus keyword, lesbarhed, mixed content, schema, OG/Twitter) + **site-crawl** med score per side og robots.txt/sitemap-tjek
-- ✍️ **Artikler** — AI-generering (Gemini via aimlapi) eller skabelon, **push direkte til WordPress som udkast**, **fakta-prompt med SerpAPI-konkurrentanalyse** (top 5 resultater ind i prompten — artiklen skal slå dem), autopilot (idé → artikel → WP-kladde, ny idé via Google-autocomplete når puljen er tom)
+- ✍️ **Artikler** — AI-generering (Gemini via aimlapi eller OpenRouter) eller skabelon, **push direkte til WordPress som udkast**, **fakta-prompt med SerpAPI-konkurrentanalyse** (top 5 resultater ind i prompten — artiklen skal slå dem), autopilot (idé → artikel → WP-kladde, ny idé via Google-autocomplete når puljen er tom)
 - 🎯 **SEO-strategi-vælger** — dropdown (AdSense-indkomst / Affiliate / Backlink-vækst): styler AI-artikler (stil + længde) og autopiloten (artikel vs. prospecting), med automatisk pre-flight-tjek af nøgler, moduler, cron og DB efter hvert valg (grøn/rød-checkliste)
 - 🛡️ **v7.9 Stabilitet** — daglig DB-backup (04:40, seneste 14 gemmes) + automatisk backup foer hver self-update; opstarts-selvtest (DB-skrivetest, noegler, rute-taelling → kritisk alarm ved fejl); login rate-limit (5 fejl = 10 min laas pr. IP); HTTPS-advarsel i UI; scripts/smoke_test.sh; run.bat (Windows-startscript, klar til fremtid - self-update er Linux-only)
 - 🌱 **Growth Pack** — autopilot-nøgleord-side (05:15 dagligt), **backlink-prospector** (SerpAPI top 10 → sitetype + kontakt-e-mail + AI-outreach-draft), visibility-index
@@ -4062,7 +4616,7 @@ Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Y
 
 ## v7.10 – fra v8-planen (Drive)
 - **Kvalitetsgate**: autopilot-artikler sendes kun til WordPress, hvis de har nok ord (min. `QUALITY_MIN_WORDS`, eller 80 % af SERP-gennemsnittet fra Content Gap), indeholder fokus-keywordet og har mindst 2 H2. Ellers status "Stoppet af kvalitetsgate" + alarm. Manuel push er tilladt, men giver en info-alarm. Faerre end 2 interne links giver kun en advarsel.
-- **API-budget**: hvert kald til SerpAPI og aimlapi taelles pr. maaned; ved `SERPAPI_MONTHLY_LIMIT` / `AI_MONTHLY_LIMIT` stoppes kaldene til den 1. Alarm (og Telegram) ved 80 % og 100 %.
+- **API-budget**: hvert kald til SerpAPI og den valgte AI-provider (aimlapi/OpenRouter) taelles pr. maaned; ved `SERPAPI_MONTHLY_LIMIT` / `AI_MONTHLY_LIMIT` stoppes kaldene til den 1. Alarm (og Telegram) ved 80 % og 100 %.
 - **/health**: tester at databasen kan skrive og hvor fuld disken er (advarsel ≥ 80 %, kritisk ≥ 90 % → HTTP 503), viser maanedens API-forbrug og schema-versionen (`schema_version`, `schema_version_expected`, `schema_ok` — manglende overensstemmelse giver `advarsel` og en alarm).
 
 ## Steamgears Autopilot-bro (WordPress-plugin 7.5+)
@@ -4085,6 +4639,11 @@ curl -H "Authorization: Bearer <TOKEN>" -H "Accept: application/vnd.github.raw" 
 Eller med Docker: `cp .env.example .env && docker compose up -d --build`
 
 ### Udvikling
+Koden er delt i tre: `app/main.py` har ruterne, `app/core.py` har konfiguration,
+database og schema, og `app/services/{audit,content,wp,budget,alarms}.py` har de rene
+funktioner. `app/main.py` gen-eksporterer dem, saa `from app.main import ...` og
+`install.sh`-flowet er uaendret.
+
 `install.sh` er genereret — rediger aldrig fil-kopierne inde i den. Ret i stedet
 `scripts/installer.template.sh` (shell-flowet) eller selve filen i repoet (fx `app/main.py`), og kør:
 

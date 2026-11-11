@@ -5,39 +5,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/static/theme.js?v=8"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <link rel="preconnect" href="https://cdn.tailwindcss.com" crossorigin>
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-    <meta name="theme-color" content="#09090b">
-    <style>
-      html { scroll-behavior: smooth; }
-      body { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
-      ::-webkit-scrollbar { width: 9px; height: 9px; }
-      ::-webkit-scrollbar-track { background: #09090b; }
-      ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 8px; }
-      ::-webkit-scrollbar-thumb:hover { background: #52525b; }
-      nav, header { backdrop-filter: blur(12px); }
-      tbody tr { transition: background-color .12s ease; }
-      tbody tr:hover { background: rgba(39,39,42,.45); }
-      button, a, input { transition: all .15s ease; }
-      input:focus-visible, button:focus-visible { outline: 2px solid #34d399; outline-offset: 1px; }
-      .spinner { width: 16px; height: 16px; border: 2px solid #3f3f46; border-top-color: #34d399; border-radius: 50%; display: inline-block; animation: ccspin .7s linear infinite; vertical-align: -3px; }
-      @keyframes ccspin { to { transform: rotate(360deg); } }
-      .bg-zinc-900:hover { border-color: #3f3f46; }
-      @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
-      @media (max-width: 640px) {
-        nav::-webkit-scrollbar { display: none; }
-        th, td { padding-top: .45rem; padding-bottom: .45rem; }
-      }
-    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="/static/theme.css?v=8">
+    <meta name="theme-color" content="#0f0c0a">
 </head>
 {% if insecure %}<div class="bg-yellow-600 text-black text-xs text-center py-1.5 px-4 font-semibold">&Uacute;t&uacute;n HTTPS &mdash; token sendes ukrypteret. S&aelig;t nginx + TLS op foran CC (se Install-dokumentationen).</div>{% endif %}
 <body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans" x-data="{ tab: 'cockpit', seoResult: null, seoLoading: false, crawl: null, histChart: null, dups: null, healthChart: null, diff: null, redir: null, rewrite: null }">
 <header class="border-b border-zinc-800 bg-zinc-900/60 px-4 py-3">
     <div class="max-w-7xl mx-auto flex items-center justify-between">
         <div>
-            <h1 class="font-bold text-sm">⚡ COMMAND CENTER <span class="text-emerald-400">v7.10 PRO</span></h1>
+            <h1 class="cc-wordmark text-sm">⚡ Command Center <span class="text-emerald-400">v7.10 Pro</span></h1>
             <p class="text-xs text-zinc-500">WordPress, SEO, indhold & overvågning</p>
         </div>
         <div class="flex items-center gap-3">
@@ -69,7 +52,7 @@
 
     {% if not ai_enabled or not wp_enabled or not auth_required %}
     <div class="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-3 text-xs text-amber-300">
-        Setup: AI {{ '✅' if ai_enabled else '❌ (AIMLAPI_KEY)' }} · WordPress {{ '✅' if wp_enabled else '❌ (WP_URL/WP_USER/WP_APP_PASSWORD)' }} · SerpAPI {{ '✅' if serpapi_enabled else '❌ (SERPAPI_KEY)' }} · Telegram {{ '✅' if telegram_enabled else '— (valgfrit)' }} · Login {{ '✅' if auth_required else '❌ (APP_TOKEN — sæt den, hvis dashboardet kører på en VPS!)' }} — se .env.example
+        Setup: AI {{ ('✅ (' + ai_provider + ')') if ai_enabled else '❌ (AIMLAPI_KEY/OPENROUTER_KEY)' }} · WordPress {{ '✅' if wp_enabled else '❌ (WP_URL/WP_USER/WP_APP_PASSWORD)' }} · SerpAPI {{ '✅' if serpapi_enabled else '❌ (SERPAPI_KEY)' }} · Telegram {{ '✅' if telegram_enabled else '— (valgfrit)' }} · Login {{ '✅' if auth_required else '❌ (APP_TOKEN — sæt den, hvis dashboardet kører på en VPS!)' }} — se .env.example
     </div>
     {% endif %}
 
@@ -384,7 +367,27 @@
             {% endif %}
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
-            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Generér artikel {{ '(AI: Gemini via aimlapi)' if ai_enabled else '(skabelon — sæt AIMLAPI_KEY for AI)' }}</h2>
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">AI-model</h2>
+            <p class="text-[10px] text-zinc-500 mb-3">Nuværende: <span class="text-zinc-300">{{ ai_model }}</span> (provider: {{ ai_provider }}). Skift uden at redigere .env — tom = standard.</p>
+            <form action="/settings/ai-model" method="POST" class="flex gap-2 items-center">
+                <input type="text" name="model" value="{{ ai_model }}" list="ai-models" placeholder="model-id..." class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
+                <datalist id="ai-models">
+                    {% if ai_provider == 'openrouter' %}
+                    <option value="google/gemini-2.5-flash"></option>
+                    <option value="google/gemini-2.0-flash-001"></option>
+                    <option value="anthropic/claude-3.5-sonnet"></option>
+                    <option value="openai/gpt-4o-mini"></option>
+                    {% else %}
+                    <option value="anthropic/claude-3-5-sonnet"></option>
+                    <option value="openai/gpt-4o"></option>
+                    <option value="openai/gpt-4o-mini"></option>
+                    {% endif %}
+                </datalist>
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Gem</button>
+            </form>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Generér artikel {{ ('(AI via ' + ai_provider + ')') if ai_enabled else '(skabelon — sæt AIMLAPI_KEY eller OPENROUTER_KEY for AI)' }}</h2>
             <form action="/articles/generate" method="POST" class="flex gap-2">
                 <input type="text" name="keyword" placeholder="Emne / søgeord..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Generér</button>
@@ -433,7 +436,7 @@
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">🔗 Backlink-prospector</h2>
-            <p class="text-xs text-zinc-500 mb-3">Søg keyword → top 10 i Google → type + kontakt-mail + AI-outreach-draft. Kræver SERPAPI_KEY (AIMLAPI_KEY for AI-drafts).</p>
+            <p class="text-xs text-zinc-500 mb-3">Søg keyword → top 10 i Google → type + kontakt-mail + AI-outreach-draft. Kræver SERPAPI_KEY (AIMLAPI_KEY eller OPENROUTER_KEY for AI-drafts).</p>
             <form action="/backlinks/prospect" method="POST" class="flex gap-2 mb-4">
                 <input type="text" name="keyword" placeholder="Keyword at finde links til..." required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Find muligheder</button>
@@ -662,7 +665,7 @@
                     <div class="text-zinc-500 truncate">{{ l.from_url }} → <span class="text-emerald-400">{{ l.to_url }}</span></div>
                 </div>
                 {% else %}
-                <p class="text-xs text-zinc-500">Ingen forslag endnu. Kør site-crawl først, og kræver AIMLAPI_KEY.</p>
+                <p class="text-xs text-zinc-500">Ingen forslag endnu. Kør site-crawl først, og kræver AIMLAPI_KEY eller OPENROUTER_KEY.</p>
                 {% endfor %}
             </div>
         </div>
@@ -844,8 +847,8 @@ function showHistory(domainId, url) {
         if (window.histChartInstance) window.histChartInstance.destroy();
         window.histChartInstance = new Chart(ctx, {
             type: 'line',
-            data: { labels: data.labels, datasets: [{ label: 'ms', data: data.ms, borderColor: '#34d399', tension: 0.3, pointRadius: 2 }] },
-            options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#71717a', font: { size: 9 } } }, y: { ticks: { color: '#71717a' } } } }
+            data: { labels: data.labels, datasets: [{ label: 'ms', data: data.ms, borderColor: '#cfa851', backgroundColor: 'rgba(207,168,81,0.10)', fill: true, tension: 0.3, pointRadius: 2 }] },
+            options: { plugins: { legend: { display: false } }, scales: { x: { grid: { color: 'rgba(210,196,177,0.07)' }, ticks: { color: '#8a7a69', font: { size: 9 } } }, y: { grid: { color: 'rgba(210,196,177,0.07)' }, ticks: { color: '#8a7a69' } } } }
         });
     });
 }
@@ -856,8 +859,8 @@ function loadHealth() {
         if (window.healthChartInstance) window.healthChartInstance.destroy();
         window.healthChartInstance = new Chart(document.getElementById('healthchart'), {
             type: 'line',
-            data: { labels: data.labels, datasets: [{ label: 'snitscore', data: data.scores, borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', fill: true, tension: 0.3 }] },
-            options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#71717a', font: { size: 9 } } }, y: { ticks: { color: '#71717a' }, min: 0, max: 100 } } }
+            data: { labels: data.labels, datasets: [{ label: 'snitscore', data: data.scores, borderColor: '#dc9a5c', backgroundColor: 'rgba(220,154,92,0.12)', fill: true, tension: 0.3 }] },
+            options: { plugins: { legend: { display: false } }, scales: { x: { grid: { color: 'rgba(210,196,177,0.07)' }, ticks: { color: '#8a7a69', font: { size: 9 } } }, y: { grid: { color: 'rgba(210,196,177,0.07)' }, ticks: { color: '#8a7a69' }, min: 0, max: 100 } } }
         });
     });
 }
@@ -890,8 +893,8 @@ function loadVis() {
         if (window.visChartInstance) window.visChartInstance.destroy();
         window.visChartInstance = new Chart(document.getElementById('vischart'), {
             type: 'line',
-            data: { labels: data.labels, datasets: [{ label: 'visibility %', data: data.scores, borderColor: '#34d399', backgroundColor: 'rgba(52,211,153,0.1)', fill: true, tension: 0.3 }] },
-            options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#71717a', font: { size: 9 } } }, y: { ticks: { color: '#71717a' }, min: 0, max: 100 } } }
+            data: { labels: data.labels, datasets: [{ label: 'visibility %', data: data.scores, borderColor: '#cfa851', backgroundColor: 'rgba(207,168,81,0.12)', fill: true, tension: 0.3 }] },
+            options: { plugins: { legend: { display: false } }, scales: { x: { grid: { color: 'rgba(210,196,177,0.07)' }, ticks: { color: '#8a7a69', font: { size: 9 } } }, y: { grid: { color: 'rgba(210,196,177,0.07)' }, ticks: { color: '#8a7a69' }, min: 0, max: 100 } } }
         });
     });
 }

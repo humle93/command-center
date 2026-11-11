@@ -6,7 +6,7 @@ Command Center er bygget som en selv-installerende arkitektur, der automatiserer
 
 1. **Mappestruktur**: Systemet opretter automatisk de nødvendige undermapper (`app/templates`, `app/static`, `app/data`) for at holde skilt ad mellem logik, visning og database.  
 2. **Afhængigheder (`requirements.txt`)**: Nødvendige Python-pakker (FastAPI, Uvicorn, Requests, BeautifulSoup4 og Jinja2) defineres og installeres i et isoleret `venv` (Virtual Environment).  
-3. **Database (SQLite)**: Ved opstart initialiserer `app/main.py` automatisk en lokal SQLite-database (`data/center.db`) med tabeller til domæner, konkurrenter, artikler, linktjek, social kø og noter.  
+3. **Database (SQLite)**: Ved opstart initialiserer `app/core.py` automatisk en lokal SQLite-database (`data/center.db`) med tabeller til domæner, konkurrenter, artikler, linktjek, social kø og noter. Ruterne ligger i `app/main.py`, mens rene funktioner (audit, indhold, WordPress-bro, budget, alarmer) ligger i `app/services/` og gen-eksporteres fra `app/main.py`.  
 4. **Webserver**: FastAPI-applikationen startes via Uvicorn med automatisk genindlæsning (`--reload`).
 
 ---

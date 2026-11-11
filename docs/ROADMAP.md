@@ -70,12 +70,19 @@ ville opstå igen.
   den som eget trin. `.env.example` har fået `PSI_API_KEY`.
 - **Færdig når:** testen er grøn, og `.env.example` har `PSI_API_KEY`. ✅
 
-### M4 · `main.py` deles op — uden at røre ruterne
+### M4 · `main.py` deles op — uden at røre ruterne ✅
 2.853 linjer i én fil er den største enkeltrisiko i projektet. Ruterne bliver, hvor de
 er; rene funktioner flyttes ud, så de kan testes isoleret.
-- **Leverance:** `app/services/{audit,content,wp,budget,alarms}.py` med gen-eksport fra
-  `main.py`, så `install.sh`-flowet og alle eksisterende imports virker uændret.
-- **Færdig når:** `app/main.py` er under 2.000 linjer, og `tests/ci_check.sh` + `test_v8_features.py` er grønne.
+- **Leverance:** `app/core.py` (konfiguration, `get_db`, schema, fælles hjælpere) og
+  `app/services/{audit,content,wp,budget,alarms}.py`, alle gen-eksporteret fra `main.py`,
+  så `install.sh`-flowet og alle eksisterende imports virker uændret. `install.sh`
+  skriver nu også `app/services/`.
+- **Færdig når:** `app/main.py` er under 2.000 linjer, og `tests/ci_check.sh` +
+  `test_v8_features.py` er grønne. ✅ (`main.py` 1.705 linjer; `ci_check.sh` sweeper
+  alle GET-ruter, og en frisk `install.sh`-installation importerer `app.main`)
+- **Bemærkning:** budget-*tællingen* (`HTTP`-adapteren) blev liggende i `app/core.py`,
+  fordi den sidder på requests-sessionen; `app/services/budget.py` har rapporteringen,
+  og adapteren importerer den inde i `send()` for at undgå en cirkulær import.
 
 ---
 

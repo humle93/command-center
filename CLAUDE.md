@@ -27,6 +27,12 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
 
 ## Ændringer i denne arbejdsperiode
 
+### Samlet installationsmanual (11. november) — kun dokumentation
+- **Baggrund:** ønsket var "mangler installationsmanual eller script" for de tre dele, der hænger sammen efter v7.25-7.27.
+- **Nyt:** [`docs/Installation_og_udrulning.md`](docs/Installation_og_udrulning.md) — rækkefølge (plugin 7.76.0 → CC 7.27.0 → wp-auto-deployer), forudsætninger, manuel plugin-upload (repoet er privat, så *Update now* virker ikke), flytning til OpenRouter med knappen *Switch to OpenRouter now*, `update.sh` + de nye `.env`-linjer, forbindelse af login-knappen (samme e-mail kræves), tjekliste, fejlfindingstabel og rollback. README og roadmappens dokumentoversigt linker til den.
+- **wp-auto-deployer** fik samtidig `scripts/install.sh` (venv, `.env` med operatør-nøgle, database, `--service`, `--nginx`, `--check`) og en Authorize-knap i `/docs` — se det repo.
+- Ingen kodeændring her; `install.sh` er regenereret, fordi README er indlejret.
+
 ### Log ind fra WordPress med ét klik (v7.27.0) — implementeret
 - **Baggrund:** ønsket var "en log ind i Command Center-knap i Steamgears-pluginnet". Fundet: det gamle engangslink (v7.17.5) sendte til `POST /sgap/v1/login-link`, en rute pluginnet **aldrig** har haft (`git log -S login-link -- plugins` er tom i steamgears-site), så knappen kunne aldrig virke.
 - **Nyt flow:** `cc_sso_secret()` (settings `cc_sso_secret`, `token_urlsafe(48)`), `cc_sso_push()` sender `{url: CC_PUBLIC_URL, secret, version}` til `POST /sgap/v1/cc-link` — i `sgap_sync()` kun når fingerprint (sha256 af url+nøgle) har ændret sig eller snapshottet siger `command_center.sso = false`, og med `force=True` fra knappen i Social (`/autopilot/login-link`, samme rute som før). `GET /cc-sso?t=` → `cc_sso_verify()`: HMAC først, `v=1`, levetid ≤ 120 s, ±30 s ur-forskel, `jti` i tabellen `sso_used`, kendt e-mail. Ingen ny konto oprettes.

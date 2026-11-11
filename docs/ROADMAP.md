@@ -18,6 +18,7 @@ findes.
 | [`README.md`](../README.md) | Funktioner, installering, opdatering og sikkerhed |
 | [`Command_Center_Bruger_og_Systemmanual.md`](Command_Center_Bruger_og_Systemmanual.md) | Bruger- og systemmanual: faner, moduler, nginx, WP-bro, `.env` |
 | [`Command_Center_Dokumentation.md`](Command_Center_Dokumentation.md) | Arkitektur: ruter, tabeller, jobs og sikkerhedsmodel |
+| [`Installation_og_udrulning.md`](Installation_og_udrulning.md) | Samlet installationsmanual: Steamgears Autopilot 7.76.0 → Command Center 7.27.0 → wp-auto-deployer, med tjekliste, fejlfinding og rollback |
 | [`Command_Center_Install_Script.md`](Command_Center_Install_Script.md) | Installation og `install.sh` |
 | [`Command_Center_MCP.md`](Command_Center_MCP.md) | Research og plan for MCP-adgang: protokol, nøgler, OAuth, værktøjer |
 | [`Command_Center_Migrering.md`](Command_Center_Migrering.md) | Trin for trin: flyt en server fra den gamle linje over på dette repo, så versionsguarden beskytter den |

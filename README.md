@@ -234,6 +234,10 @@ den linje hvis kontoen ikke kan tilgå modellen.
 
 ## Dokumentation
 
+**Installation og udrulning af alle tre dele** (Steamgears Autopilot 7.76.0, Command Center 7.27.0 og
+wp-auto-deployer), i rækkefølge, med tjekliste, fejlfinding og rollback:
+[`docs/Installation_og_udrulning.md`](docs/Installation_og_udrulning.md).
+
 Kodeændringer kræver dokumentation i samme commit: `README.md` plus den relevante fil i `docs/`
 (manual ved funktioner, arkitektur ved struktur/jobs/ruter, roadmap ved prioriteringer). `install.sh`
 regenereres bagefter, fordi den indeholder kopier af filerne. CI fejler, hvis der ændres kode uden

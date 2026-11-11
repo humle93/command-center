@@ -20,8 +20,12 @@ jobs:
           python-version: '3.12'
       # Reglen: kildekode kraever dokumentation i samme commit. install.sh er undtaget,
       # fordi den genereres fra kilderne og i forvejen tjekkes af paritetstrinnet nedenfor.
+      # Paa pull_request er HEAD en merge-commit ("Merge X into Y"), saa [skip docs]/[skip screenshots]
+      # laeses fra PR'ens egen head-commit (HEAD_SHA); paa push er det github.sha.
       - name: Documentation follows code changes
         shell: bash
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -uo pipefail
           base="${{ github.event.before }}"
@@ -41,7 +45,7 @@ jobs:
           code="${code:-0}"; docs="${docs:-0}"
           echo "kode-filer: $code · dokumentations-filer: $docs"
           if [ "$code" -gt 0 ] && [ "$docs" -eq 0 ]; then
-            if git log -1 --pretty=%B | grep -q '\[skip docs\]'; then
+            if git log -1 --pretty=%B "$HEAD_SHA" | grep -q '\[skip docs\]'; then
               echo "Dokumentation sprunget over ([skip docs])."
               exit 0
             fi
@@ -56,11 +60,13 @@ jobs:
       # bevidst ikke påvirker udseendet - samme mønster som [skip docs] ovenfor.
       - name: Screenshots are not older than the dashboard
         shell: bash
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -uo pipefail
           template="app/templates/dashboard.html"
-          shot_time="$(git log -1 --format=%ct -- docs/img/ || true)"
-          template_time="$(git log -1 --format=%ct -- "$template" || true)"
+          shot_time="$(git log -1 --format=%ct "$HEAD_SHA" -- docs/img/ || true)"
+          template_time="$(git log -1 --format=%ct "$HEAD_SHA" -- "$template" || true)"
           if [ -z "$shot_time" ] || [ -z "$template_time" ]; then
             echo "Ingen historik for docs/img/ eller $template - springer tjekket over"
             exit 0
@@ -69,7 +75,7 @@ jobs:
           template_date="$(date -u -d "@$template_time" '+%Y-%m-%d')"
           echo "$template: $template_date - docs/img/: $shot_date"
           if [ "$template_time" -gt "$shot_time" ]; then
-            if git log -1 --pretty=%B | grep -q '\[skip screenshots\]'; then
+            if git log -1 --pretty=%B "$HEAD_SHA" | grep -q '\[skip screenshots\]'; then
               echo "Screenshots sprunget over ([skip screenshots])."
               exit 0
             fi

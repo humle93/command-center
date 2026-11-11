@@ -551,6 +551,9 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
   kun en advarsel). Trinnet "Screenshots are not older than the dashboard" sammenligner
   commit-tidspunkter (ikke fil-mtimes, som checkout nulstiller), henviser til `scripts/screenshots.py`
   og springes over med `[skip screenshots]` i commit-beskeden - samme moenster som `[skip docs]`.
+- **PR-kørsler (11. november):** på `pull_request` er HEAD en merge-commit, så `[skip docs]`/`[skip screenshots]`
+  blev aldrig set dér (push-kørslen var grøn, PR-kørslen rød). Begge trin læser nu beskeden og tidspunkterne fra
+  `HEAD_SHA` = `github.event.pull_request.head.sha || github.sha`. Markøren skal stå i PR'ens **seneste** commit.
 
 ### Commits
 `d48854e` (v7.11: brugere, opdatering, nginx, rettelser) · `d47a920` (Juno fjernet) ·

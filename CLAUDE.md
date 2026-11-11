@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 11. november 2026 · **Version:** 7.26.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 11. november 2026 · **Version:** 7.27.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,15 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Log ind fra WordPress med ét klik (v7.27.0) — implementeret
+- **Baggrund:** ønsket var "en log ind i Command Center-knap i Steamgears-pluginnet". Fundet: det gamle engangslink (v7.17.5) sendte til `POST /sgap/v1/login-link`, en rute pluginnet **aldrig** har haft (`git log -S login-link -- plugins` er tom i steamgears-site), så knappen kunne aldrig virke.
+- **Nyt flow:** `cc_sso_secret()` (settings `cc_sso_secret`, `token_urlsafe(48)`), `cc_sso_push()` sender `{url: CC_PUBLIC_URL, secret, version}` til `POST /sgap/v1/cc-link` — i `sgap_sync()` kun når fingerprint (sha256 af url+nøgle) har ændret sig eller snapshottet siger `command_center.sso = false`, og med `force=True` fra knappen i Social (`/autopilot/login-link`, samme rute som før). `GET /cc-sso?t=` → `cc_sso_verify()`: HMAC først, `v=1`, levetid ≤ 120 s, ±30 s ur-forskel, `jti` i tabellen `sso_used`, kendt e-mail. Ingen ny konto oprettes.
+- **Låsen:** afviste billetter tæller i `_LOGIN_FAILS` (5 = 10 min.), og `/login?sso=<årsag>` forklarer (tekster i `CC_SSO_REASONS`). Login fra WordPress logges som info-alarm.
+- **Fjernet:** `cc_login_issue`, `cc_login_consume`, `CC_LOGIN_*`, `GET /cc-login` og `/cc-login` i middlewarens undtagelser; `fake_wp.py` har `/cc-link` i stedet for `/login-link`.
+- **Pluginnet:** Steamgears Autopilot 7.72.0 (`45a11e0` på steamgears-site) har ruten, billetten og knappen, og P10 flytter samtidig pluginnet til OpenRouter som standard.
+- **Test:** 25 `sso:`-checks i `tests/test_v8_features.py`, 7 i `tests/ci_check.sh`, og et interop-tjek kørt i sessionen: en billet lavet af pluginnets egen `SGAP_CC::ticket()` (PHP) blev godkendt af `cc_sso_verify()`, og anden gang afvist som `brugt`. Interop-tjekket ligger ikke i CI (repoet har ikke pluginnet).
+- **Ikke verificeret:** et klik på det levende site — kræver at 7.72.0 er installeret og `CC_PUBLIC_URL` er sat på serveren.
 
 ### Chat med MCP-connectors (v7.26.0) — implementeret
 - **Baggrund:** ønsket var "en separat chat-sektion med connector-MCP til GitHub, WordPress, Gmail, Google Drive og andre nyttige WordPress-sider".

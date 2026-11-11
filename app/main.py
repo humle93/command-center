@@ -116,10 +116,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.26.0"
+APP_VERSION = "7.27.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.27.0", "Log ind fra WordPress med et klik: knappen i Steamgears (7.72+) sender en signeret billet, der holder 1 minut og kun virker en gang - kun for en kendt e-mail"),
     ("7.26.0", "Ny fane Chat: tal med AI og giv den vaerktoejer fra MCP-connectors (GitHub, WordPress, Gmail, Google Drive m.fl.) - alt der aendrer noget kraever din godkendelse"),
     ("7.25.0", "AI via OpenRouter i stedet for aimlapi: OPENROUTER_API_KEY + AI_MODEL (OpenRouter-slug), et faelles AI-kald og en advarsel hvis kun den gamle AIMLAPI_KEY er sat"),
     ("7.24.0", "Vaekst-fanen: lokal indholdsoptimerer, konkurrent-sammenligning, indholdsplan og linkliste - uden API-noegle"),
@@ -146,7 +147,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Chat med AI og MCP-connectors - skrivende vaerktoejer kraever godkendelse"
+NEWEST_LINE = "Log ind fra WordPress med et klik - kraever CC_PUBLIC_URL og Steamgears Autopilot 7.72+"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -579,6 +580,8 @@ def migrate_db():
             created_at TEXT, decided_at TEXT, decided_by TEXT
         )""")
         db.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_conv ON chat_messages(conversation_id)")
+        # Brugte login-billetter fra WordPress (v7.27.0): jti kan kun bruges én gang.
+        db.execute("CREATE TABLE IF NOT EXISTS sso_used (jti TEXT PRIMARY KEY, exp INTEGER NOT NULL)")
 
 
 _safe(migrate_db)
@@ -1336,7 +1339,7 @@ async def auth_middleware(request: Request, call_next):
     # scheme er allerede X-Forwarded-Proto-resolveret af uvicorn/starlette.
     request.state.insecure = request.url.scheme == "http" and host not in ("127.0.0.1", "::1", "localhost")
     request.state.user = current_user(request)
-    if any(path.startswith(p) for p in ("/login", "/cc-login", "/setup", "/health", "/static", "/mcp")):
+    if any(path.startswith(p) for p in ("/login", "/cc-sso", "/setup", "/health", "/static", "/mcp")):
         return await call_next(request)
     # CSRF: en muterende forespoergsel fra et andet site afvises. Browsere sender Sec-Fetch-Site
     # (og Origin) paa cross-site POST; kald uden de headers (scripts, API-noegler) roeres ikke.
@@ -1395,8 +1398,7 @@ async def setup_user(request: Request):
 async def login_page(request: Request):
     if user_count() == 0:
         return RedirectResponse("/setup", status_code=303)
-    cc_msg = ("Login-linket fra WordPress er allerede brugt eller udloebet (de holder 10 min.). "
-              "Log ind med e-mail og adgangskode, og lav et nyt link i fanen Social.") if request.query_params.get("cc") else ""
+    cc_msg = CC_SSO_REASONS.get((request.query_params.get("sso") or "").strip(), "")
     return templates.TemplateResponse("login.html", {"request": request, "mode": "login", "error": cc_msg, "email": "",
                                                      "report": last_run_report(), "client_ip": client_ip(request),
                                                      "app_version": APP_VERSION})
@@ -3271,47 +3273,140 @@ def sgap_error_text(exc: Exception) -> str:
     return f"Autopilot-pluginnet svarer ikke: {exc}"
 
 
-# ---------- Engangslink til login fra WordPress (Steamgears Autopilot) ----------
-# Broen er envejs (CC -> site, fordi CC kun lytter paa 127.0.0.1). Knappen i WordPress kan derfor
-# ikke selv spoerge CC om noget: CC laver et faerdigt engangslink og laegger det i pluginnet, som
-# viser knappen. Koden gemmes kun som sha256, kan bruges én gang og udloeber efter CC_LOGIN_TTL.
-CC_LOGIN_TTL = 600
-CC_LOGIN_KEY = "cc_login_code"
+# ---------- Log ind fra WordPress med ét klik (v7.27.0) ----------
+# Broen er stadig envejs (CC -> site): CC lægger sin offentlige adresse og en fælles nøgle i pluginnet
+# (POST /sgap/v1/cc-link, Steamgears Autopilot 7.72+) ved hver sync. Knappen "Log ind i Command Center"
+# i WordPress signerer en billet med nøglen (HMAC-SHA256, 60 s, tilfældig jti), og browseren åbner
+# GET /cc-sso?t=<billet>. CC tjekker signatur, udløb og engangsbrug og logger KUN ind som en bruger,
+# der allerede findes med samme e-mail - en WordPress-admin kan ikke oprette en CC-konto med et klik.
+# Afløser det gamle engangslink (v7.17.5), som sendte til POST /sgap/v1/login-link: den rute har
+# aldrig fandtes i pluginnet (målt 11/11 2026), så det flow kunne ikke virke.
+CC_SSO_SECRET_KEY = "cc_sso_secret"
+CC_SSO_LINK_KEY = "cc_sso_link"           # {ok, at, message, fingerprint} for sidste forsøg
+CC_SSO_MAX_AGE = 120                       # billetten må højst leve 2 min. (pluginnet giver 60 s)
+CC_SSO_SKEW = 30                           # tilladt ur-forskel mellem WordPress og CC
 
 
-def cc_login_issue(user_id: int) -> str:
-    """Laver en engangskode til brugeren og gemmer hashen (koden findes kun i linket)."""
-    code = secrets.token_urlsafe(32)
+def cc_sso_secret() -> str:
+    """Den fælles nøgle til billetterne. Laves første gang og bliver i settings (aldrig i log eller UI)."""
     with get_db() as db:
-        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-                   (CC_LOGIN_KEY, jsonlib.dumps({"hash": hashlib.sha256(code.encode()).hexdigest(),
-                                                 "user_id": int(user_id),
-                                                 "exp": int(time.time()) + CC_LOGIN_TTL})))
-    return code
+        row = db.execute("SELECT value FROM settings WHERE key=?", (CC_SSO_SECRET_KEY,)).fetchone()
+        if row and row["value"] and len(row["value"]) >= 32:
+            return row["value"]
+        secret = secrets.token_urlsafe(48)
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (CC_SSO_SECRET_KEY, secret))
+        return secret
 
 
-def cc_login_consume(code: str):
-    """Returnerer user_id for en gyldig kode - og sletter den i samme kald (engangsbrug).
+def cc_public_base() -> str:
+    """CC_PUBLIC_URL som https://vært[/sti] - eller '' når den mangler eller er skrevet forkert."""
+    parsed = urlparse(CC_PUBLIC_URL or "")
+    if parsed.scheme not in ("https", "http") or not parsed.hostname:
+        return ""
+    if parsed.scheme == "http" and parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
+        return ""
+    return CC_PUBLIC_URL.rstrip("/")
 
-    Koden slettes foerst naar den er godkendt, saa et forkert gaet ikke kan braende ejerens link."""
-    code = (code or "").strip()
-    if not code:
-        return None
-    digest = hashlib.sha256(code.encode()).hexdigest()
+
+def cc_sso_state() -> dict:
     with get_db() as db:
-        row = db.execute("SELECT value FROM settings WHERE key=?", (CC_LOGIN_KEY,)).fetchone()
-        if not row or not row["value"]:
-            return None
+        row = db.execute("SELECT value FROM settings WHERE key=?", (CC_SSO_LINK_KEY,)).fetchone()
+    try:
+        return jsonlib.loads(row["value"]) if row and row["value"] else {}
+    except ValueError:
+        return {}
+
+
+def cc_sso_push(force: bool = False, plugin_ready=None) -> tuple:
+    """Lægger adresse + nøgle i pluginnet. Sendes kun igen, når noget har ændret sig, pluginnet
+    melder at knappen ikke er forbundet (plugin_ready=False), eller force=True. Returnerer (ok, tekst)."""
+    base = cc_public_base()
+    if not base:
+        return False, "CC_PUBLIC_URL mangler eller er ikke en https-adresse - knappen i WordPress kan ikke finde Command Center"
+    if not sgap_ready():
+        return False, "WP_URL/WP_USER/WP_APP_PASSWORD mangler, eller modulet Autopilot-bro er slukket"
+    secret = cc_sso_secret()
+    fingerprint = hashlib.sha256(f"{base}|{secret}".encode()).hexdigest()[:16]
+    state = cc_sso_state()
+    if not force and plugin_ready is not False and state.get("ok") and state.get("fingerprint") == fingerprint:
+        return True, state.get("message") or "Login-knappen i WordPress er forbundet"
+    try:
+        sgap_api("POST", "/cc-link", json={"url": base, "secret": secret, "version": APP_VERSION})
+        ok, message = True, f"Login-knappen i WordPress er forbundet til {base}"
+    except requests.HTTPError as e:
+        code = getattr(e.response, "status_code", None)
+        ok = False
+        message = ("Pluginnet kender ikke /cc-link (404) - opdatér Steamgears Autopilot til 7.72.0 eller nyere"
+                   if code == 404 else sgap_error_text(e))
+    except Exception as e:
+        ok, message = False, sgap_error_text(e)
+    with get_db() as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (CC_SSO_LINK_KEY, jsonlib.dumps(
+            {"ok": ok, "at": now_iso(), "message": message, "fingerprint": fingerprint if ok else ""})))
+    return ok, message
+
+
+def _b64url_decode(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def cc_sso_verify(ticket: str, now: int | None = None) -> tuple:
+    """(user_row, "") ved en gyldig billet, ellers (None, årsag). Årsagerne er korte nøgleord til login-siden.
+
+    Rækkefølge: signaturen først (så intet i en forfalsket billet læses), så udløb, så engangsbrug, så bruger.
+    """
+    now = int(time.time()) if now is None else int(now)
+    parts = (ticket or "").strip().split(".")
+    if len(parts) != 2 or not parts[0] or not parts[1] or len(ticket) > 2048:
+        return None, "ugyldig"
+    with get_db() as db:
+        row = db.execute("SELECT value FROM settings WHERE key=?", (CC_SSO_SECRET_KEY,)).fetchone()
+    secret = row["value"] if row and row["value"] else ""
+    if not secret:
+        return None, "ikke-forbundet"
+    try:
+        given = _b64url_decode(parts[1])
+        data = jsonlib.loads(_b64url_decode(parts[0]))
+    except Exception:
+        return None, "ugyldig"
+    expected = hmac.new(secret.encode(), parts[0].encode(), hashlib.sha256).digest()
+    if not hmac.compare_digest(given, expected):
+        return None, "ugyldig"
+    if not isinstance(data, dict) or data.get("v") != 1:
+        return None, "ugyldig"
+    try:
+        iat, exp = int(data.get("iat")), int(data.get("exp"))
+    except (TypeError, ValueError):
+        return None, "ugyldig"
+    jti = str(data.get("jti") or "")
+    if not re.fullmatch(r"[0-9a-f]{32}", jti) or exp - iat > CC_SSO_MAX_AGE or exp < iat:
+        return None, "ugyldig"
+    if iat > now + CC_SSO_SKEW or exp < now - CC_SSO_SKEW:
+        return None, "udloebet"
+    with get_db() as db:
+        db.execute("DELETE FROM sso_used WHERE exp < ?", (now - 3600,))
         try:
-            data = jsonlib.loads(row["value"])
-        except Exception:
-            return None
-        if not isinstance(data, dict) or int(data.get("exp") or 0) < int(time.time()):
-            return None
-        if not hmac.compare_digest(str(data.get("hash") or ""), digest):
-            return None
-        db.execute("DELETE FROM settings WHERE key=?", (CC_LOGIN_KEY,))
-    return int(data.get("user_id") or 0) or None
+            db.execute("INSERT INTO sso_used (jti, exp) VALUES (?, ?)", (jti, exp))
+        except sqlite3.IntegrityError:
+            return None, "brugt"
+    try:
+        email = normalize_email(str(data.get("email") or ""))
+    except ValueError:
+        return None, "ukendt-bruger"
+    with get_db() as db:
+        user = db.execute("SELECT id, email FROM users WHERE email=?", (email,)).fetchone()
+    return (user, "") if user else (None, "ukendt-bruger")
+
+
+CC_SSO_REASONS = {
+    "ugyldig": "Login-billetten fra WordPress kunne ikke godkendes. Tryk på knappen i WordPress igen.",
+    "udloebet": "Login-billetten fra WordPress er udløbet (den holder 1 minut). Tryk på knappen i WordPress igen.",
+    "brugt": "Login-billetten fra WordPress er allerede brugt. Tryk på knappen i WordPress igen.",
+    "ukendt-bruger": "Din WordPress-e-mail findes ikke som bruger i Command Center. Log ind med e-mail og adgangskode, "
+                     "eller bed en administrator invitere dig med samme e-mail.",
+    "ikke-forbundet": "Command Center har ikke forbundet login-knappen endnu. Log ind med e-mail og adgangskode.",
+    "laast": "For mange fejlede logins fra din adresse - prøv igen om lidt.",
+}
 
 
 # Idempotens for "-> Autopilot": statusfeltet er laasen. Samme opslag maa kun give EN kladde,
@@ -3424,6 +3519,8 @@ def sgap_sync() -> dict:
             snap.update(sgap_from_snapshot(doc))
             # Samme svar fortæller, hvornaar WordPress sidst hørte fra CC (SGAP_CC::status()).
             cc_seen = ((doc or {}).get("status") or {}).get("command_center") or {}
+            # 7.72+: om knappen "Log ind i Command Center" er forbundet (aldrig nøglen selv).
+            snap["cc_sso"] = bool(cc_seen.get("sso")) if isinstance(cc_seen, dict) and "sso" in cc_seen else None
             if isinstance(cc_seen, dict) and cc_seen.get("ts"):
                 snap["command_center"] = {k: cc_seen.get(k) for k in
                                           ("state", "ts", "age", "version", "last_route", "user", "last_seen")}
@@ -3439,6 +3536,13 @@ def sgap_sync() -> dict:
     except Exception as e:
         snap["error"] = sgap_error_text(e)
     sgap_store(snap, previous)
+    if snap["ok"] and cc_public_base():
+        # Hold login-knappen i WordPress forbundet: sendes kun når noget har ændret sig, eller når
+        # pluginnet melder at den ikke er det. Et ældre plugin (404) vælter ikke synken.
+        try:
+            cc_sso_push(plugin_ready=snap.get("cc_sso"))
+        except Exception:
+            pass
     return snap
 
 
@@ -3541,42 +3645,41 @@ async def autopilot_sync_now():
 
 @app.post("/autopilot/login-link")
 async def autopilot_login_link(request: Request):
-    """Laegger et engangslink til Command Center i WordPress-pluginnet.
-
-    Knappen i WordPress kan ikke selv kalde CC (CC lytter kun paa 127.0.0.1), saa CC laegger linket
-    derud, hvor knappen er - og svarer i fanen Social, hvor der blev trykket."""
-    me = getattr(request.state, "user", None)
-    if not me:
+    """Forbinder knappen "Log ind i Command Center" i WordPress nu (ellers sker det ved næste sync)."""
+    if not getattr(request.state, "user", None):
         return RedirectResponse("/login", status_code=303)
-    if not sgap_ready():
-        return RedirectResponse("/?tab=social&cc_link=fejl&cc_msg=" + urllib.parse.quote(
-            "WP_URL/WP_USER/WP_APP_PASSWORD mangler, eller modulet Autopilot-bro er slukket"), status_code=303)
-    base = (CC_PUBLIC_URL or str(request.base_url)).rstrip("/")
-    code = cc_login_issue(me["id"])
-    try:
-        sgap_api("POST", "/login-link", json={"url": f"{base}/cc-login?code={urllib.parse.quote(code)}",
-                                             "expires_in": CC_LOGIN_TTL, "user": me["email"]})
-    except Exception as e:
-        return RedirectResponse("/?tab=social&cc_link=fejl&cc_msg="
-                                + urllib.parse.quote(sgap_error_text(e)), status_code=303)
-    return RedirectResponse("/?tab=social&cc_link=ok&cc_msg=" + urllib.parse.quote(
-        "Engangslinket ligger nu i WordPress i 10 min. - aabn Steamgears der, og tryk Log ind paa Command Center"),
-        status_code=303)
+    loop = asyncio.get_running_loop()
+    ok, message = await loop.run_in_executor(executor, lambda: cc_sso_push(force=True))
+    return RedirectResponse("/?tab=social&cc_link=" + ("ok" if ok else "fejl") + "&cc_msg="
+                            + urllib.parse.quote(message[:180]), status_code=303)
 
 
-@app.get("/cc-login")
-async def cc_login(request: Request, code: str = ""):
-    """Logger ind med engangskoden fra WordPress-knappen (bruges én gang, holder 10 min.)."""
-    user_id = cc_login_consume(code)
-    if not user_id:
-        return RedirectResponse("/login?cc=udloebet", status_code=303)
+def _sso_locked(ip: str) -> bool:
+    return _LOGIN_FAILS.get(ip, (0, 0.0))[1] > time.time()
+
+
+def _sso_failed(ip: str) -> None:
+    """En afvist billet tæller som et fejlet login (samme lås: 5 fejl = 10 min.)."""
+    fails, locked_until = _LOGIN_FAILS.get(ip, (0, 0.0))
+    fails += 1
+    _LOGIN_FAILS[ip] = (0, time.time() + _LOGIN_LOCK_SECONDS) if fails >= _LOGIN_MAX_FAILS else (fails, locked_until)
+
+
+@app.get("/cc-sso")
+async def cc_sso(request: Request, t: str = ""):
+    """Logger ind med billetten fra knappen i WordPress (signeret, 60 s, én gang, kendt e-mail)."""
     ip = client_ip(request)
-    with get_db() as db:
-        user = db.execute("SELECT id, email FROM users WHERE id=?", (user_id,)).fetchone()
-        if user:
-            db.execute("UPDATE users SET last_login_ip=?, last_login_at=? WHERE id=?", (ip, now_iso(), user_id))
+    if _sso_locked(ip):
+        return RedirectResponse("/login?sso=laast", status_code=303)
+    user, reason = cc_sso_verify(t)
     if not user:
-        return RedirectResponse("/login?cc=udloebet", status_code=303)
+        _sso_failed(ip)
+        record_login(ip, "wordpress-sso", False)
+        return RedirectResponse("/login?sso=" + reason, status_code=303)
+    _LOGIN_FAILS.pop(ip, None)
+    with get_db() as db:
+        db.execute("UPDATE users SET last_login_ip=?, last_login_at=? WHERE id=?", (ip, now_iso(), user["id"]))
+        add_alarm(db, "brugere", f"Login fra WordPress (ét klik): {user['email']}", "info")
     record_login(ip, user["email"], True)
     return session_redirect(request, start_session(user["id"], ip, request.cookies.get(SESSION_COOKIE) or ""))
 
@@ -5384,6 +5487,7 @@ async def dashboard(request: Request):
         "sgap_ready": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "cc_link": cc_link,
         "cc_msg": cc_msg,
+        "cc_sso": {"public": bool(cc_public_base()), **cc_sso_state()},
         "modules": modules_state(),
         "strategies": STRATEGIES,
         "active_strategy": active_key,

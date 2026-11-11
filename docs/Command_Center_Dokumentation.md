@@ -67,6 +67,7 @@ Tabeller i grupper:
 - **Indhold**: `articles`, `backlink_prospects`, `outreach`
 - **Drift/integrationer**: `socialqueue`, `competitors`, `linkcheck`, `ai_visibility`
 - **Adgang**: `api_clients` (MCP-nøgler, hash + scopes), `api_audit` (kald pr. nøgle)
+- **Login fra WordPress (v7.27)**: `sso_used` (`jti` primærnøgle + `exp`; rækker ældre end en time ryddes ved hvert login) og `settings.cc_sso_secret` / `settings.cc_sso_link`
 - **Chat (v7.26)**: `mcp_connectors` (eksterne MCP-servere: url, login, `secret` + `secret_hint`, værktøjsfilter, `tools_json`), `chat_conversations` (pr. bruger), `chat_messages` (user/assistant/tool i OpenAI-format) og `chat_pending` (skrivende kald der venter på godkendelse)
 - **System**: `users`, `sessions`, `settings` (nøgle/værdi: moduler, strategi, budget, snapshots, `deployed_commit`, `github_update`), `notes` og `_selftest` (resultat af opstarts-selvtesten)
 
@@ -129,6 +130,15 @@ mindst 2 H2 — ellers blokeres autopilot-push til WordPress (manuel push giver 
 
 Artikel-HTML, der vises i dashboardet, kører gennem `sanitize_article_html()` (allow-list af tags; ingen scripts,
 handlers, `javascript:`-links eller billeder), fordi indholdet kommer fra en ekstern AI-model.
+
+### 7d. Log ind fra WordPress (v7.27.0)
+
+Billetten er `base64url(json) + "." + base64url(HMAC-SHA256(nøgle, base64url(json)))`, med JSON-felterne `v` (1),
+`email`, `login`, `site`, `iat`, `exp` og `jti` (32 hex). `cc_sso_verify()` tjekker i denne rækkefølge: format og
+længde (≤ 2048), signaturen (`hmac.compare_digest`, før noget i JSON læses), `v`, `exp - iat ≤ 120` og `jti`-formatet,
+udløb med ±30 s ur-forskel, engangsbrug (`INSERT` i `sso_used`; `IntegrityError` = brugt) og til sidst en bruger med
+samme normaliserede e-mail. Nøglen laves med `secrets.token_urlsafe(48)` og forlader kun CC i `POST /cc-link` til
+pluginnet over den autentificerede bro. Pluginnet gemmer den uden autoload og viser kun `sso: true/false` i `/snapshot`.
 
 ### 7c. Chat og MCP-connectors (v7.26.0)
 
@@ -207,6 +217,7 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 
 ## 12. Versionshistorik (kort)
 
+- **v7.27.0** — Log ind fra WordPress med ét klik: `cc_sso_secret()`, `cc_sso_push()` (POST `/cc-link` i sync, kun ved ændring), `GET /cc-sso` med `cc_sso_verify()` (HMAC, udløb ±30 s, maks. 120 s levetid, `jti` én gang, kendt e-mail). Det døde `/cc-login`-flow fra v7.17.5 er fjernet
 - **v7.26.0** — Chat-fanen med MCP-connectors (GitHub, WordPress, Gmail, Google Drive m.fl.): MCP-klient (JSON + SSE, sessioner, sider), godkendelse af skrivende værktøjer (`chat_pending`), nøgler kun som hint i UI'et
 - **v7.25.0** — AI via OpenRouter i stedet for aimlapi: `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`, fælles `ai_chat()` med `AIError` for OpenRouters fejlsvar, budget på `openrouter.ai` og advarsel ved en tilbageblevet `AIMLAPI_KEY`
 - **v7.24.0** — Vækst-fanen: lokal indholdsoptimerer (`local_content_optimizer`, vægtet score + termdækning), konkurrent-sammenligning mod brugerangivne URL'er, indholdsplan (`content_briefs`) og manuel linkliste (`link_targets`) — ingen API-nøgle. UI'et er samtidig moderniseret: grupperet navigation, fanebeskrivelser og fælles visuel rytme for kort, felter og knapper
@@ -318,7 +329,7 @@ ved hvert CI-løb, så tabellen og koden ikke kan glide fra hinanden ubemærket.
 | --- | --- |
 | Opstart og auth | `GET /setup`, `POST /setup`, `GET /login`, `POST /login`, `GET /logout` |
 | Brugere | `POST /users/invite` (mail med midlertidig kode), `POST /users/delete` (svar `del=ok|fejl` + `del_kind=slettet|sidste|findes-ikke|ugyldig`), `POST /users/password` |
-| Login fra WordPress | `POST /autopilot/login-link` (kræver session) laver en engangskode, gemmer `sha256` + `user_id` + `exp` i `settings.cc_login_code` og sender linket til pluginnet med `POST sgap/v1/login-link`. `GET /cc-login?code=…` validerer koden, sletter den i samme kald (engangsbrug, 10 min.) og opretter en normal session. Ugyldig eller brugt kode → `/login?cc=udloebet` med forklaring; koden slettes først når den er godkendt, så et forkert gæt ikke kan brænde linket |
+| Login fra WordPress | `POST /autopilot/login-link` (kræver session) sender adresse + nøgle til pluginnet nu (`cc_sso_push(force=True)`) og svarer i Social med `cc_link=ok|fejl`; `GET /cc-sso?t=<billet>` (uden session) logger ind med en signeret billet fra pluginnet og sender ellers til `/login?sso=ugyldig|udloebet|brugt|ukendt-bruger|ikke-forbundet|laast` |
 | API-nøgler | `POST /api-keys/create`, `POST /api-keys/revoke` (nøglen vises én gang og slettes fra `settings` i samme kald) |
 | MCP | `POST /mcp` — JSON-RPC 2.0 (`initialize`, `ping`, `tools/list`, `tools/call`) med Bearer-nøgle |
 | Dashboard | `GET /` |

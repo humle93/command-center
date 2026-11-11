@@ -1090,13 +1090,18 @@
                 {% if cc_link == 'ok' %}
                 <p class="text-[11px] text-emerald-300 mb-2">✅ {{ cc_msg }}</p>
                 {% elif cc_link == 'fejl' %}
-                <p class="text-[11px] text-rose-300 mb-2">❌ Linket kunne ikke lægges i WordPress: {{ cc_msg }}</p>
+                <p class="text-[11px] text-rose-300 mb-2">❌ Login-knappen kunne ikke forbindes: {{ cc_msg }}</p>
                 {% endif %}
+                <p class="text-[11px] mb-2 {{ 'text-emerald-300' if cc_sso.ok else 'text-zinc-400' }}">🔑 Knappen „Log ind i Command Center" i WordPress:
+                    {% if not cc_sso.public %}kræver <code>CC_PUBLIC_URL</code> (https) i .env
+                    {% elif cc_sso.ok %}forbundet{% if cc_sso.at %} <span class="text-zinc-600">({{ cc_sso.at }})</span>{% endif %}
+                    {% elif cc_sso.message %}ikke forbundet — {{ cc_sso.message }}
+                    {% else %}forbindes ved næste sync{% endif %}</p>
                 <div class="flex flex-wrap items-center gap-3">
                     <form action="/autopilot/login-link" method="POST">
-                        <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-2 rounded-xl text-xs">🔑 Log ind på Command Center</button>
+                        <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-2 rounded-xl text-xs">🔑 Forbind login-knappen nu</button>
                     </form>
-                    <span class="text-[10px] text-zinc-500">Lægger et engangslink i WordPress, så knappen der logger dig ind her — uden adgangskode. Linket holder 10 min. og virker én gang.</span>
+                    <span class="text-[10px] text-zinc-500">Giver knappen „Log ind i Command Center" i Steamgears (7.72+) adressen og en hemmelig nøgle. Et klik i WordPress logger dig ind her med en billet, der holder 1 minut og kun virker én gang — kun som en bruger med samme e-mail. Sker også automatisk ved hver sync.</span>
                 </div>
             </div>
             {% endif %}

@@ -1,6 +1,6 @@
 """In-process tests for the v8-plan features: quality gate, API budget guard, /health.
 Usage: python3 tests/test_v8_features.py   (from the repo root, requirements installed)"""
-import os, sys, shutil, threading, json, io, tarfile, tempfile, base64, hmac, hashlib
+import os, sys, shutil, threading, json, io, tarfile, tempfile, base64, hmac, hashlib, urllib.parse
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -434,53 +434,114 @@ check("delete: et ugyldigt id forklares i formularen",
       "del_kind=ugyldig" in (r.headers.get("location") or "")
       and "Brugeren blev ikke slettet" in _bad_side.text, (r.headers.get("location"), _bad_side.text[:120]))
 
-# --- v7.17.5: knappen i WordPress faar et engangslink til Command Center ---
+# --- v7.27.0: "Log ind i Command Center" i WordPress - signeret billet, 60 s, én gang ---
 _me = main.find_user("iptest@example.dk")
-code = main.cc_login_issue(_me["id"])
-check("cc-login: engangskoden virker en gang og derefter ikke",
-      main.cc_login_consume(code) == _me["id"] and main.cc_login_consume(code) is None)
-check("cc-login: tom og ukendt kode afvises",
-      main.cc_login_consume("") is None and main.cc_login_consume("findes-ikke") is None)
-with main.get_db() as db:
-    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-               (main.CC_LOGIN_KEY, __import__("json").dumps({"hash": main.hashlib.sha256(b"gammel").hexdigest(),
-                                                             "user_id": _me["id"], "exp": 1})))
-check("cc-login: en udloebet kode afvises", main.cc_login_consume("gammel") is None)
+_sso_secret = main.cc_sso_secret()
+check("sso: nøglen laves én gang og er lang nok", len(_sso_secret) >= 48 and main.cc_sso_secret() == _sso_secret)
+
+def _b64u(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+def _ticket(email, secret=None, iat=None, exp=None, jti=None, v=1):
+    now = int(__import__("time").time())
+    iat = now if iat is None else iat
+    payload = _b64u(json.dumps({"v": v, "email": email, "login": "x", "site": "https://steamgears.eu/", "iat": iat,
+                                "exp": iat + 60 if exp is None else exp,
+                                "jti": jti or __import__("secrets").token_hex(16)}).encode())
+    sig = _b64u(hmac.new((secret or _sso_secret).encode(), payload.encode(), hashlib.sha256).digest())
+    return payload + "." + sig
+
+_u, _why = main.cc_sso_verify(_ticket("IPTEST@example.dk"))
+check("sso: en gyldig billet giver brugeren med samme e-mail (store bogstaver normaliseres)",
+      _u is not None and _u["id"] == _me["id"] and _why == "", _why)
+_jti = "ab" * 16
+main.cc_sso_verify(_ticket("iptest@example.dk", jti=_jti))
+check("sso: samme jti kan ikke bruges to gange", main.cc_sso_verify(_ticket("iptest@example.dk", jti=_jti)) == (None, "brugt"))
+check("sso: forkert nøgle afvises", main.cc_sso_verify(_ticket("iptest@example.dk", secret="x" * 48))[1] == "ugyldig")
+_good = _ticket("iptest@example.dk")
+_p, _s = _good.split(".")
+_forged = _b64u(json.dumps({**json.loads(base64.urlsafe_b64decode(_p + "==")), "email": "andenadmin@example.dk"}).encode())
+check("sso: en ændret e-mail med den gamle signatur afvises", main.cc_sso_verify(_forged + "." + _s)[1] == "ugyldig")
+_old = int(__import__("time").time()) - 600
+check("sso: en udløbet billet afvises", main.cc_sso_verify(_ticket("iptest@example.dk", iat=_old))[1] == "udloebet")
+check("sso: en billet fra fremtiden afvises",
+      main.cc_sso_verify(_ticket("iptest@example.dk", iat=int(__import__("time").time()) + 600))[1] == "udloebet")
+check("sso: en billet der lever mere end 2 min. afvises",
+      main.cc_sso_verify(_ticket("iptest@example.dk", exp=int(__import__("time").time()) + 3600))[1] == "ugyldig")
+check("sso: ukendt version, tom og ødelagt billet afvises",
+      main.cc_sso_verify(_ticket("iptest@example.dk", v=2))[1] == "ugyldig" and main.cc_sso_verify("")[1] == "ugyldig"
+      and main.cc_sso_verify("abc.def")[1] == "ugyldig" and main.cc_sso_verify("a.b.c")[1] == "ugyldig")
+check("sso: en e-mail uden CC-bruger logger ikke ind (ingen ny konto)",
+      main.cc_sso_verify(_ticket("ukendt@example.dk")) == (None, "ukendt-bruger")
+      and main.find_user("ukendt@example.dk") is None)
+
 z = TestClient(main.app)
-code2 = main.cc_login_issue(_me["id"])
-r = z.get("/cc-login?code=" + code2, follow_redirects=False)
-check("cc-login: linket logger ind uden adgangskode",
+r = z.get("/cc-sso?t=" + _ticket("iptest@example.dk"), follow_redirects=False)
+check("sso: /cc-sso logger ind uden adgangskode og åbner dashboardet",
       r.status_code == 303 and main.SESSION_COOKIE in (r.headers.get("set-cookie") or "")
       and z.get("/").status_code == 200, r.status_code)
-r = z.get("/cc-login?code=" + code2, follow_redirects=False)
-check("cc-login: et brugt link sendes til login med en forklaring",
-      (r.headers.get("location") or "").startswith("/login?cc=")
-      and "allerede brugt" in TestClient(main.app).get("/login?cc=udloebet").text,
-      r.headers.get("location"))
-_ready, _api = main.sgap_ready, main.sgap_api
+with main.get_db() as db:
+    _sso_alarm = db.execute("SELECT COUNT(*) FROM alarms WHERE message LIKE 'Login fra WordPress (ét klik): iptest@%'").fetchone()[0]
+check("sso: login fra WordPress står i Alarmer", _sso_alarm >= 1, _sso_alarm)
+_used = _ticket("iptest@example.dk")
+TestClient(main.app).get("/cc-sso?t=" + _used, follow_redirects=False)
+r = TestClient(main.app).get("/cc-sso?t=" + _used, follow_redirects=False)
+check("sso: en brugt billet sendes til login med en forklaring",
+      (r.headers.get("location") or "") == "/login?sso=brugt"
+      and "allerede brugt" in TestClient(main.app).get("/login?sso=brugt").text, r.headers.get("location"))
+check("sso: login-siden forklarer en ukendt bruger",
+      "findes ikke som bruger" in TestClient(main.app).get("/login?sso=ukendt-bruger").text)
+check("sso: den gamle /cc-login-rute er væk", z.get("/cc-login?code=x", follow_redirects=False).status_code == 404
+      and not hasattr(main, "cc_login_issue"))
+main._LOGIN_FAILS.pop("testclient", None)
+for _ in range(main._LOGIN_MAX_FAILS):
+    TestClient(main.app).get("/cc-sso?t=forkert.billet", follow_redirects=False)
+r = TestClient(main.app).get("/cc-sso?t=" + _ticket("iptest@example.dk"), follow_redirects=False)
+check("sso: fem forkerte billetter låser adressen som almindelige fejl-logins",
+      (r.headers.get("location") or "") == "/login?sso=laast", r.headers.get("location"))
+main._LOGIN_FAILS.clear()
+
+# CC lægger adresse + nøgle i pluginnet (POST /cc-link)
+_ready, _api, _pub = main.sgap_ready, main.sgap_api, main.CC_PUBLIC_URL
 pushed = []
 main.sgap_ready = lambda: True
 main.sgap_api = lambda method, path, **kw: (pushed.append((method, path, kw.get("json"))), {"ok": True})[1]
+main.CC_PUBLIC_URL = ""
+check("sso: uden CC_PUBLIC_URL sendes intet, og det forklares",
+      main.cc_sso_push(force=True)[0] is False and "CC_PUBLIC_URL" in main.cc_sso_push(force=True)[1] and pushed == [])
+main.CC_PUBLIC_URL = "http://cc.steamgears.eu"
+check("sso: en http-adresse (ikke localhost) afvises", main.cc_public_base() == "" and main.cc_sso_push(force=True)[0] is False)
+main.CC_PUBLIC_URL = "https://cc.steamgears.eu/"
 r = d.post("/autopilot/login-link", follow_redirects=False)
 _sent = pushed[-1][2] if pushed else {}
-check("cc-login: CC laegger linket i WordPress med engangskode",
-      (r.headers.get("location") or "").startswith("/?tab=social&cc_link=ok")
-      and pushed and pushed[-1][0] == "POST" and pushed[-1][1] == "/login-link"
-      and "/cc-login?code=" in (_sent.get("url") or ""), (r.headers.get("location"), pushed[:1]))
+check("sso: knappen i Social sender adresse, nøgle og version til /cc-link",
+      (r.headers.get("location") or "").startswith("/?tab=social&cc_link=ok") and pushed[-1][:2] == ("POST", "/cc-link")
+      and _sent == {"url": "https://cc.steamgears.eu", "secret": _sso_secret, "version": main.APP_VERSION},
+      (r.headers.get("location"), pushed[-1][:2] if pushed else None))
+_n = len(pushed)
+check("sso: uændret forbindelse sendes ikke igen ved sync", main.cc_sso_push()[0] is True and len(pushed) == _n)
+main.cc_sso_push(plugin_ready=False)
+check("sso: sendes igen når pluginnet melder at knappen ikke er forbundet", len(pushed) == _n + 1)
+main.CC_PUBLIC_URL = "https://ny.steamgears.eu"
+main.cc_sso_push()
+check("sso: sendes igen når CC_PUBLIC_URL ændres", len(pushed) == _n + 2 and pushed[-1][2]["url"] == "https://ny.steamgears.eu")
+main.CC_PUBLIC_URL = "https://cc.steamgears.eu"
 _wp_env = (main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD)
 main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD = "http://wp.test", "admin", "x"
 _social = d.get("/?tab=social")
-check("cc-login: knappen staar i fanen Social",
-      _social.status_code == 200 and "Log ind p\u00e5 Command Center" in _social.text
-      and "/autopilot/login-link" in _social.text, _social.text[:160])
+check("sso: Social-fanen viser knappen og at den er forbundet",
+      _social.status_code == 200 and "Forbind login-knappen nu" in _social.text and "forbundet" in _social.text
+      and "/autopilot/login-link" in _social.text and _sso_secret not in _social.text, _social.text[:160])
 main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD = _wp_env
-_ok_code = (_sent.get("url") or "").split("code=")[-1]
-check("cc-login: koden i linket er den CC gemmer", main.cc_login_consume(_ok_code) == _me["id"])
-main.sgap_api = lambda method, path, **kw: (_ for _ in ()).throw(ValueError("nede"))
+_resp404 = type("R", (), {"status_code": 404})()
+main.sgap_api = lambda method, path, **kw: (_ for _ in ()).throw(main.requests.HTTPError(response=_resp404))
 r = d.post("/autopilot/login-link", follow_redirects=False)
-check("cc-login: en fejl fra WordPress svares i Social-fanen",
-      (r.headers.get("location") or "").startswith("/?tab=social&cc_link=fejl"), r.headers.get("location"))
-main.sgap_ready, main.sgap_api = _ready, _api
+check("sso: et plugin uden /cc-link (før 7.72) forklares med versionen",
+      "cc_link=fejl" in (r.headers.get("location") or "") and "7.72" in urllib.parse.unquote(r.headers.get("location") or ""),
+      r.headers.get("location"))
+check("sso: nøglen står aldrig i en alarm eller i settings-svaret til UI'et",
+      _sso_secret not in json.dumps(main.cc_sso_state()))
+main.sgap_ready, main.sgap_api, main.CC_PUBLIC_URL = _ready, _api, _pub
 
 # --- v7.18.0: begge sider viser hvornaar WordPress sidst hoerte fra Command Center ---
 import time as _cc_time

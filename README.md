@@ -1,9 +1,13 @@
-# Command Center v7.26 PRO
+# Command Center v7.27 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
+
+## Nyheder i v7.27
+
+- **Log ind fra WordPress med ét klik (v7.27.0)** — knappen **Log ind i Command Center** i Steamgears Autopilot (7.72+) logger nu direkte ind. Command Center sender sin adresse (`CC_PUBLIC_URL`) og en hemmelig nøgle til pluginnet (`POST /sgap/v1/cc-link`) ved hver sync; knappen signerer en billet (HMAC-SHA256, 60 sekunder, tilfældigt `jti`), og `GET /cc-sso` tjekker signatur, udløb og engangsbrug og logger kun ind som en bruger, der allerede findes med samme e-mail. Afviste billetter tæller med i login-låsen (5 fejl = 10 min.), og hvert login fra WordPress står under Alarmer. Det gamle engangslink (v7.17.5) er fjernet: det sendte til `/sgap/v1/login-link`, en rute pluginnet aldrig har haft, så det kunne ikke virke. Knappen **🔑 Forbind login-knappen nu** i fanen Social forbinder med det samme i stedet for at vente på næste sync
 
 ## Nyheder i v7.26
 
@@ -154,7 +158,7 @@ Command Center og WordPress-pluginnet **Steamgears Autopilot** snakker sammen vi
 - **WP-Cron holdes i gang**: CC kalder `wp-cron.php` hvert 5. min, så pluginnets job (udgivelse, selvtjek) kører til tiden, selvom sitet har få besøg
 - **Pluginnet ser CC**: hvert kald sender `X-Command-Center: <version>`; Steamgears Autopilot 7.33+ viser "Command Center connected" i sit selvtjek og melder et problem, hvis CC har været tavs i over 2 timer
 - **"→ Autopilot"** sender et opslag som kladde til pluginnet (godkendes i WordPress under Steamgears → AI Drafts). Opslaget sendes **kun én gang**: rækken låses før kaldet, så et dobbeltklik eller et genforsøg ikke giver to kladder. Svarer WordPress ikke (timeout), bliver status "sendt? (svar udeblev)" — tjek AI Drafts, før du sender igen
-- **Log ind på Command Center fra WordPress** — knappen **🔑 Log ind på Command Center** i fanen Social lægger et engangslink i pluginnet (`POST /login-link` på `sgap/v1`, gemt som option), og knappen i WordPress åbner det. Linket logger dig ind på CC uden adgangskode: koden gemmes kun som sha256, virker **én gang** og udløber efter 10 minutter. Er den brugt eller udløbet, forklarer login-siden det — så en gammel knap ikke ser ud som et brudt login. Retningen er stadig CC → site
+- **Log ind fra WordPress med ét klik (v7.27)** — Command Center sender sin adresse (`CC_PUBLIC_URL`) og en hemmelig nøgle til pluginnet (`POST /cc-link` på `sgap/v1`, Steamgears Autopilot 7.72+) ved hver sync, kun når noget har ændret sig. Knappen **Log ind i Command Center** i WordPress signerer en billet (HMAC-SHA256, 60 s, `jti`), og `GET /cc-sso` logger ind som brugeren med samme e-mail. **🔑 Forbind login-knappen nu** i fanen Social forbinder med det samme. Uden `CC_PUBLIC_URL` (https) forbindes intet, og fanen siger hvorfor
 - Slå til/fra under Moduler ("Autopilot-bro"). Retningen er altid CC → site, så CC kan blive på 127.0.0.1
 - **Begge sider viser, hvornår CC sidst kaldte**: hvert kald har `X-Command-Center`-headeren, så WordPress noterer tid, version, rute og bruger (`sgap_cc_seen`). Pluginnets kort viser alderen (`live` / `late` / `silent`), og fanen Social viser **WordPress' eget svar** — samme tal, regnet ud ved visning. Er broen brudt, siger begge sider det i stedet for at se stille ud
 

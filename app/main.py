@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, PlainTextResponse, FileResponse
 from fastapi import Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from datetime import datetime, timezone, timedelta, date
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
+import contextvars
 from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -82,7 +83,19 @@ GITHUB_REPO = os.environ.get("GITHUB_REPO", "humle93/command-center").strip()
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_BASE_URL = (os.environ.get("OPENROUTER_BASE_URL", "").strip()
                        or "https://openrouter.ai/api/v1").rstrip("/")
-AI_MODEL = os.environ.get("AI_MODEL", "google/gemini-3-8-flash")
+AI_MODEL = os.environ.get("AI_MODEL", "google/gemini-3.8-flash")
+# Historik (v7.32.0): kun disk, ingen ekstra kald ud af huset. Tallene er sat efter en delt server
+# med god plads; crawleren er bevidst IKKE gjort hurtigere eller stoerre (fair use + hoeflighed).
+# v7.33.0: pladsen er brugerens egen (8 TB), saa maaledata gemmes for altid (0 = ryd aldrig).
+# Sikkerhedslogs har stadig en graense: api_audit 1 aar, login_attempts 30 dage (IP-adresser).
+KEEP_DAYS = {"check_history": 0, "alarms": 365, "health_history": 0, "keyword_ideas": 0, "api_audit": 365}
+KEEP_ROWS = {"content_audits": 5000, "flow_runs": 5000, "optimize_runs": 2000}
+BACKUP_KEEP = max(1, int(os.environ.get("CC_BACKUP_KEEP", "365") or 365))
+# Gratis reserve naar OpenRouter afviser AI_MODEL for manglende kredit (402). Prøves i raekkefoelge via
+# OpenRouters "models"-liste; openrouter/free er OpenRouters egen router over de gratis modeller.
+# Tom vaerdi slaar reserven fra.
+AI_FREE_MODELS = [m.strip() for m in os.environ.get(
+    "AI_FREE_MODELS", "nvidia/nemotron-3-ultra-550b-a55b:free,google/gemma-4-31b-it:free,openrouter/free").split(",") if m.strip()][:3]
 # aimlapi er udfaset: en tilbagebleven noegle bruges ikke, men giver en advarsel ved opstart.
 LEGACY_AIMLAPI_KEY_SET = bool(os.environ.get("AIMLAPI_KEY", "").strip())
 WP_URL = os.environ.get("WP_URL", "").strip()                # fx https://steamgears.eu
@@ -116,10 +129,18 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.30.0"
+APP_VERSION = "7.36.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.36.0", "Forbindelser i browseren: WordPress, OpenRouter, SerpAPI og GitHub saettes og testes under Moduler - ingen SSH"),
+    ("7.35.0", "Flere projekter: hvert site faar egne soegeord, crawl, artikler, medier, flows og WordPress - vaelg projekt oeverst, opret under Moduler"),
+    ("7.34.1", "Billeder sendes til WordPress som JPEG (Instagram kraever det); originalen bliver i CC"),
+    ("7.34.0", "Medier + kvalitetssikring: CC laver og gemmer billeder, alt bedoemmes af regler + en gratis AI-bedoemmer (min. 7/10) - intet svar = det venter paa dig"),
+    ("7.33.0", "Broen til autopiloten: sider paa plads 4-20 faar sociale opslag foerst, med soegeordet - og soegeord og sider gemmer nu hele deres historik"),
+    ("7.32.0", "Laengere historik: 1 aar oppetid/sundhed/soegeordsideer, 500 flow-koersler og indholdsmaalinger, 60 backups - crawleren er uaendret (fair use)"),
+    ("7.31.0", "Gratis reserve: mangler OpenRouter-kredit, svarer en gratis model (openrouter/free) i stedet for en fejl - og det bliver en alarm"),
+    ("7.30.1", "Standardmodellen er rettet til google/gemini-3.8-flash - den gamle slug findes ikke hos OpenRouter"),
     ("7.30.0", "Flows: kaed funktionerne sammen og lad dem koere automatisk (time/dag/uge) - 17 blokke, 4 faerdige flows, betingelser, og alt til WordPress bliver kladder"),
     ("7.29.0", "1-klik optimering i Cockpit: hele projektet eller en enkelt del (teknik, on-page, indhold, soegeord, monitors) giver én prioriteret liste med faerdige forslag - intet aendres paa sitet"),
     ("7.28.1", "Funktionsrevision: AI-omskrivning af titel/meta gik ned med en AI-noegle, og en pris-monitor kunne ikke oprettes uden et meningsloest felt - begge rettet"),
@@ -151,7 +172,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Flows: automatiske kaeder af analyser, AI og WordPress-kladder - fanen Flows"
+NEWEST_LINE = "Saet noeglerne i browseren under Moduler -> Forbindelser (ingen SSH)"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -182,25 +203,108 @@ app = FastAPI(title="Command Center Engine", version=APP_VERSION)
 os.makedirs(STATIC_DIR, exist_ok=True)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+
+
+def _from_json(value):
+    try:
+        return jsonlib.loads(value) if value else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+templates.env.filters["fromjson"] = _from_json
 scheduler = AsyncIOScheduler(timezone="Europe/Copenhagen")
-executor = ThreadPoolExecutor(max_workers=8)
+class _ContextExecutor(ThreadPoolExecutor):
+    """Som ThreadPoolExecutor, men arbejdet koerer i kalderens contextvars (v7.35.0: det aktive
+    projekt). loop.run_in_executor kopierer ikke selv konteksten, saa uden dette ville et crawl
+    startet i projekt 2 skrive i projekt 1's database."""
+    def submit(self, fn, /, *args, **kwargs):
+        ctx = contextvars.copy_context()
+        return super().submit(ctx.run, fn, *args, **kwargs)
+
+
+executor = _ContextExecutor(max_workers=8)
 
 
 
 _WAL_SET = False
 
 
+# ---------- Projekter (v7.35.0) ----------
+# Projekt 1 er det oprindelige site (center.db + .env). Hvert nyt projekt har sin egen databasefil med
+# de samme site-tabeller og sin egen WordPress-forbindelse; brugere, logins, MCP-noegler og chat er faelles.
+_PROJECT: contextvars.ContextVar = contextvars.ContextVar("cc_project", default=None)
+PROJECTS_DIR = os.path.join(BASE_DIR, "data", "projects")
+GLOBAL_TABLES = {"users", "sessions", "login_attempts", "sso_used", "api_clients", "api_audit", "alert_outbox",
+                 "chat_conversations", "chat_messages", "chat_pending", "mcp_connectors", "_selftest", "projects"}
+PROJECT_CONFIG = ("WP_URL", "WP_USER", "WP_APP_PASSWORD", "TRACK_DOMAIN", "MEDIA_STYLE")
+_WAL_PATHS: set = set()
+
+
+def current_project():
+    """Det aktive projekt som dict, eller None for projekt 1."""
+    return _PROJECT.get()
+
+
+def current_db_path() -> str:
+    p = _PROJECT.get()
+    return DB_PATH if not p else os.path.join(PROJECTS_DIR, f"p{int(p['id'])}.db")
+
+
+def P(key: str):
+    """Projektets vaerdi for en site-indstilling. Projekt 1 bruger .env (modul-globalerne, som testene
+    kan saette). Et andet projekt arver ALDRIG projekt 1's WordPress-noegler: mangler de, er de tomme."""
+    p = _PROJECT.get()
+    if not p:
+        return globals()[key]
+    if key == "MEDIA_STYLE":
+        return p.get("media_style") or MEDIA_STYLE_GENERIC
+    return p.get(key.lower()) or ""
+
+
+def _wp_url() -> str:
+    return P("WP_URL")
+
+
+def _wp_user() -> str:
+    return P("WP_USER")
+
+
+def _wp_pass() -> str:
+    return P("WP_APP_PASSWORD")
+
+
+def _track_domain() -> str:
+    return P("TRACK_DOMAIN")
+
+
+def _media_style() -> str:
+    return P("MEDIA_STYLE")
+
+
+def setting_present(name: str) -> bool:
+    """Om en kraevet noegle/indstilling findes i det aktive projekt (flows viser manglende)."""
+    return bool(P(name)) if name in PROJECT_CONFIG else bool(globals().get(name))
+
+
 @contextmanager
 def get_db():
     global _WAL_SET
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=15)  # timeout = busy timeout (15 s)
+    path = current_db_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    conn = sqlite3.connect(path, timeout=15)  # timeout = busy timeout (15 s)
     conn.row_factory = sqlite3.Row
-    if not _WAL_SET:
-        # WAL is a property of the database file: setting it once per process is enough.
+    if path not in _WAL_PATHS:
+        # WAL is a property of the database file: setting it once per file is enough.
         conn.execute("PRAGMA journal_mode=WAL")
+        _WAL_PATHS.add(path)
         _WAL_SET = True
     conn.execute("PRAGMA synchronous=NORMAL")
+    if path != DB_PATH:
+        # Et projekt har kun site-tabellerne. De faelles (brugere, sessioner, noegler, chat) findes i
+        # center.db, som haenges paa som "g": SQLite slaar et ukvalificeret navn op i main foerst og
+        # derefter i de vedhaengte databaser, saa de samme forespoergsler virker uaendret.
+        conn.execute("ATTACH DATABASE ? AS g", (DB_PATH,))
     try:
         yield conn
         conn.commit()
@@ -297,6 +401,20 @@ def init_db():
             score INTEGER,
             issues TEXT,
             crawled_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS media (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, purpose TEXT, subject TEXT, keyword TEXT, prompt TEXT,
+            model TEXT, file TEXT, width INTEGER, height INTEGER, bytes INTEGER, sha256 TEXT, dhash TEXT,
+            cost REAL DEFAULT 0, qa_score REAL, qa_json TEXT, status TEXT, alt_text TEXT, article_id INTEGER,
+            wp_media_id TEXT, created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS keyword_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, keyword TEXT NOT NULL, position INTEGER,
+            url TEXT, checked_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS page_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, url TEXT NOT NULL, http_status INTEGER,
+            title TEXT, meta_len INTEGER, words INTEGER, score INTEGER, issues TEXT, crawled_at TEXT
         );
         CREATE TABLE IF NOT EXISTS crawl_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -477,7 +595,7 @@ _safe(init_db)
 def migrate_db():
     with get_db() as db:
         for table, want in {
-            "articles": ["meta_title", "meta_desc"],
+            "articles": ["meta_title", "meta_desc", "media_id", "review_json"],
             "seopages": ["content_hash", "redirects"],
             "crawl_runs": ["sitemap_broken", "sitemap_missing"],
             "monitors": ["last_value"],
@@ -563,6 +681,28 @@ def migrate_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, keyword TEXT, score INTEGER,
             words INTEGER, target_words INTEGER, terms_json TEXT, checks_json TEXT, created_at TEXT
         )""")
+        # Projekter (v7.35.0): kun i center.db. Projekt 1 er .env og staar ikke i tabellen.
+        db.execute("""CREATE TABLE IF NOT EXISTS projects (
+            id INTEGER PRIMARY KEY, name TEXT NOT NULL, domain TEXT, wp_url TEXT, wp_user TEXT,
+            wp_app_password TEXT, media_style TEXT, created_at TEXT
+        )""")
+        # Historik over tid (v7.33.0): én raekke pr. maaling, ryddes aldrig automatisk.
+        db.execute("""CREATE TABLE IF NOT EXISTS media (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, purpose TEXT, subject TEXT, keyword TEXT, prompt TEXT,
+            model TEXT, file TEXT, width INTEGER, height INTEGER, bytes INTEGER, sha256 TEXT, dhash TEXT,
+            cost REAL DEFAULT 0, qa_score REAL, qa_json TEXT, status TEXT, alt_text TEXT, article_id INTEGER,
+            wp_media_id TEXT, created_at TEXT
+        )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS keyword_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, keyword TEXT NOT NULL, position INTEGER,
+            url TEXT, checked_at TEXT NOT NULL
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_keyword_history ON keyword_history (keyword, checked_at)")
+        db.execute("""CREATE TABLE IF NOT EXISTS page_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, url TEXT NOT NULL, http_status INTEGER,
+            title TEXT, meta_len INTEGER, words INTEGER, score INTEGER, issues TEXT, crawled_at TEXT
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_page_history ON page_history (url, crawled_at)")
         # Flows (v7.30.0): kaedede blokke med plan; en koersel = én raekke med log pr. trin.
         db.execute("""CREATE TABLE IF NOT EXISTS flows (
             id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, enabled INTEGER DEFAULT 1,
@@ -604,6 +744,208 @@ def migrate_db():
 
 
 _safe(migrate_db)
+
+
+# ---------- Projekter: oprettelse, skema og valg (v7.35.0) ----------
+# (ruterne ligger efter app-definitionen: /projects/switch|add|wp|delete)
+PROJECT_COOKIE = "cc_project"
+
+
+def _global_db():
+    """Direkte til center.db uanset aktivt projekt (projektlisten er faelles)."""
+    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def project_main() -> dict:
+    return {"id": 1, "name": os.environ.get("CC_PROJECT_NAME", "").strip() or TRACK_DOMAIN or "Hovedprojekt",
+            "domain": TRACK_DOMAIN, "wp_set": bool(WP_URL and WP_USER and WP_APP_PASSWORD)}
+
+
+def project_rows() -> list:
+    conn = _global_db()
+    try:
+        rows = [dict(r) for r in conn.execute("SELECT * FROM projects ORDER BY id").fetchall()]
+    except sqlite3.Error:
+        rows = []
+    finally:
+        conn.close()
+    for r in rows:
+        r["track_domain"] = r.get("domain") or ""
+        r["wp_set"] = bool(r.get("wp_url") and r.get("wp_user") and r.get("wp_app_password"))
+    return rows
+
+
+def all_projects() -> list:
+    return [project_main()] + project_rows()
+
+
+def load_project(pid) -> dict | None:
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 1:
+        return None
+    return next((r for r in project_rows() if int(r["id"]) == pid), None)
+
+
+def ensure_project_db(pid: int) -> str:
+    """Opretter/opdaterer projektets database med center.db's site-tabeller, kolonner og indekser."""
+    os.makedirs(PROJECTS_DIR, exist_ok=True)
+    path = os.path.join(PROJECTS_DIR, f"p{int(pid)}.db")
+    src = sqlite3.connect(DB_PATH)
+    dst = sqlite3.connect(path)
+    try:
+        objs = src.execute("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE sql IS NOT NULL "
+                           "AND name NOT LIKE 'sqlite_%' ORDER BY type DESC").fetchall()
+        for typ, name, tbl, sql in objs:
+            if tbl in GLOBAL_TABLES:
+                continue
+            if typ == "table":
+                dst.execute(re.sub(r"^\s*CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?", "CREATE TABLE IF NOT EXISTS ", sql, flags=re.I))
+                have = {r[1] for r in dst.execute(f'PRAGMA table_info("{name}")')}
+                for _cid, col, ctype, _nn, dflt, _pk in src.execute(f'PRAGMA table_info("{name}")'):
+                    if col not in have:
+                        dst.execute(f'ALTER TABLE "{name}" ADD COLUMN "{col}" {ctype or ""}'
+                                    + (f" DEFAULT {dflt}" if dflt is not None else ""))
+        for typ, name, tbl, sql in objs:
+            if typ == "index" and tbl not in GLOBAL_TABLES:
+                dst.execute(re.sub(r"^\s*CREATE\s+(UNIQUE\s+)?INDEX\s+(IF\s+NOT\s+EXISTS\s+)?",
+                                   lambda m: "CREATE " + (m.group(1) or "") + "INDEX IF NOT EXISTS ", sql, flags=re.I))
+        dst.commit()
+    finally:
+        dst.close()
+        src.close()
+    return path
+
+
+def sync_project_dbs() -> int:
+    n = 0
+    for r in project_rows():
+        ensure_project_db(int(r["id"]))
+        n += 1
+    return n
+
+
+@contextmanager
+def use_project(p):
+    """Koer en blok i et projekts kontekst (None/projekt 1 = hovedprojektet)."""
+    token = _PROJECT.set(p if p and int(p.get("id", 1)) > 1 else None)
+    try:
+        yield
+    finally:
+        _PROJECT.reset(token)
+
+
+def _clean_domain(value: str) -> str:
+    v = (value or "").strip().lower()
+    if "://" in v:
+        v = urlparse(v).hostname or ""
+    v = v.split("/")[0].removeprefix("www.")
+    return v if re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", v or "") else ""
+
+
+def project_create(name: str, domain: str, wp_url: str = "", wp_user: str = "", wp_app_password: str = "",
+                   media_style: str = "") -> tuple:
+    """(id, fejltekst). WordPress-felterne er valgfri, men skal udfyldes alle tre eller ingen."""
+    name = (name or "").strip()[:60]
+    dom = _clean_domain(domain)
+    if not name:
+        return None, "giv projektet et navn"
+    if not dom:
+        return None, "skriv et gyldigt domæne, fx kaffeguiden.dk"
+    wp_url = (wp_url or "").strip().rstrip("/")
+    wp_user = (wp_user or "").strip()
+    wp_app_password = (wp_app_password or "").strip()
+    if any((wp_url, wp_user, wp_app_password)) and not all((wp_url, wp_user, wp_app_password)):
+        return None, "WordPress kræver både adresse, bruger og applikationsadgangskode (eller ingen af dem)"
+    if wp_url and not re.match(r"^https://[^/\s]+", wp_url):
+        return None, "WordPress-adressen skal starte med https://"
+    if any(dom == p["domain"] for p in all_projects() if p.get("domain")):
+        return None, f"{dom} er allerede et projekt"
+    conn = _global_db()
+    try:
+        nxt = max(1, conn.execute("SELECT COALESCE(MAX(id), 1) FROM projects").fetchone()[0]) + 1
+        conn.execute("INSERT INTO projects (id, name, domain, wp_url, wp_user, wp_app_password, media_style, created_at) "
+                     "VALUES (?,?,?,?,?,?,?,?)", (nxt, name, dom, wp_url, wp_user, wp_app_password,
+                                                  (media_style or "").strip()[:600], now_iso()))
+        conn.commit()
+    finally:
+        conn.close()
+    ensure_project_db(nxt)
+    with use_project(load_project(nxt)), get_db() as db:
+        db.execute("INSERT OR IGNORE INTO domains (url, status) VALUES (?, 'Ukendt')", (f"https://{dom}",))
+    return nxt, ""
+
+
+def project_update_wp(pid: int, wp_url: str, wp_user: str, wp_app_password: str) -> str:
+    p = load_project(pid)
+    if not p:
+        return "projektet findes ikke (hovedprojektet sættes i .env)"
+    wp_url = (wp_url or "").strip().rstrip("/")
+    if wp_url and not re.match(r"^https://[^/\s]+", wp_url):
+        return "WordPress-adressen skal starte med https://"
+    conn = _global_db()
+    try:
+        # Et tomt kodeord-felt beholder det gemte, saa det aldrig skal vises igen i formularen.
+        conn.execute("UPDATE projects SET wp_url=?, wp_user=?, wp_app_password=COALESCE(NULLIF(?, ''), wp_app_password) WHERE id=?",
+                     (wp_url, (wp_user or "").strip(), (wp_app_password or "").strip(), int(pid)))
+        conn.commit()
+    finally:
+        conn.close()
+    return ""
+
+
+def project_delete(pid: int) -> str:
+    """Fjerner projektet fra listen. Databasen omdoebes (slettes ikke), saa intet data gaar tabt."""
+    p = load_project(pid)
+    if not p:
+        return "hovedprojektet kan ikke slettes"
+    conn = _global_db()
+    try:
+        conn.execute("DELETE FROM projects WHERE id=?", (int(pid),))
+        conn.commit()
+    finally:
+        conn.close()
+    path = os.path.join(PROJECTS_DIR, f"p{int(pid)}.db")
+    if os.path.exists(path):
+        os.replace(path, path + "." + datetime.now().strftime("%Y%m%d-%H%M%S") + ".slettet")
+    return ""
+
+
+def projects_for_jobs() -> list:
+    return [None] + project_rows()
+
+
+def for_each_project(fn):
+    """Planlagte site-jobs koerer én gang pr. projekt i projektets kontekst."""
+    if inspect.iscoroutinefunction(fn):
+        async def run_async():
+            for p in projects_for_jobs():
+                with use_project(p):
+                    try:
+                        await fn()
+                    except Exception as e:
+                        print(f"[cc] job {getattr(fn, '__name__', '?')} fejlede i projekt "
+                              f"{(p or {}).get('name', 'hoved')}: {e!r}", flush=True)
+        run_async.__name__ = getattr(fn, "__name__", "job")
+        return run_async
+
+    def run_sync():
+        for p in projects_for_jobs():
+            with use_project(p):
+                try:
+                    fn()
+                except Exception as e:
+                    print(f"[cc] job {getattr(fn, '__name__', '?')} fejlede i projekt "
+                          f"{(p or {}).get('name', 'hoved')}: {e!r}", flush=True)
+    run_sync.__name__ = getattr(fn, "__name__", "job")
+    return run_sync
+
+
+_safe(sync_project_dbs)
 
 
 def create_indexes():
@@ -662,14 +1004,17 @@ def cleanup_old_data():
     now = datetime.now()
 
     def cutoff(days):
+        # 0 = gem for altid: en dato foer alle maalinger, saa DELETE ikke rammer noget.
+        if not days:
+            return "0000"
         return (now - timedelta(days=days)).isoformat(timespec="seconds")
 
     with get_db() as db:
-        db.execute("DELETE FROM check_history WHERE checked_at < ?", (cutoff(90),))
-        db.execute("DELETE FROM alarms WHERE resolved=1 AND created_at < ?", (cutoff(30),))
-        db.execute("DELETE FROM health_history WHERE checked_at < ?", (cutoff(180),))
-        db.execute("DELETE FROM keyword_ideas WHERE created_at < ?", (cutoff(180),))
-        db.execute("DELETE FROM api_audit WHERE created_at < ?", (cutoff(90),))
+        db.execute("DELETE FROM check_history WHERE checked_at < ?", (cutoff(KEEP_DAYS["check_history"]),))
+        db.execute("DELETE FROM alarms WHERE resolved=1 AND created_at < ?", (cutoff(KEEP_DAYS["alarms"]),))
+        db.execute("DELETE FROM health_history WHERE checked_at < ?", (cutoff(KEEP_DAYS["health_history"]),))
+        db.execute("DELETE FROM keyword_ideas WHERE created_at < ?", (cutoff(KEEP_DAYS["keyword_ideas"]),))
+        db.execute("DELETE FROM api_audit WHERE created_at < ?", (cutoff(KEEP_DAYS["api_audit"]),))
         # en noegle der blev vist men aldrig laest (fx lukket fane) skal ikke blive liggende i klartekst
         row = db.execute("SELECT value FROM settings WHERE key='api_key_once'").fetchone()
         if row:
@@ -1403,11 +1748,221 @@ async def auth_middleware(request: Request, call_next):
     if request.method not in ("GET", "HEAD", "OPTIONS") and not _same_origin(request):
         return JSONResponse({"error": "cross-site forespoergsel afvist"}, status_code=403)
     if request.state.user:
+        # v7.35.0: det valgte projekt gaelder resten af forespoergslen (ogsaa arbejde i executor).
+        _PROJECT.set(load_project(request.cookies.get(PROJECT_COOKIE)))
         return await call_next(request)
     if path.startswith("/api/"):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return RedirectResponse("/setup" if user_count() == 0 else "/login", status_code=303)
 
+
+
+def _projects_redirect(ok: bool, msg: str) -> RedirectResponse:
+    return RedirectResponse("/?tab=moduler&proj=" + ("ok" if ok else "fejl") + "&proj_msg="
+                            + urllib.parse.quote(msg[:180]) + "#projekter", status_code=303)
+
+
+@app.post("/projects/switch")
+async def projects_switch(request: Request, pid: str = Form("1")):
+    p = load_project(pid)
+    resp = RedirectResponse("/", status_code=303)
+    resp.set_cookie(PROJECT_COOKIE, str(p["id"]) if p else "1", max_age=365 * 86400, httponly=True,
+                    samesite="lax", secure=request.url.scheme == "https")
+    return resp
+
+
+@app.post("/projects/add")
+async def projects_add(name: str = Form(""), domain: str = Form(""), wp_url: str = Form(""), wp_user: str = Form(""),
+                       wp_app_password: str = Form(""), media_style: str = Form("")):
+    pid, err = project_create(name, domain, wp_url, wp_user, wp_app_password, media_style)
+    if err:
+        return _projects_redirect(False, err)
+    with get_db() as db:
+        add_alarm(db, "projekter", f"Nyt projekt oprettet: {name.strip()} ({_clean_domain(domain)})", "info")
+    return _projects_redirect(True, f"Projektet '{name.strip()}' er oprettet - vælg det øverst for at arbejde i det")
+
+
+@app.post("/projects/wp")
+async def projects_wp(id: str = Form(""), wp_url: str = Form(""), wp_user: str = Form(""), wp_app_password: str = Form("")):
+    err = project_update_wp(int(id) if str(id).isdigit() else 0, wp_url, wp_user, wp_app_password)
+    return _projects_redirect(not err, err or "WordPress-forbindelsen er gemt")
+
+
+@app.post("/projects/delete")
+async def projects_delete(id: str = Form(""), confirm: str = Form("")):
+    if confirm.strip().upper() != "SLET":
+        return _projects_redirect(False, "skriv SLET for at fjerne projektet")
+    err = project_delete(int(id) if str(id).isdigit() else 0)
+    return _projects_redirect(not err, err or "Projektet er fjernet fra listen; databasen er gemt som .slettet-fil")
+
+
+
+# ---------- Forbindelser i browseren (v7.36.0) ----------
+# Noeglerne kan saettes under Moduler uden SSH. De gemmes i center.db (settings.ui_keys, klartekst som
+# connector-noeglerne og projekternes WordPress-kodeord), vinder over .env, og vises aldrig igen i siden.
+UI_KEYS = {
+    "WP_URL": "WordPress-adresse", "WP_USER": "WordPress-bruger", "WP_APP_PASSWORD": "WordPress-applikationsadgangskode",
+    "OPENROUTER_API_KEY": "OpenRouter-nøgle", "SERPAPI_KEY": "SerpAPI-nøgle", "GITHUB_TOKEN": "GitHub-token (opdatering)",
+}
+UI_SECRET_KEYS = {"WP_APP_PASSWORD", "OPENROUTER_API_KEY", "SERPAPI_KEY", "GITHUB_TOKEN"}
+_ENV_KEYS = {k: globals().get(k, "") for k in UI_KEYS}
+
+
+def ui_keys_stored() -> dict:
+    conn = _global_db()
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key='ui_keys'").fetchone()
+        data = jsonlib.loads(row["value"]) if row and row["value"] else {}
+    except (sqlite3.Error, ValueError):
+        data = {}
+    finally:
+        conn.close()
+    return {k: str(v) for k, v in data.items() if k in UI_KEYS and v}
+
+
+def ui_keys_apply() -> int:
+    """Laegger de gemte vaerdier ind i modul-globalerne (kaldes ved opstart og efter gem)."""
+    stored = ui_keys_stored()
+    for k in UI_KEYS:
+        globals()[k] = stored.get(k) or _ENV_KEYS.get(k, "")
+    return len(stored)
+
+
+def ui_keys_save(values: dict, clear: tuple = ()) -> dict:
+    """Gemmer udfyldte felter. Et tomt hemmeligt felt beholder den gemte vaerdi; `clear` sletter."""
+    stored = ui_keys_stored()
+    for k, v in values.items():
+        if k not in UI_KEYS:
+            continue
+        v = (v or "").strip()
+        if k == "WP_URL":
+            v = v.rstrip("/")
+        if v:
+            stored[k] = v
+        elif k not in UI_SECRET_KEYS:
+            stored.pop(k, None)
+    for k in clear:
+        stored.pop(k, None)
+    conn = _global_db()
+    try:
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ui_keys', ?)", (jsonlib.dumps(stored),))
+        conn.commit()
+    finally:
+        conn.close()
+    ui_keys_apply()
+    return stored
+
+
+def _mask(v: str) -> str:
+    return ("…" + v[-4:]) if v and len(v) > 8 else ("sat" if v else "")
+
+
+def connection_tests() -> dict:
+    """Ét kald pr. forbindelse, der viser om den virker - uden at noeglen kommer med i svaret."""
+    out = {}
+    if WP_URL and WP_USER and WP_APP_PASSWORD:
+        try:
+            r = HTTP.get(f"{WP_URL.rstrip('/')}/wp-json/wp/v2/users/me", params={"context": "edit"},
+                         auth=(WP_USER, WP_APP_PASSWORD), timeout=15)
+            d = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+            roles = d.get("roles") or []
+            out["wordpress"] = ((True, f"forbundet som {d.get('name') or WP_USER} ({', '.join(roles) or 'ukendt rolle'})"
+                                 + ("" if "administrator" in roles else " - autopilot-broen kræver administrator"))
+                                if r.status_code == 200 else (False, f"WordPress svarede {r.status_code}: {str(d.get('message') or '')[:120]}"))
+        except (requests.RequestException, ValueError) as e:
+            out["wordpress"] = (False, f"WordPress svarede ikke: {str(e)[:120]}")
+    if OPENROUTER_API_KEY:
+        try:
+            r = HTTP.get(f"{OPENROUTER_BASE_URL}/key", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"}, timeout=15)
+            d = (r.json() or {}).get("data") or {}
+            if r.status_code == 200:
+                left = d.get("limit_remaining")
+                out["openrouter"] = (True, "nøglen virker" + (f", ${float(left):.2f} tilbage på nøglens grænse" if left is not None else "")
+                                     + (f", brugt ${float(d.get('usage') or 0):.2f}" if d.get("usage") is not None else ""))
+            else:
+                out["openrouter"] = (False, f"OpenRouter afviste nøglen ({r.status_code})")
+        except (requests.RequestException, ValueError) as e:
+            out["openrouter"] = (False, f"OpenRouter svarede ikke: {str(e)[:120]}")
+    if SERPAPI_KEY:
+        try:
+            r = HTTP.get("https://serpapi.com/account.json", params={"api_key": SERPAPI_KEY}, timeout=15)
+            d = r.json() or {}
+            out["serpapi"] = ((True, f"{d.get('plan_name') or 'konto'}: {d.get('total_searches_left', '?')} søgninger tilbage denne måned")
+                              if r.status_code == 200 and not d.get("error") else (False, f"SerpAPI: {str(d.get('error') or r.status_code)[:120]}"))
+        except (requests.RequestException, ValueError) as e:
+            out["serpapi"] = (False, f"SerpAPI svarede ikke: {str(e)[:120]}")
+    if GITHUB_TOKEN:
+        try:
+            r = HTTP.get(f"https://api.github.com/repos/{GITHUB_REPO}", headers={"Authorization": f"Bearer {GITHUB_TOKEN}",
+                         "Accept": "application/vnd.github+json"}, timeout=15)
+            d = r.json() or {}
+            out["github"] = ((True, f"adgang til {GITHUB_REPO} ({'privat' if d.get('private') else 'offentligt'} repo)")
+                             if r.status_code == 200 else (False, f"GitHub svarede {r.status_code} - tokenet skal kunne læse {GITHUB_REPO}"))
+        except (requests.RequestException, ValueError) as e:
+            out["github"] = (False, f"GitHub svarede ikke: {str(e)[:120]}")
+    conn = _global_db()
+    try:
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ui_keys_test', ?)",
+                     (jsonlib.dumps({"at": now_iso(), "results": {k: list(v) for k, v in out.items()}}),))
+        conn.commit()
+    finally:
+        conn.close()
+    return out
+
+
+def connections_view() -> dict:
+    stored = ui_keys_stored()
+    conn = _global_db()
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key='ui_keys_test'").fetchone()
+        last = jsonlib.loads(row["value"]) if row and row["value"] else {}
+    except (sqlite3.Error, ValueError):
+        last = {}
+    finally:
+        conn.close()
+    wp = WP_URL or (f"https://{TRACK_DOMAIN}" if TRACK_DOMAIN else "")
+    return {
+        "fields": [{"key": k, "label": lbl, "secret": k in UI_SECRET_KEYS,
+                    "value": "" if k in UI_SECRET_KEYS else (globals().get(k) or ""),
+                    "hint": _mask(globals().get(k) or "") if k in UI_SECRET_KEYS else "",
+                    "source": "gemt her" if k in stored else ("fra .env" if _ENV_KEYS.get(k) else "mangler")}
+                   for k, lbl in UI_KEYS.items()],
+        "authorize_url": (f"{wp.rstrip('/')}/wp-admin/authorize-application.php?app_name=Command%20Center" if wp else ""),
+        "wp_default": wp, "tested_at": last.get("at", ""), "results": last.get("results", {}),
+    }
+
+
+@app.post("/connections/save")
+async def connections_save(request: Request):
+    form = await request.form()
+    clear = tuple(k for k in UI_KEYS if form.get("clear_" + k))
+    # Kun felter der faktisk er sendt, saa en delvis formular ikke rydder resten.
+    ui_keys_save({k: form.get(k, "") for k in UI_KEYS if k in form}, clear)
+    loop = asyncio.get_running_loop()
+    res = await loop.run_in_executor(executor, connection_tests)
+    bad = [k for k, (ok, _m) in res.items() if not ok]
+    msg = ("Gemt og testet - alt virker" if res and not bad else
+           "Gemt" + (f" - tjek: {', '.join(bad)}" if bad else " (intet at teste endnu)"))
+    with get_db() as db:
+        add_alarm(db, "forbindelser", "Forbindelser ændret i browseren (" + ", ".join(sorted(set(k for k in UI_KEYS if form.get(k)) | set(clear))) + ")", "info")
+    return RedirectResponse("/?tab=moduler&conn=" + ("ok" if not bad else "fejl") + "&conn_msg=" + urllib.parse.quote(msg) + "#forbindelser", status_code=303)
+
+
+@app.post("/connections/test")
+async def connections_test():
+    loop = asyncio.get_running_loop()
+    res = await loop.run_in_executor(executor, connection_tests)
+    bad = [k for k, (ok, _m) in res.items() if not ok]
+    msg = "Alt virker" if res and not bad else ("Intet at teste - indsæt nøgler først" if not res else "Tjek: " + ", ".join(bad))
+    return RedirectResponse("/?tab=moduler&conn=" + ("ok" if res and not bad else "fejl") + "&conn_msg=" + urllib.parse.quote(msg) + "#forbindelser", status_code=303)
+
+
+_safe(ui_keys_apply)
+
+def project_view() -> list:
+    """Projektlisten til dashboardet - aldrig med adgangskoder."""
+    return [{"id": p["id"], "name": p["name"], "domain": p.get("domain") or "", "wp_url": p.get("wp_url") or (WP_URL if p["id"] == 1 else ""),
+             "wp_user": p.get("wp_user") or "", "wp_set": p.get("wp_set"), "main": p["id"] == 1} for p in all_projects()]
 
 @app.get("/setup", response_class=HTMLResponse)
 async def setup_page(request: Request):
@@ -1813,7 +2368,8 @@ def add_alarm(db, type_: str, message: str, severity: str = "info"):
     # Ingen netvaerkskald her: alarmer koeres i alert_outbox og leveres af et job med backoff,
     # saa en langsom SMTP/HTTP-modtager eller ntfy ikke blokerer requesten (v7.12).
     try:
-        enqueue_alert(db, type_, message, severity, alarm_id=cur.lastrowid)
+        p = current_project()
+        enqueue_alert(db, type_, (f"[{p['name']}] " if p else "") + message, severity, alarm_id=cur.lastrowid)
     except Exception as e:
         print("[cc] kunne ikke koere alarm:", repr(e), flush=True)
 
@@ -2422,6 +2978,9 @@ TASK_ESTIMATES = {
     "/connectors/add": {"label": "Forbinder til MCP-server", "seconds": 8},
     "/connectors/refresh": {"label": "Henter vaerktoejer", "seconds": 8},
     "/growth/optimize": {"label": "Indholdsoptimering", "seconds": 12},
+    "/media/generate": {"label": "Laver og kvalitetssikrer billede", "seconds": 60},
+    "/connections/save": {"label": "Gemmer og tester forbindelser", "seconds": 10},
+    "/connections/test": {"label": "Tester forbindelser", "seconds": 10},
     "/growth/compare": {"label": "Konkurrent-sammenligning", "seconds": 20},
     "/growth/brief": {"label": "Indholds-brief", "seconds": 15},
     "/seo/rewrite": {"label": "AI titel/meta-forslag", "seconds": 25},
@@ -2595,6 +3154,10 @@ def site_crawl_sync(start_url: str, max_pages: int = 30):
                         max(sitemap_count - pages_saved, 0) if sitemap_ok else 0, run_id))
             db.execute("INSERT INTO health_history (host, avg_score, pages, run_id, checked_at) VALUES (?,?,?,?,?)",
                        (host, avg, pages_saved, run_id, now_iso()))
+            # Crawlet ryddes ved naeste koersel (forespoergslerne regner med ét run); historikken bliver.
+            db.execute("INSERT INTO page_history (run_id, url, http_status, title, meta_len, words, score, issues, crawled_at) "
+                       "SELECT run_id, url, http_status, title, meta_len, words, score, issues, crawled_at FROM seopages WHERE run_id=?",
+                       (run_id,))
             if sitemap_broken:
                 add_alarm(db, "sitemap", f"{len(sitemap_broken)} sitemap-URLs fejler (foerste 50 tjekket)", "advarsel")
         CRAWL_STATE.update({"running": False, "avg": avg, "finished_at": now_iso()})
@@ -2917,7 +3480,7 @@ async def create_article(keyword: str = Form(...)):
 
 @app.post("/articles/push")
 async def push_article(id: int = Form(...)):
-    if not (WP_URL and WP_USER and WP_APP_PASSWORD):
+    if not (_wp_url() and _wp_user() and _wp_pass()):
         with get_db() as db:
             add_alarm(db, "wordpress", "WordPress-push fejlede: WP_URL/WP_USER/WP_APP_PASSWORD er ikke sat i .env", "advarsel")
         return RedirectResponse("/", status_code=303)
@@ -2930,8 +3493,14 @@ async def push_article(id: int = Form(...)):
         with get_db() as db:
             add_alarm(db, "kvalitet", f"Artikel #{id} sendt manuelt trods kvalitetsgate: " + "; ".join(gate["errors"]), "info")
     try:
-        wp_id = wp_push_draft(art["title"], art["content"])
-        link = f"{WP_URL.rstrip('/')}/wp-admin/post.php?post={wp_id}&action=edit"
+        featured = None
+        if art["media_id"]:
+            try:
+                featured = wp_upload_media(int(art["media_id"]))
+            except (ValueError, requests.RequestException):
+                featured = None
+        wp_id = wp_push_draft(art["title"], art["content"], featured)
+        link = f"{_wp_url().rstrip('/')}/wp-admin/post.php?post={wp_id}&action=edit"
         with get_db() as db:
             db.execute("UPDATE articles SET status='Sendt til WP (kladde)', wp_link=? WHERE id=?", (link, id))
     except Exception as e:
@@ -2971,7 +3540,7 @@ def quality_check(content: str, keyword: str) -> dict:
     internal = 0
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        if href.startswith("/") or (TRACK_DOMAIN and TRACK_DOMAIN in href):
+        if href.startswith("/") or (_track_domain() and _track_domain() in href):
             internal += 1
     errors, warnings = [], []
     if words < min_words:
@@ -2987,11 +3556,14 @@ def quality_check(content: str, keyword: str) -> dict:
 
 
 # ---------- Growth Pack (v7.7): autopilot + backlink-prospector ----------
-def wp_push_draft(title: str, content: str):
+def wp_push_draft(title: str, content: str, featured_media: int | None = None):
+    payload = {"title": title, "content": content, "status": "draft"}
+    if featured_media:
+        payload["featured_media"] = int(featured_media)
     resp = HTTP.post(
-        f"{WP_URL.rstrip('/')}/wp-json/wp/v2/posts",
-        auth=(WP_USER, WP_APP_PASSWORD),
-        json={"title": title, "content": content, "status": "draft"},
+        f"{_wp_url().rstrip('/')}/wp-json/wp/v2/posts",
+        auth=(_wp_user(), _wp_pass()),
+        json=payload,
         timeout=30,
     )
     resp.raise_for_status()
@@ -3066,16 +3638,16 @@ def autopilot_sync():
         )
         art_id = cur.lastrowid
         db.execute("DELETE FROM keyword_ideas WHERE id=?", (row["id"],))
-    gate = quality_check(content, idea)
+    gate = review_article(art_id)      # regler + AI-redaktoer (v7.34.0)
     if not gate["passed"]:
         with get_db() as db:
-            db.execute("UPDATE articles SET status=? WHERE id=?", ("Stoppet af kvalitetsgate: " + "; ".join(gate["errors"]), art_id))
-            add_alarm(db, "kvalitet", f"Autopilot-artikel #{art_id} ('{idea}') blev ikke sendt til WP: " + "; ".join(gate["errors"]), "advarsel")
+            db.execute("UPDATE articles SET status=? WHERE id=?", ("Stoppet af kvalitetsgate: " + "; ".join(gate["reasons"][:3]), art_id))
+            add_alarm(db, "kvalitet", f"Autopilot-artikel #{art_id} ('{idea}') blev ikke sendt til WP: " + "; ".join(gate["reasons"][:3]), "advarsel")
         return f"quality-blocked:{art_id}"
-    if WP_URL and WP_USER and WP_APP_PASSWORD and module_on("wp_push"):
+    if _wp_url() and _wp_user() and _wp_pass() and module_on("wp_push"):
         try:
             wp_id = wp_push_draft(title, content)
-            link = f"{WP_URL.rstrip('/')}/wp-admin/post.php?post={wp_id}&action=edit"
+            link = f"{_wp_url().rstrip('/')}/wp-admin/post.php?post={wp_id}&action=edit"
             with get_db() as db:
                 db.execute("UPDATE articles SET status='Sendt til WP (kladde)', wp_link=? WHERE id=?", (link, art_id))
         except Exception as e:
@@ -3128,7 +3700,7 @@ def prospect_sync(keyword: str):
     results = (r.json().get("organic_results") or [])[:10]
     for res in results:
         url = res.get("link") or ""
-        if not url or urlparse(url).netloc in (TRACK_DOMAIN, "www." + TRACK_DOMAIN):
+        if not url or urlparse(url).netloc in (_track_domain(), "www." + _track_domain()):
             continue
         site = urlparse(url).netloc
         stype = classify_site(url)
@@ -3144,14 +3716,14 @@ def prospect_sync(keyword: str):
                 prompt = (
                     f"Write a short (max 120 words) friendly outreach email in English to {email} "
                     f"who runs {site}. Suggest a steampunk cosplay guide or resource relevant to "
-                    f"their page about '{keyword}' as a reason to add a link to our site {TRACK_DOMAIN}. "
+                    f"their page about '{keyword}' as a reason to add a link to our site {_track_domain()}. "
                     f"Output only the email body."
                 )
                 draft = ai_chat(prompt, max_tokens=3000, timeout=60)
             except Exception:
                 draft = None
         if not draft:
-            draft = (f"Hej! Vi har lavet en guide om '{keyword}' paa {TRACK_DOMAIN}, som dine laesere "
+            draft = (f"Hej! Vi har lavet en guide om '{keyword}' paa {_track_domain()}, som dine laesere "
                      f"maaske kan bruge. Maa vi linke den ind? (Skabelon-draft - saet OPENROUTER_API_KEY for AI-drafts)")
         with get_db() as db:
             db.execute(
@@ -3289,7 +3861,7 @@ SGAP_ALIASES = {"x": "twitter", "fb": "facebook", "ig": "instagram", "gmb": "goo
 
 
 def sgap_ready() -> bool:
-    return bool(WP_URL and WP_USER and WP_APP_PASSWORD) and module_on("autopilot")
+    return bool(_wp_url() and _wp_user() and _wp_pass()) and module_on("autopilot")
 
 
 def sgap_headers() -> dict:
@@ -3306,8 +3878,8 @@ def sgap_api(method: str, path: str, **kwargs):
     kwargs["headers"] = {**sgap_headers(), **(kwargs.get("headers") or {})}
     resp = HTTP.request(
         method,
-        f"{WP_URL.rstrip('/')}/wp-json/sgap/v1{path}",
-        auth=(WP_USER, WP_APP_PASSWORD),
+        f"{_wp_url().rstrip('/')}/wp-json/sgap/v1{path}",
+        auth=(_wp_user(), _wp_pass()),
         timeout=20,
         **kwargs,
     )
@@ -3674,7 +4246,7 @@ def sgap_store(snap: dict, previous: dict) -> None:
 
 def wp_cron_ping() -> int:
     """Kald wp-cron.php, saa pluginnets job koerer til tiden selvom sitet har faa besoeg. Returnerer HTTP-status."""
-    resp = HTTP.get(f"{WP_URL.rstrip('/')}/wp-cron.php", params={"doing_wp_cron": f"{time.time():.4f}"},
+    resp = HTTP.get(f"{_wp_url().rstrip('/')}/wp-cron.php", params={"doing_wp_cron": f"{time.time():.4f}"},
                     headers={"X-Command-Center": APP_VERSION}, timeout=15)
     return resp.status_code
 
@@ -3806,7 +4378,7 @@ def check_keyword_sync(kw_row):
         url = None
         for i, item in enumerate(data.get("organic_results", []), start=1):
             link = item.get("link", "")
-            if TRACK_DOMAIN in link:
+            if _track_domain() in link:
                 position = i
                 url = link
                 break
@@ -3831,6 +4403,8 @@ def check_all_keywords_sync():
                     "UPDATE keywords SET position=?, target_url=?, checked_at=? WHERE id=?",
                     (res["position"], res["url"], now_iso(), kw["id"]),
                 )
+                db.execute("INSERT INTO keyword_history (keyword, position, url, checked_at) VALUES (?,?,?,?)",
+                           (kw["keyword"], res["position"], res["url"], now_iso()))
     with get_db() as db:
         kws2 = db.execute("SELECT * FROM keywords").fetchall()
         score = 0.0
@@ -3912,15 +4486,18 @@ def backup_db_sync(tag: str = "daglig"):
         bdir = os.path.join(BASE_DIR, "backups")
         os.makedirs(bdir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d-%H%M")
+        p = current_project()
+        if p:
+            tag = f"p{int(p['id'])}-{tag}"
         dest = os.path.join(bdir, "cc-" + tag + "-" + ts + ".db")
-        src = sqlite3.connect(DB_PATH)
+        src = sqlite3.connect(current_db_path())
         dst = sqlite3.connect(dest)
         with dst:
             src.backup(dst)
         dst.close()
         src.close()
         backups = sorted(f for f in os.listdir(bdir) if f.startswith("cc-" + tag + "-") and f.endswith(".db"))
-        for old in backups[:-14]:
+        for old in backups[:-BACKUP_KEEP]:
             try:
                 os.remove(os.path.join(bdir, old))
             except OSError:
@@ -4022,6 +4599,8 @@ def _check_backup_file(path: str):
 
 def restore_backup_sync(name: str):
     """Gendanner en backup. Tager altid en pre-restore-kopi først; fejler den, sker der intet."""
+    if current_project():
+        return False, "gendannelse virker kun i hovedprojektet - skift projekt øverst og prøv igen"
     p = _backup_path(name)
     if not p:
         return False, "ugyldigt backupnavn - der blev ikke gendannet noget"
@@ -4402,23 +4981,27 @@ def openrouter_complete(messages: list, tools: list | None = None, max_tokens: i
     200 med et ``error``-objekt (fx naar udbyderen bag modellen fejler), saa svaret tjekkes, foer
     ``choices`` laeses - ellers ender en KeyError som "AI-fejl: 'choices'".
     """
-    body = {"model": model or AI_MODEL, "messages": messages, "max_tokens": max_tokens}
+    asked = model or AI_MODEL
+    body = {"model": asked, "messages": messages, "max_tokens": max_tokens}
     if tools:
         body["tools"] = tools
-    resp = HTTP.post(
-        f"{OPENROUTER_BASE_URL}/chat/completions",
-        headers=openrouter_headers(),
-        json=body,
-        timeout=timeout,
-    )
-    try:
-        data = resp.json()
-    except ValueError:
-        data = {}
-    err = data.get("error") if isinstance(data, dict) else None
-    if err:
-        msg = err.get("message") if isinstance(err, dict) else str(err)
-        raise AIError(f"OpenRouter ({resp.status_code}): {str(msg)[:200]}")
+    resp, data, err = _openrouter_post(body, timeout)
+    if err and ai_wants_free_retry(asked, resp.status_code, err):
+        paid = err
+        free_body = dict(body, model=AI_FREE_MODELS[0], models=list(AI_FREE_MODELS))
+        resp, data, err = _openrouter_post(free_body, timeout)
+        if err:
+            raise AIError(f"OpenRouter (402): {paid[:150]} - de gratis modeller fejlede ogsaa: {err[:150]}")
+        used = str(data.get("model") or AI_FREE_MODELS[0])
+        AI_LAST_FALLBACK.update(model=used, at=now_iso())
+        try:
+            with get_db() as db:
+                add_alarm(db, "ai", f"Ingen OpenRouter-kredit til {asked} - svaret kom fra den gratis model {used}. "
+                          "Fyld kredit paa for at faa den betalte model tilbage.", "info")
+        except Exception:
+            pass
+    elif err:
+        raise AIError(f"OpenRouter ({resp.status_code}): {err[:200]}")
     resp.raise_for_status()
     try:
         message = data["choices"][0]["message"]
@@ -4429,6 +5012,32 @@ def openrouter_complete(messages: list, tools: list | None = None, max_tokens: i
     return message
 
 
+AI_LAST_FALLBACK: dict = {}
+_AI_CREDIT_RE = re.compile(r"more credits|insufficient credits|can only afford|out of credits", re.I)
+
+
+def _openrouter_post(body: dict, timeout: int):
+    """Ét POST til /chat/completions -> (svar, json, fejltekst eller "")."""
+    resp = HTTP.post(f"{OPENROUTER_BASE_URL}/chat/completions", headers=openrouter_headers(),
+                     json=body, timeout=timeout)
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {}
+    err = data.get("error") if isinstance(data, dict) else None
+    if err:
+        msg = err.get("message") if isinstance(err, dict) else str(err)
+        return resp, data, str(msg) or f"HTTP {resp.status_code}"
+    return resp, data if isinstance(data, dict) else {}, ""
+
+
+def ai_wants_free_retry(model: str, status: int, message: str) -> bool:
+    """Kun en kreditfejl paa en betalt model skifter til de gratis modeller."""
+    if not AI_FREE_MODELS or model.endswith(":free") or model in AI_FREE_MODELS:
+        return False
+    return status == 402 or bool(_AI_CREDIT_RE.search(message or ""))
+
+
 def ai_chat(prompt: str, max_tokens: int = 1500, timeout: int = 120) -> str:
     """Ét spørgsmål, ét tekstsvar - bruges af artikler, outreach, link-forslag og AI-synlighed."""
     message = openrouter_complete([{"role": "user", "content": prompt}], max_tokens=max_tokens, timeout=timeout)
@@ -4436,6 +5045,423 @@ def ai_chat(prompt: str, max_tokens: int = 1500, timeout: int = 120) -> str:
     if not content:
         raise AIError("OpenRouter svarede med en tom besked")
     return content
+
+
+# ============================================================================
+# Medier + kvalitetssikring (v7.34.0)
+# Billeder laves via OpenRouter (betalt, med maanedsloft) og bedoemmes af gratis vision-modeller.
+# Tekster faar samme AI-redaktoer oven paa quality_check(). Intet godkendes, hvis reglerne fejler,
+# scoren er under QA_MIN_SCORE, eller ingen bedoemmer svarede: saa holdes det tilbage ("venter").
+# ============================================================================
+IMAGE_MODEL = os.environ.get("IMAGE_MODEL", "google/gemini-3.1-flash-lite-image")
+IMAGE_MONTHLY_LIMIT_USD = float(os.environ.get("IMAGE_MONTHLY_LIMIT_USD", "30") or 30)
+IMAGE_RESERVE_USD = 0.10          # regnes som pris foer svaret, saa loftet aldrig overskrides
+# Maalt fra steamgears.eu 12/11: nano-omni 3,5 s (9/10), super-vl 7 s, dots 12,5 s; gemma ofte 429;
+# inkling-2-small er 403 i regionen. OpenRouter afviser mere end 3 modeller i "models" (maalt live).
+OPENROUTER_MAX_MODELS = 3
+VISION_MODELS = [m.strip() for m in os.environ.get(
+    "VISION_MODELS", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free,nvidia/nemotron-3.5-super-vl:free,"
+    "dots-studio/dots-3-note-preview:free").split(",") if m.strip()][:OPENROUTER_MAX_MODELS]
+QA_MIN_SCORE = int(os.environ.get("QA_MIN_SCORE", "7") or 7)
+MEDIA_DIR = os.path.join(BASE_DIR, "data", "media")
+# formaal: (min bredde, min hoejde, billedformat til modellen)
+MEDIA_PURPOSES = {
+    "artikel": (1200, 630, "16:9"),
+    "social": (1000, 1000, "1:1"),
+    "pinterest": (800, 1200, "2:3"),
+}
+# Projekter uden egen billedstil faar en neutral stil i stedet for steamgears' steampunk-stil.
+MEDIA_STYLE_GENERIC = ("Photographic product-style image, natural light, sharp focus, clean composition, no text, "
+                       "no letters, no logos, no watermark, no people's faces in close-up.")
+MEDIA_STYLE = ("Photographic product-style image for steamgears.eu, a steampunk shop: warm brass, copper, leather "
+               "and dark wood, Victorian workshop light, sharp focus, no text, no letters, no logos, no watermark, "
+               "no people's faces in close-up.")
+
+
+def _ratio(spec: str) -> float:
+    a, b = spec.split(":")
+    return int(a) / int(b)
+
+
+def media_month_spend() -> float:
+    start = datetime.now().strftime("%Y-%m-01")
+    with get_db() as db:
+        row = db.execute("SELECT COALESCE(SUM(cost), 0) AS s FROM media WHERE created_at >= ?", (start,)).fetchone()
+    return round(float(row["s"] or 0), 4)
+
+
+def image_dhash(img) -> int:
+    """64-bit difference-hash: ens billeder (ogsaa skaleret/komprimeret) faar naesten samme tal."""
+    small = img.convert("L").resize((9, 8))
+    px = list(small.getdata())
+    bits = 0
+    for row in range(8):
+        for col in range(8):
+            bits = (bits << 1) | (1 if px[row * 9 + col] > px[row * 9 + col + 1] else 0)
+    return bits
+
+
+def image_rules(data: bytes, purpose: str, exclude_id: int | None = None) -> dict:
+    """Faste regler foer AI'en ser billedet: kan aabnes, stoerrelse, format, ikke tomt, ikke en dublet."""
+    from PIL import Image, ImageStat
+    import io
+    errors, info = [], {}
+    try:
+        img = Image.open(io.BytesIO(data))
+        img.load()
+    except Exception as e:
+        return {"passed": False, "errors": [f"billedet kan ikke aabnes ({str(e)[:60]})"], "info": {}}
+    w, h = img.size
+    info.update(width=w, height=h, format=img.format or "", bytes=len(data))
+    min_w, min_h, spec = MEDIA_PURPOSES.get(purpose, MEDIA_PURPOSES["artikel"])
+    if w < min_w or h < min_h:
+        errors.append(f"for lille: {w}x{h}, kræver mindst {min_w}x{min_h} til {purpose}")
+    want = _ratio(spec)
+    if abs((w / h) - want) / want > 0.08:
+        errors.append(f"forkert format: {w}x{h} er ikke {spec}")
+    stat = ImageStat.Stat(img.convert("L"))
+    mean, std = stat.mean[0], stat.stddev[0]
+    info.update(mean=round(mean, 1), std=round(std, 1))
+    if std < 15:
+        errors.append(f"næsten ensfarvet (kontrast {std:.0f}) - tomt eller udvasket billede")
+    if mean < 15 or mean > 240:
+        errors.append(f"for mørkt eller lyst (gennemsnit {mean:.0f} af 255)")
+    dh = image_dhash(img)
+    info["dhash"] = format(dh, "016x")
+    with get_db() as db:
+        rows = db.execute("SELECT id, dhash FROM media WHERE status='godkendt' AND dhash IS NOT NULL AND id != ?",
+                          (exclude_id or 0,)).fetchall()
+    for r in rows:
+        try:
+            if bin(int(r["dhash"], 16) ^ dh).count("1") <= 5:
+                errors.append(f"næsten magen til billede #{r['id']}")
+                break
+        except ValueError:
+            continue
+    return {"passed": not errors, "errors": errors, "info": info}
+
+
+def _review_json(text: str) -> dict:
+    """Finder JSON-objektet i et modelsvar (ogsaa i ```-blokke)."""
+    text = (text or "").strip()
+    m = re.search(r"\{.*\}", text, re.S)
+    if not m:
+        raise ValueError("intet JSON i svaret")
+    data = jsonlib.loads(m.group(0))
+    score = data.get("score")
+    if not isinstance(score, (int, float)) or not 0 <= score <= 10:
+        raise ValueError("score mangler eller er uden for 0-10")
+    probs = data.get("problems") or []
+    return {"score": round(float(score), 1), "problems": [str(p)[:200] for p in probs][:8],
+            "alt_text": str(data.get("alt_text") or "")[:200]}
+
+
+def _review_call(models: list, content, max_tokens: int = 4000) -> dict:
+    """Ét bedoemmelseskald paa de gratis modeller. Returnerer {"ok", "score", "problems", "alt_text", "model", "error"}."""
+    if not OPENROUTER_API_KEY:
+        return {"ok": False, "error": "OPENROUTER_API_KEY mangler"}
+    if not models:
+        return {"ok": False, "error": "ingen bedømmelsesmodeller sat"}
+    # De gratis modeller raesonnerer foerst: 1 200 tokens gik alle til det (finish_reason=length,
+    # maalt live 12/11), saa loftet er 4 000. Gratis modeller koster intet pr. token.
+    models = list(models)[:OPENROUTER_MAX_MODELS]
+    body = {"model": models[0], "models": models, "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": content}]}
+    try:
+        resp, data, err = _openrouter_post(body, 120)
+        if err:
+            return {"ok": False, "error": f"bedømmeren svarede ikke: {err[:150]}"}
+        msg = (data.get("choices") or [{}])[0].get("message") or {}
+        out = _review_json(msg.get("content") or "")
+        return {"ok": True, "model": str(data.get("model") or models[0]), **out}
+    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError) as e:
+        return {"ok": False, "error": f"bedømmelsen kunne ikke læses: {str(e)[:150]}"}
+
+
+def _review_jpeg(data: bytes) -> bytes:
+    """Bedoemmeren faar en udgave paa hoejst 1024 px som JPEG: et 340 KB-billede fik den gratis model
+    til at give op (504), mens 35 KB blev bedoemt paa 3,5 s (maalt 12/11)."""
+    from PIL import Image
+    import io
+    img = Image.open(io.BytesIO(data)).convert("RGB")
+    img.thumbnail((1024, 1024))
+    out = io.BytesIO()
+    img.save(out, "JPEG", quality=85)
+    return out.getvalue()
+
+
+def review_image(data: bytes, subject: str, purpose: str) -> dict:
+    import base64
+    try:
+        small = _review_jpeg(data)
+    except Exception as e:
+        return {"ok": False, "error": f"billedet kunne ikke forberedes: {str(e)[:80]}"}
+    url = "data:image/jpeg;base64," + base64.b64encode(small).decode()
+    prompt = ("You are a strict art director for steamgears.eu, a steampunk shop. Judge this image for use as a "
+              f"{purpose} image about: \"{subject}\". Score 0-10. Deduct hard for: garbled or fake text/letters, "
+              "logos or watermarks, extra or malformed fingers/limbs, melted or nonsensical objects, wrong subject, "
+              "off-brand style (not steampunk/brass/Victorian), blur, low quality, anything offensive. "
+              "8+ only if you would publish it on a shop's front page. Answer JSON only: "
+              '{"score": <0-10>, "problems": ["..."], "alt_text": "<one sentence describing the image>"}')
+    return _review_call(VISION_MODELS, [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": url}}])
+
+
+def review_text(text: str, kind: str, keyword: str = "", source: str = "") -> dict:
+    """AI-redaktoer for artikler og opslag: faktapaastande uden grundlag, klicheer, gentagelser, sprog."""
+    body = BeautifulSoup(text or "", "html.parser").get_text(" ", strip=True)[:12000]
+    prompt = (f"You are a strict editor for steamgears.eu, a steampunk shop. Review this {kind}"
+              + (f" targeting the search phrase \"{keyword}\"" if keyword else "") + ". Score 0-10. Deduct hard for: "
+              "invented facts, prices, discounts, guarantees or claims not supported"
+              + (" by the source below" if source else "") + "; generic filler and AI cliches "
+              "(\"in today's world\", \"delve\", \"unlock\", \"elevate\"); repetition; broken or mixed language; "
+              "keyword stuffing; anything misleading or offensive. 8+ only if it is ready to publish as is. "
+              'Answer JSON only: {"score": <0-10>, "problems": ["..."]}\n\n'
+              + (f"SOURCE:\n{source[:3000]}\n\n" if source else "") + f"TEXT:\n{body}")
+    return _review_call(AI_FREE_MODELS or VISION_MODELS, prompt)
+
+
+def qa_verdict(rules: dict, review: dict) -> tuple:
+    """(status, grunde). Regler foerst; derefter skal en bedoemmer have svaret med score >= QA_MIN_SCORE."""
+    if not rules.get("passed", True):
+        return "afvist", list(rules.get("errors") or [])
+    if not review.get("ok"):
+        return "venter", [review.get("error") or "ingen bedømmelse"]
+    if review["score"] < QA_MIN_SCORE:
+        return "afvist", [f"score {review['score']}/10 (min. {QA_MIN_SCORE})"] + review.get("problems", [])
+    return "godkendt", review.get("problems", [])
+
+
+def _openrouter_image(prompt: str, aspect: str) -> tuple:
+    """(png-bytes, pris i USD, model). Kaster AIError ved fejl."""
+    import base64
+    body = {"model": IMAGE_MODEL, "messages": [{"role": "user", "content": prompt}],
+            "modalities": ["image", "text"], "image_config": {"aspect_ratio": aspect}, "usage": {"include": True}}
+    resp, data, err = _openrouter_post(body, 180)
+    if err:
+        raise AIError(f"OpenRouter ({resp.status_code}): {err[:200]}")
+    msg = (data.get("choices") or [{}])[0].get("message") or {}
+    imgs = msg.get("images") or []
+    url = ((imgs[0] or {}).get("image_url") or {}).get("url", "") if imgs else ""
+    if not url.startswith("data:image/"):
+        raise AIError("billedmodellen svarede uden billede")
+    raw = base64.b64decode(url.split(",", 1)[1])
+    cost = float(((data.get("usage") or {}).get("cost")) or IMAGE_RESERVE_USD)
+    return raw, cost, str(data.get("model") or IMAGE_MODEL)
+
+
+def _store_media_file(media_id: int, data: bytes) -> str:
+    sub = datetime.now().strftime("%Y/%m")
+    folder = os.path.join(MEDIA_DIR, sub)
+    os.makedirs(folder, exist_ok=True)
+    name = f"{media_id}-{hashlib.sha256(data).hexdigest()[:12]}.png"
+    with open(os.path.join(folder, name), "wb") as fh:
+        fh.write(data)
+    return f"{sub}/{name}"
+
+
+def make_image(purpose: str, subject: str, keyword: str = "", article_id: int | None = None, attempts: int = 2) -> dict:
+    """Laver et billede og kvalitetssikrer det. Proever igen én gang ved afvisning. Alle forsoeg gemmes."""
+    if purpose not in MEDIA_PURPOSES:
+        return {"ok": False, "error": f"ukendt formål: {purpose}"}
+    if not OPENROUTER_API_KEY:
+        return {"ok": False, "error": "OPENROUTER_API_KEY mangler i .env"}
+    subject = (subject or keyword or "").strip()[:300]
+    if not subject:
+        return {"ok": False, "error": "skriv hvad billedet skal vise"}
+    _, _, aspect = MEDIA_PURPOSES[purpose]
+    last = None
+    for attempt in range(1, attempts + 1):
+        spent = media_month_spend()
+        if spent + IMAGE_RESERVE_USD > IMAGE_MONTHLY_LIMIT_USD:
+            return {"ok": False, "error": f"månedens billedbudget er brugt (${spent:.2f} af ${IMAGE_MONTHLY_LIMIT_USD:.0f})",
+                    "last": last}
+        prompt = f"{subject}. {_media_style()}" + (f" Theme: {keyword}." if keyword and keyword not in subject else "")
+        if last and last.get("reasons"):
+            prompt += " Avoid: " + "; ".join(last["reasons"][:3])
+        with get_db() as db:
+            mid = db.execute("INSERT INTO media (purpose, subject, keyword, prompt, model, status, article_id, created_at) "
+                             "VALUES (?,?,?,?,?,?,?,?)", (purpose, subject, keyword, prompt, IMAGE_MODEL, "laves",
+                                                          article_id, now_iso())).lastrowid
+        try:
+            data, cost, model = _openrouter_image(prompt, aspect)
+        except requests.RequestException as e:
+            with get_db() as db:
+                db.execute("UPDATE media SET status='fejl', cost=?, qa_json=? WHERE id=?",
+                           (0, jsonlib.dumps({"reasons": [str(e)[:200]]}), mid))
+            return {"ok": False, "error": f"billedmodellen fejlede: {str(e)[:150]}", "media_id": mid}
+        path = _store_media_file(mid, data)
+        rules = image_rules(data, purpose, exclude_id=mid)
+        review = review_image(data, subject, purpose) if rules["passed"] else {"ok": False, "error": "springet over (reglerne fejlede)"}
+        status, reasons = qa_verdict(rules, review)
+        info = rules["info"]
+        with get_db() as db:
+            db.execute("UPDATE media SET file=?, model=?, cost=?, width=?, height=?, bytes=?, sha256=?, dhash=?, "
+                       "qa_score=?, qa_json=?, status=?, alt_text=? WHERE id=?",
+                       (path, model, cost, info.get("width"), info.get("height"), info.get("bytes"),
+                        hashlib.sha256(data).hexdigest(), info.get("dhash"), review.get("score"),
+                        jsonlib.dumps({"rules": rules["errors"], "review": review, "reasons": reasons}),
+                        status, (review.get("alt_text") or subject)[:200], mid))
+        last = {"media_id": mid, "status": status, "reasons": reasons, "score": review.get("score"), "cost": cost}
+        if status == "godkendt":
+            return {"ok": True, **last}
+        if status == "venter":
+            break            # bedoemmeren svarede ikke: et nyt billede ville faa samme skaebne
+    return {"ok": False, "error": f"billedet blev ikke godkendt: {'; '.join((last or {}).get('reasons', [])[:3])}", **(last or {})}
+
+
+def rereview_pending(limit: int = 10) -> dict:
+    """Det, der venter fordi ingen bedoemmer svarede, faar en ny chance (job hver time)."""
+    done = {"media": 0, "articles": 0}
+    with get_db() as db:
+        media = db.execute("SELECT id, purpose, subject, file FROM media WHERE status='venter' ORDER BY id LIMIT ?",
+                           (limit,)).fetchall()
+        arts = db.execute("SELECT id, review_json FROM articles WHERE review_json LIKE '%\"status\": \"venter\"%' "
+                          "ORDER BY id LIMIT ?", (limit,)).fetchall()
+    for m in media:
+        path = media_file_path(m["id"])
+        if not path:
+            continue
+        with open(path, "rb") as fh:
+            data = fh.read()
+        rules = image_rules(data, m["purpose"], exclude_id=m["id"])
+        review = review_image(data, m["subject"] or "", m["purpose"]) if rules["passed"] else {"ok": False, "error": "reglerne fejlede"}
+        status, reasons = qa_verdict(rules, review)
+        if status == "venter":
+            continue
+        with get_db() as db:
+            db.execute("UPDATE media SET status=?, qa_score=?, alt_text=COALESCE(NULLIF(?, ''), alt_text), qa_json=? WHERE id=?",
+                       (status, review.get("score"), review.get("alt_text") or "",
+                        jsonlib.dumps({"rules": rules["errors"], "review": review, "reasons": reasons, "rereviewed": now_iso()}), m["id"]))
+        done["media"] += 1
+    for a in arts:
+        if review_article(a["id"])["status"] != "venter":
+            done["articles"] += 1
+    return done
+
+
+async def job_rereview():
+    await asyncio.get_running_loop().run_in_executor(executor, rereview_pending)
+
+
+def media_rows(limit: int = 24) -> list:
+    with get_db() as db:
+        rows = [dict(r) for r in db.execute("SELECT * FROM media ORDER BY id DESC LIMIT ?", (limit,)).fetchall()]
+    for r in rows:
+        try:
+            r["qa"] = jsonlib.loads(r.get("qa_json") or "{}")
+        except ValueError:
+            r["qa"] = {}
+    return rows
+
+
+def media_file_path(media_id: int) -> str:
+    with get_db() as db:
+        row = db.execute("SELECT file FROM media WHERE id=?", (media_id,)).fetchone()
+    if not row or not row["file"]:
+        return ""
+    path = os.path.realpath(os.path.join(MEDIA_DIR, row["file"]))
+    return path if path.startswith(os.path.realpath(MEDIA_DIR) + os.sep) and os.path.isfile(path) else ""
+
+
+def review_article(article_id: int) -> dict:
+    """quality_check (regler) + AI-redaktoer. Gemmer resultatet paa artiklen og returnerer {"passed", "reasons", ...}."""
+    with get_db() as db:
+        art = db.execute("SELECT * FROM articles WHERE id=?", (article_id,)).fetchone()
+    if not art:
+        return {"passed": False, "reasons": ["artiklen findes ikke"]}
+    gate = quality_check(art["content"] or "", art["keyword"] or "")
+    rules = {"passed": gate["passed"], "errors": gate["errors"]}
+    review = review_text(art["content"] or "", "blog article", art["keyword"] or "") if gate["passed"] else \
+        {"ok": False, "error": "springet over (reglerne fejlede)"}
+    status, reasons = qa_verdict(rules, review)
+    out = {"passed": status == "godkendt", "status": status, "reasons": reasons, "score": review.get("score"),
+           "warnings": gate.get("warnings", [])}
+    with get_db() as db:
+        db.execute("UPDATE articles SET review_json=? WHERE id=?", (jsonlib.dumps(out), article_id))
+    return out
+
+
+def wp_upload_media(media_id: int) -> int:
+    """Lægger et godkendt billede i WordPress' mediebibliotek med alt-tekst. Returnerer WP's id."""
+    with get_db() as db:
+        m = db.execute("SELECT * FROM media WHERE id=?", (media_id,)).fetchone()
+    if not m or m["status"] != "godkendt":
+        raise ValueError("kun godkendte billeder sendes til WordPress")
+    if m["wp_media_id"]:
+        return int(m["wp_media_id"])
+    path = media_file_path(media_id)
+    if not path:
+        raise ValueError("billedfilen mangler")
+    slug = re.sub(r"[^a-z0-9]+", "-", (m["keyword"] or m["subject"] or "steamgears").lower()).strip("-")[:60] or "steamgears"
+    # WordPress faar en JPEG: Instagram tager kun JPEG (pluginnets preflight afviser andet), og
+    # filen bliver ogsaa mindre for besoegende. Originalen (PNG) bliver liggende i CC.
+    from PIL import Image
+    import io
+    with open(path, "rb") as fh:
+        img = Image.open(io.BytesIO(fh.read())).convert("RGB")
+    out = io.BytesIO()
+    img.save(out, "JPEG", quality=90, optimize=True)
+    resp = HTTP.post(f"{_wp_url().rstrip('/')}/wp-json/wp/v2/media", auth=(_wp_user(), _wp_pass()), data=out.getvalue(),
+                     headers={"Content-Type": "image/jpeg", "Content-Disposition": f'attachment; filename="{slug}-{media_id}.jpg"'},
+                     timeout=60)
+    resp.raise_for_status()
+    wp_id = int(resp.json().get("id"))
+    HTTP.post(f"{_wp_url().rstrip('/')}/wp-json/wp/v2/media/{wp_id}", auth=(_wp_user(), _wp_pass()),
+              json={"alt_text": m["alt_text"] or m["subject"] or "", "title": m["subject"] or ""}, timeout=30)
+    with get_db() as db:
+        db.execute("UPDATE media SET wp_media_id=? WHERE id=?", (str(wp_id), media_id))
+    return wp_id
+
+
+@app.post("/media/generate")
+async def media_generate(purpose: str = Form("artikel"), subject: str = Form(""), keyword: str = Form("")):
+    loop = asyncio.get_running_loop()
+    res = await loop.run_in_executor(executor, make_image, purpose, subject, keyword)
+    msg = "Billedet er godkendt" if res.get("ok") else res.get("error", "fejl")
+    return RedirectResponse(f"/?tab=vaekst&media={'ok' if res.get('ok') else 'fejl'}&media_msg={urllib.parse.quote_plus(msg[:200])}#medier",
+                            status_code=303)
+
+
+@app.post("/media/status")
+async def media_set_status(id: int = Form(...), status: str = Form(...)):
+    """Manuel overstyring: du kan godkende et 'venter'-billede eller afvise et godkendt."""
+    if status not in ("godkendt", "afvist"):
+        return RedirectResponse("/?tab=vaekst#medier", status_code=303)
+    with get_db() as db:
+        row = db.execute("SELECT qa_json FROM media WHERE id=?", (id,)).fetchone()
+        if row:
+            qa = jsonlib.loads(row["qa_json"] or "{}")
+            qa["manual"] = {"status": status, "at": now_iso()}
+            db.execute("UPDATE media SET status=?, qa_json=? WHERE id=?", (status, jsonlib.dumps(qa), id))
+    return RedirectResponse("/?tab=vaekst#medier", status_code=303)
+
+
+@app.post("/media/delete")
+async def media_delete(id: int = Form(...)):
+    path = media_file_path(id)
+    if path:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    with get_db() as db:
+        db.execute("DELETE FROM media WHERE id=?", (id,))
+    return RedirectResponse("/?tab=vaekst#medier", status_code=303)
+
+
+@app.get("/media/file/{media_id}")
+async def media_file(media_id: int):
+    path = media_file_path(media_id)
+    if not path:
+        return JSONResponse({"error": "findes ikke"}, status_code=404)
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "private, max-age=86400"})
+
+
+@app.get("/api/media")
+async def api_media():
+    return {"spent_usd": media_month_spend(), "limit_usd": IMAGE_MONTHLY_LIMIT_USD, "min_score": QA_MIN_SCORE,
+            "items": [{k: r.get(k) for k in ("id", "purpose", "subject", "status", "qa_score", "cost", "width",
+                                               "height", "alt_text", "created_at")} for r in media_rows(100)]}
 
 
 def warn_legacy_aimlapi() -> str:
@@ -4490,7 +5516,7 @@ def rewrite_meta_sync(url: str, title: str, desc: str, keyword: str):
     if not OPENROUTER_API_KEY:
         return {"error": "OPENROUTER_API_KEY ikke sat"}
     prompt = (
-        "Du er en SEO-ekspert for " + TRACK_DOMAIN + ". Optimer denne side:\n"
+        "Du er en SEO-ekspert for " + _track_domain() + ". Optimer denne side:\n"
         "URL: " + url + "\n"
         "Nuvaerende title: " + (title or "(ingen)") + "\n"
         "Nuvaerende meta description: " + (desc or "(ingen)") + "\n"
@@ -4586,9 +5612,9 @@ async def ai_visibility(question: str = Form(...)):
     try:
         loop = asyncio.get_running_loop()
         answer = await loop.run_in_executor(executor, ai_chat, question + " Name specific websites and shops in your answer.", 800)
-        found = TRACK_DOMAIN.lower() in answer.lower()
+        found = _track_domain().lower() in answer.lower()
         snippet = ""
-        idx = answer.lower().find(TRACK_DOMAIN.lower())
+        idx = answer.lower().find(_track_domain().lower())
         if idx >= 0:
             snippet = answer[max(idx - 120, 0):idx + 160]
         with get_db() as db:
@@ -5285,7 +6311,7 @@ async def growth_optimize(request: Request):
              jsonlib.dumps(result["terms"], ensure_ascii=False),
              jsonlib.dumps(result["fixes"], ensure_ascii=False), now_iso()),
         )
-        db.execute("DELETE FROM content_audits WHERE id NOT IN (SELECT id FROM content_audits ORDER BY id DESC LIMIT 50)")
+        db.execute("DELETE FROM content_audits WHERE id NOT IN (SELECT id FROM content_audits ORDER BY id DESC LIMIT ?)", (KEEP_ROWS["content_audits"],))
     return JSONResponse(result)
 
 
@@ -5448,6 +6474,8 @@ async def dashboard(request: Request):
         socialqueue = db.execute("SELECT * FROM socialqueue ORDER BY id DESC LIMIT 100").fetchall()  # full list: /social/export.csv
         notes = db.execute("SELECT * FROM notes ORDER BY id DESC LIMIT 10").fetchall()
         keywords = db.execute("SELECT * FROM keywords ORDER BY position IS NULL, position").fetchall()
+    kw_trends = keyword_trends()
+    with get_db() as db:
         alarms = db.execute("SELECT * FROM alarms WHERE resolved=0 ORDER BY id DESC LIMIT 20").fetchall()
         ideas = db.execute("SELECT * FROM keyword_ideas ORDER BY id DESC LIMIT 30").fetchall()
         gaps = db.execute("SELECT * FROM content_gap ORDER BY id DESC LIMIT 5").fetchall()
@@ -5495,6 +6523,18 @@ async def dashboard(request: Request):
     except Exception:
         sgap_state = {}
     return templates.TemplateResponse("dashboard.html", {
+        "connections": connections_view(),
+        "conn_feedback": ({"ok": request.query_params.get("conn") == "ok", "msg": (request.query_params.get("conn_msg") or "")[:200]}
+                          if request.query_params.get("conn") in ("ok", "fejl") else None),
+        "projects": project_view(), "project_id": (current_project() or {}).get("id", 1),
+        "project_name": (current_project() or project_main())["name"],
+        "proj_feedback": ({"ok": request.query_params.get("proj") == "ok", "msg": (request.query_params.get("proj_msg") or "")[:200]}
+                          if request.query_params.get("proj") in ("ok", "fejl") else None),
+        "media_feedback": ({"ok": request.query_params.get("media") == "ok", "msg": (request.query_params.get("media_msg") or "")[:200]}
+                           if request.query_params.get("media") in ("ok", "fejl") else None),
+        "media_items": media_rows(), "media_spent": media_month_spend(), "media_limit": IMAGE_MONTHLY_LIMIT_USD,
+        "media_purposes": list(MEDIA_PURPOSES), "qa_min_score": QA_MIN_SCORE,
+        "kw_trends": kw_trends,
         "request": request,
         "domains": domains,
         "competitors": competitors,
@@ -5517,7 +6557,7 @@ async def dashboard(request: Request):
         "optimize_ai_pages": OPTIMIZE_AI_PAGES,
         **flow_context(request),
         "ai_enabled": bool(OPENROUTER_API_KEY),
-        "wp_enabled": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
+        "wp_enabled": bool(_wp_url() and _wp_user() and _wp_pass()),
         "serpapi_enabled": bool(SERPAPI_KEY),
         "telegram_enabled": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "alert_channels": alert_channels(),
@@ -5565,11 +6605,11 @@ async def dashboard(request: Request):
         "links_sug": links_sug,
         "health_hist_n": health_hist,
         "crawl": crawl,
-        "track_domain": TRACK_DOMAIN,
+        "track_domain": _track_domain(),
         "difficulties": difficulties,
         "sgap": sgap_state,
         "cc_seen": cc_seen_view(sgap_state),
-        "sgap_ready": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
+        "sgap_ready": bool(_wp_url() and _wp_user() and _wp_pass()),
         "cc_link": cc_link,
         "cc_msg": cc_msg,
         "cc_sso": {"public": bool(cc_public_base()), **cc_sso_state()},
@@ -5623,7 +6663,7 @@ def strategy_check_sync(key: str):
         add(bool(SERPAPI_KEY), "SERPAPI_KEY (konkurrent-analyse): " + ("OK" if SERPAPI_KEY else "mangler - prompten kobrer uden SERP-kontekst"))
 
     # WordPress-push
-    wp_ok = bool(WP_URL and WP_USER and WP_APP_PASSWORD)
+    wp_ok = bool(_wp_url() and _wp_user() and _wp_pass())
     add(wp_ok, "WordPress-push (kladde): " + ("OK" if wp_ok else "mangler - artikler gemmes kun i CC"))
 
     # Moduler
@@ -5718,7 +6758,7 @@ async def health():
         "budget": {s: {"used": u, "limit": l} for s, (u, l) in budget_usage().items()},
         "version": APP_VERSION,
         "ai": bool(OPENROUTER_API_KEY),
-        "wordpress": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
+        "wordpress": bool(_wp_url() and _wp_user() and _wp_pass()),
         "serpapi": bool(SERPAPI_KEY),
         "telegram": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "auth": "users",
@@ -6078,7 +7118,7 @@ async def api_keys_revoke(client_id: int = Form(...)):
 JOB_MAX_AGE_HOURS = {
     "domain_checks": 7, "keyword_checks": 26, "growth_autopilot": 26, "cleanup": 26,
     "db_backup": 26, "update_check": 26, "sgap_sync": 1.5, "wp_cron": 0.5,
-    "alert_outbox": 0.1, "flows": 0.5,
+    "alert_outbox": 0.1, "flows": 0.5, "rereview": 2,
 }
 JOB_LABELS = {
     "domain_checks": "Domæne-tjek", "keyword_checks": "Keyword-tjek", "growth_autopilot": "Vækst-autopilot",
@@ -6237,7 +7277,7 @@ CONNECTOR_PRESETS = {
     },
     "steamgears": {
         "label": "Steamgears (WordPress)", "auth_type": "wp_env",
-        "url": (WP_URL.rstrip("/") + "/wp-json/mcp/novamira") if WP_URL else "",
+        "url": (_wp_url().rstrip("/") + "/wp-json/mcp/novamira") if _wp_url() else "",
         "hint": "Sitets egen MCP-server. Logger ind med WP_USER + WP_APP_PASSWORD fra .env.",
     },
     "wordpress": {
@@ -6291,8 +7331,8 @@ def connector_headers(c: dict) -> dict:
     if kind == "basic" and secret:
         raw = f"{c.get('username') or ''}:{secret}".encode()
         return {"Authorization": "Basic " + base64.b64encode(raw).decode()}
-    if kind == "wp_env" and WP_USER and WP_APP_PASSWORD:
-        raw = f"{WP_USER}:{WP_APP_PASSWORD}".encode()
+    if kind == "wp_env" and _wp_user() and _wp_pass():
+        raw = f"{_wp_user()}:{_wp_pass()}".encode()
         return {"Authorization": "Basic " + base64.b64encode(raw).decode()}
     if kind == "header" and secret and c.get("auth_header"):
         return {c["auth_header"]: secret}
@@ -6488,7 +7528,7 @@ def add_connector(preset: str, name: str, url: str, auth_type: str, username: st
         raise ValueError("Headernavnet må kun indeholde bogstaver, tal og bindestreg")
     if auth_type == "header" and auth_header.lower() in ("host", "content-type", "content-length", "cookie"):
         raise ValueError("Det headernavn kan ikke bruges til en nøgle")
-    if auth_type == "wp_env" and not (WP_USER and WP_APP_PASSWORD):
+    if auth_type == "wp_env" and not (_wp_user() and _wp_pass()):
         raise ValueError("WP_USER og WP_APP_PASSWORD mangler i .env")
     try:
         with get_db() as db:
@@ -6614,7 +7654,7 @@ def chat_run(cid) -> dict:
         return {"status": "fejl", "error": "Samtalen findes ikke"}
     ids = [i for i in (conv["connectors"] or "").split(",") if i]
     tools, mapping, truncated = chat_tools(ids)
-    system = CHAT_SYSTEM_PROMPT.format(domain=TRACK_DOMAIN)
+    system = CHAT_SYSTEM_PROMPT.format(domain=_track_domain())
     if truncated:
         system += f" (Kun de foerste {CHAT_MAX_TOOLS} vaerktoejer er med - brug vaerktoejsfilteret.)"
     for _step in range(CHAT_MAX_STEPS):
@@ -6905,16 +7945,17 @@ async def lifespan(app_: FastAPI):
     except Exception as e:
         print("[cc] .env-koden kunne ikke tjekkes:", repr(e), flush=True)
     try:
-        scheduler.add_job(job_heartbeat("domain_checks", job_check_domains), IntervalTrigger(hours=6), id="domain_checks", replace_existing=True, max_instances=1, coalesce=True)
-        scheduler.add_job(job_heartbeat("keyword_checks", job_check_keywords), CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True, max_instances=1, coalesce=True)
-        scheduler.add_job(job_heartbeat("growth_autopilot", job_growth_autopilot), CronTrigger(hour=5, minute=15), id="growth_autopilot", replace_existing=True, max_instances=1, coalesce=True)
-        scheduler.add_job(job_heartbeat("cleanup", cleanup_old_data), CronTrigger(hour=4, minute=30), id="cleanup", replace_existing=True, max_instances=1, coalesce=True)
-        scheduler.add_job(job_heartbeat("db_backup", job_backup_db), CronTrigger(hour=4, minute=40), id="db_backup", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("domain_checks", for_each_project(job_check_domains)), IntervalTrigger(hours=6), id="domain_checks", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("keyword_checks", for_each_project(job_check_keywords)), CronTrigger(hour=6, minute=0), id="keyword_checks", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("growth_autopilot", for_each_project(job_growth_autopilot)), CronTrigger(hour=5, minute=15), id="growth_autopilot", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("cleanup", for_each_project(cleanup_old_data)), CronTrigger(hour=4, minute=30), id="cleanup", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("db_backup", for_each_project(job_backup_db)), CronTrigger(hour=4, minute=40), id="db_backup", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat("update_check", job_update_check), CronTrigger(hour=5, minute=0), id="update_check", replace_existing=True, max_instances=1, coalesce=True)
-        scheduler.add_job(job_heartbeat("sgap_sync", job_sgap_sync), IntervalTrigger(minutes=30), id="sgap_sync", replace_existing=True, max_instances=1, coalesce=True)
-        scheduler.add_job(job_heartbeat("wp_cron", job_wp_cron), IntervalTrigger(minutes=5), id="wp_cron", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("sgap_sync", for_each_project(job_sgap_sync)), IntervalTrigger(minutes=30), id="sgap_sync", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("wp_cron", for_each_project(job_wp_cron)), IntervalTrigger(minutes=5), id="wp_cron", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat("alert_outbox", job_drain_alerts), IntervalTrigger(minutes=1), id="alert_outbox", replace_existing=True, max_instances=1, coalesce=True)
-        scheduler.add_job(job_heartbeat("flows", job_flows), IntervalTrigger(minutes=5), id="flows", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("flows", for_each_project(job_flows)), IntervalTrigger(minutes=5), id="flows", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("rereview", for_each_project(job_rereview)), IntervalTrigger(hours=1), id="rereview", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat_check, IntervalTrigger(minutes=15), id="job_heartbeat", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.start()
         try:
@@ -6993,7 +8034,7 @@ def optimize_project_url() -> str:
     """Projektets adresse: det foerste domaene under Domæner, ellers TRACK_DOMAIN."""
     with get_db() as db:
         row = db.execute("SELECT url FROM domains ORDER BY id LIMIT 1").fetchone()
-    return row["url"] if row else f"https://{TRACK_DOMAIN}"
+    return row["url"] if row else f"https://{_track_domain()}"
 
 
 def _optimize_keyword_for(url: str) -> str:
@@ -7199,7 +8240,7 @@ def optimize_project_sync(run_id: int, scope: str, url: str) -> dict:
     with get_db() as db:
         db.execute("UPDATE optimize_runs SET status=?, finished_at=?, summary_json=? WHERE id=?",
                    (status, now_iso(), jsonlib.dumps(summary, ensure_ascii=False), run_id))
-        db.execute("DELETE FROM optimize_runs WHERE id NOT IN (SELECT id FROM optimize_runs ORDER BY id DESC LIMIT 20)")
+        db.execute("DELETE FROM optimize_runs WHERE id NOT IN (SELECT id FROM optimize_runs ORDER BY id DESC LIMIT ?)", (KEEP_ROWS["optimize_runs"],))
         add_alarm(db, "optimering", f"1-klik optimering ({label}) færdig: {counts['høj']} høj, {counts['middel']} middel, "
                                     f"{counts['lav']} lav prioritet", "info")
     OPTIMIZE_STATE.update({"running": False, "step": len(parts)})
@@ -7411,21 +8452,54 @@ def _flow_article(ctx, params):
             content = generate_article_ai(kw, get_active_strategy())
         except requests.RequestException as e:
             return False, f"AI-fejl: {str(e)[:150]}", len(made)
-        gate = quality_check(content, kw)
         with get_db() as db:
             cur = db.execute("INSERT INTO articles (title, keyword, content, source, created_at) VALUES (?,?,?,?,?)",
                              (f"Guide: {kw}", kw, content, f"Flow ({AI_MODEL})", now_iso()))
-            made.append({"id": cur.lastrowid, "keyword": kw, "passed": gate["passed"], "errors": gate["errors"]})
+            aid = cur.lastrowid
+        # v7.34.0: regler + AI-redaktoer; uden en score >= QA_MIN_SCORE sendes artiklen ikke videre.
+        verdict = review_article(aid)
+        made.append({"id": aid, "keyword": kw, "passed": verdict["passed"], "errors": verdict["reasons"],
+                     "status": verdict["status"]})
     ctx.setdefault("articles", []).extend(made)
     ok_n = sum(1 for a in made if a["passed"])
-    return True, f"{len(made)} artikel(er) skrevet, {ok_n} består kvalitetstjekket", len(made)
+    held = [f"#{a['id']}: {a['errors'][0]}" for a in made if not a["passed"] and a["errors"]]
+    return True, (f"{len(made)} artikel(er) skrevet, {ok_n} godkendt af kvalitetstjekket"
+                  + (f"; holdt tilbage: {', '.join(held[:2])}" if held else "")), len(made)
+
+
+def _flow_image(ctx, params):
+    if not OPENROUTER_API_KEY:
+        return None, "sprunget over: OPENROUTER_API_KEY mangler i .env", 0
+    arts = [a for a in ctx.get("articles", []) if a.get("passed")]
+    if not arts:
+        return True, "ingen godkendte artikler at lave billeder til", 0
+    ok, notes = 0, []
+    for a in arts[:FLOW_MAX_ARTICLES]:
+        res = make_image("artikel", f"Header image for a guide about {a['keyword']}", a["keyword"], article_id=a["id"])
+        if res.get("ok"):
+            with get_db() as db:
+                db.execute("UPDATE articles SET media_id=? WHERE id=?", (str(res["media_id"]), a["id"]))
+            ok += 1
+        else:
+            notes.append(res.get("error", "fejl")[:120])
+            if "budget" in res.get("error", ""):
+                break
+    note = f"{ok} billede(r) godkendt" + (f"; {notes[0]}" if notes else "")
+    return (True if ok or not notes else False), note, ok
 
 
 def _flow_wp_draft(ctx, params):
-    if not (WP_URL and WP_USER and WP_APP_PASSWORD):
+    if not (_wp_url() and _wp_user() and _wp_pass()):
         return None, "sprunget over: WP_URL/WP_USER/WP_APP_PASSWORD mangler i .env", 0
     arts = [a for a in ctx.get("articles", []) if a.get("passed")]
     skipped = [a for a in ctx.get("articles", []) if not a.get("passed")]
+    # Artikler der ventede paa en bedoemmer og siden er godkendt (rereview), kommer med nu.
+    seen = {a["id"] for a in ctx.get("articles", [])}
+    with get_db() as db:
+        late = [r["id"] for r in db.execute("SELECT id FROM articles WHERE status='Kladde' AND source LIKE 'Flow%' "
+                                            "AND review_json LIKE '%\"status\": \"godkendt\"%' ORDER BY id LIMIT ?",
+                                            (FLOW_MAX_ARTICLES,)).fetchall()]
+    arts += [{"id": i, "passed": True} for i in late if i not in seen]
     if not arts:
         return True, ("ingen nye artikler bestod kvalitetstjekket" if skipped else "ingen nye artikler at sende"), 0
     sent = 0
@@ -7433,8 +8507,14 @@ def _flow_wp_draft(ctx, params):
         with get_db() as db:
             art = db.execute("SELECT * FROM articles WHERE id=?", (a["id"],)).fetchone()
         try:
-            wp_id = wp_push_draft(art["title"], art["content"])   # altid status=draft
-            link = f"{WP_URL.rstrip('/')}/wp-admin/post.php?post={wp_id}&action=edit"
+            featured = None
+            if art["media_id"]:
+                try:
+                    featured = wp_upload_media(int(art["media_id"]))
+                except (ValueError, requests.RequestException):
+                    featured = None   # artiklen sendes alligevel; billedet kan laegges paa i WordPress
+            wp_id = wp_push_draft(art["title"], art["content"], featured)   # altid status=draft
+            link = f"{_wp_url().rstrip('/')}/wp-admin/post.php?post={wp_id}&action=edit"
             with get_db() as db:
                 db.execute("UPDATE articles SET status='Sendt til WP (kladde)', wp_link=? WHERE id=?", (link, a["id"]))
             sent += 1
@@ -7452,6 +8532,116 @@ def _flow_autopilot(ctx, params):
     if res.startswith("quality-blocked"):
         return True, f"autopilot-artikel #{res.split(':')[-1]} holdt tilbage af kvalitetstjekket", 0
     return False, f"autopilot: {res}", 0
+
+
+# --- Prioriteter til Steamgears Autopilot (v7.33.0) ---
+# CC maaler hvilke sider der ligger paa plads 4-20 og for hvilket soegeord; pluginnet vaelger selv,
+# hvilke sider der laves sociale opslag om. Broen sender listen (POST /sgap/v1/priorities, plugin
+# 7.82.0+), saa pluginnet tager de sider foerst og bruger soegeordet i opslaget. Koe, kanaler, lofter
+# og kvalitetsgaten i pluginnet er uaendrede.
+CC_PRIORITY_MAX = 30
+
+
+def _same_site(url: str, base: str) -> bool:
+    a = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    b = (urlparse(base).hostname or "").lower().removeprefix("www.")
+    return bool(a) and a == b
+
+
+def keyword_trends(days: int = 30) -> dict:
+    """keyword -> {"delta": +n bedre / -n daarligere end for ~days siden, "points": antal maalinger}.
+    Sammenligner den nyeste maaling med den aeldste inden for vinduet; uden placering begge steder: None."""
+    since = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+    out = {}
+    with get_db() as db:
+        rows = db.execute("SELECT keyword, position, checked_at FROM keyword_history WHERE checked_at >= ? "
+                          "ORDER BY keyword, checked_at, id", (since,)).fetchall()
+        totals = {r["keyword"]: r["n"] for r in db.execute(
+            "SELECT keyword, COUNT(*) AS n FROM keyword_history GROUP BY keyword").fetchall()}
+    first, last = {}, {}
+    for r in rows:
+        first.setdefault(r["keyword"], r["position"])
+        last[r["keyword"]] = r["position"]
+    for kw, n in totals.items():
+        a, b = first.get(kw), last.get(kw)
+        out[kw] = {"delta": (a - b) if (a and b) else None, "points": n}
+    return out
+
+
+def history_series(kind: str, key: str, limit: int = 365) -> list:
+    """Hele forloebet for ét soegeord ('keyword') eller én side ('page'), aeldste foerst."""
+    with get_db() as db:
+        if kind == "keyword":
+            rows = db.execute("SELECT checked_at AS at, position, url FROM keyword_history WHERE keyword=? "
+                              "ORDER BY checked_at DESC, id DESC LIMIT ?", (key, limit)).fetchall()
+        else:
+            rows = db.execute("SELECT crawled_at AS at, http_status, score, words, title, meta_len FROM page_history "
+                              "WHERE url IN (?, ?) ORDER BY crawled_at DESC, id DESC LIMIT ?",
+                              (key.rstrip("/"), key.rstrip("/") + "/", limit)).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+
+@app.get("/api/trend/keyword")
+async def api_keyword_history(keyword: str = ""):
+    return {"keyword": keyword, "points": history_series("keyword", keyword.strip())}
+
+
+@app.get("/api/trend/page")
+async def api_page_history(url: str = ""):
+    return {"url": url, "points": history_series("page", url.strip())}
+
+
+def cc_priority_items(skip_urls=()) -> list:
+    """Sider paa plads 4-20 med deres soegeord, taettest paa toppen foerst. Kun sitets egne URL'er,
+    hver side én gang, og sider med hoej-prioritets-fejl springes over (dem skal der ikke sendes
+    trafik til, foer de er rettet)."""
+    base = _wp_url() or optimize_project_url() or ""
+    skip = {u.rstrip("/") for u in skip_urls if u}
+    with get_db() as db:
+        rows = db.execute("SELECT keyword, position, target_url FROM keywords WHERE position BETWEEN 4 AND 20 "
+                          "AND target_url IS NOT NULL AND target_url != '' ORDER BY position, id").fetchall()
+    items, seen = [], set()
+    for r in rows:
+        url = r["target_url"].strip()
+        key = url.rstrip("/")
+        if not _same_site(url, base) or key in seen or key in skip:
+            continue
+        seen.add(key)
+        items.append({"url": url, "keyword": r["keyword"], "position": int(r["position"]), "reason": "striking"})
+        if len(items) >= CC_PRIORITY_MAX:
+            break
+    return items
+
+
+def sgap_push_priorities(skip_urls=()) -> dict:
+    """Sender listen til pluginnet og gemmer svaret i settings.cc_priorities_last."""
+    items = cc_priority_items(skip_urls)
+    res = sgap_api("POST", "/priorities", json={"items": items})
+    out = {"at": now_iso(), "sent": len(items), "saved": int(res.get("saved", 0) or 0),
+           "skipped": [s.get("url", "") + ": " + s.get("reason", "") for s in (res.get("skipped") or [])][:10]}
+    with get_db() as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('cc_priorities_last', ?)", (jsonlib.dumps(out),))
+    return out
+
+
+def _flow_priorities(ctx, params):
+    if not sgap_ready():
+        return None, "sprunget over: WordPress-broen er ikke sat op (WP_URL/WP_USER/WP_APP_PASSWORD + modulet autopilot)", 0
+    bad = [a.get("url", "") for a in ctx.get("actions", []) if a.get("priority") == "høj"]
+    if not cc_priority_items(bad):
+        return True, "ingen sider på plads 4-20 at sende (kør Søgeord-blokken først)", 0
+    try:
+        res = sgap_push_priorities(bad)
+    except requests.HTTPError as e:
+        if getattr(e.response, "status_code", None) == 404:
+            return False, "pluginnet kender ikke /priorities - opdatér Steamgears Autopilot til 7.82.0 eller nyere", 0
+        return False, sgap_error_text(e), 0
+    except requests.RequestException as e:
+        return False, f"WordPress svarede ikke: {str(e)[:120]}", 0
+    note = f"{res['saved']} sider sendt til autopiloten - de får sociale opslag først, med søgeordet"
+    if res["skipped"]:
+        note += f"; {len(res['skipped'])} afvist af WordPress ({res['skipped'][0]})"
+    return True, note, res["saved"]
 
 
 def _flow_sorted(actions: list) -> list:
@@ -7500,8 +8690,10 @@ FLOW_BLOCKS = {
     "ai_meta": ("AI-forslag til titel og meta", "Generér", "OPENROUTER_API_KEY", _flow_opt("meta"), []),
     "brief": ("Indholdsplan pr. søgeord", "Generér", "", _flow_brief, ["keyword", "max"]),
     "artikel": ("Skriv artikel (AI)", "Generér", "OPENROUTER_API_KEY", _flow_article, ["keyword", "max"]),
+    "billede": ("Lav og kvalitetssikr billede til nye artikler", "Generér", "OPENROUTER_API_KEY", _flow_image, []),
     "wp_kladde": ("Send nye artikler til WordPress som kladde", "Handling", "WP_URL", _flow_wp_draft, []),
     "autopilot": ("Growth-autopilot (idé → artikel → kladde)", "Handling", "OPENROUTER_API_KEY", _flow_autopilot, []),
+    "prioriteter": ("Send sider tæt på toppen til autopiloten (sociale opslag)", "Handling", "WP_URL", _flow_priorities, []),
     "rapport": ("Send rapport (Alarmer + kanaler)", "Handling", "", _flow_report, ["level"]),
     "note": ("Skriv note med resultatet", "Handling", "", _flow_note, []),
 }
@@ -7512,15 +8704,17 @@ FLOW_TEMPLATES = {
                        "steps": [{"block": "teknik"}, {"block": "monitors"},
                                  {"block": "rapport", "when": "hvis_fund", "params": {"level": "advarsel"}}]},
     "ugentlig_optimering": {"name": "Ugentlig optimering", "schedule": "weekly@1@06",
-                            "hint": "Mandag: crawl, on-page, indhold, AI-titler og placeringer - samlet i én note.",
+                            "hint": "Mandag: crawl, on-page, indhold, AI-titler og placeringer - sider tæt på toppen sendes til autopiloten, og det hele samles i én note.",
                             "steps": [{"block": "crawl"}, {"block": "onpage"}, {"block": "indhold"},
                                       {"block": "ai_meta", "when": "hvis_fund"}, {"block": "soegeord"},
+                                      {"block": "prioriteter", "when": "hvis_fund"},
                                       {"block": "note"}, {"block": "rapport"}]},
     "indholdsmaskine": {"name": "Indholdsmaskine", "schedule": "weekly@3@06",
                         "hint": "Onsdag: søgeord tæt på toppen → plan → AI-artikel → WordPress-kladde (aldrig udgivet).",
                         "steps": [{"block": "soegeord"}, {"block": "brief", "when": "hvis_fund", "params": {"max": "2"}},
                                   {"block": "artikel", "when": "hvis_fund", "params": {"max": "1"}},
-                                  {"block": "wp_kladde", "when": "hvis_fund"}, {"block": "rapport"}]},
+                                  {"block": "billede", "when": "hvis_fund"},
+                                  {"block": "wp_kladde"}, {"block": "rapport"}]},
     "konkurrenter": {"name": "Konkurrent-overvågning", "schedule": "weekly@5@06",
                      "hint": "Fredag: konkurrenter, content gap og backlink-muligheder for dit første søgeord.",
                      "steps": [{"block": "konkurrenter"}, {"block": "content_gap"}, {"block": "backlinks"},
@@ -7604,7 +8798,7 @@ def flow_rows() -> list:
         r["schedule_label"] = flow_schedule_label(r["schedule"])
         r["missing"] = sorted({FLOW_BLOCKS[s["block"]][2] for s in r["steps"]
                                if s["block"] in FLOW_BLOCKS and FLOW_BLOCKS[s["block"]][2]
-                               and not globals().get(FLOW_BLOCKS[s["block"]][2])})
+                               and not setting_present(FLOW_BLOCKS[s["block"]][2])})
     return rows
 
 
@@ -7653,7 +8847,7 @@ def run_flow_sync(flow_id: int, trigger: str = "manuel", run_id: int | None = No
                                                       "actions": _flow_sorted(ctx["actions"])[:40]}, ensure_ascii=False), run_id))
         db.execute("UPDATE flows SET last_run_at=?, last_status=?, next_run_at=? WHERE id=?",
                    (now_iso(), status, flow_next_run(f["schedule"]), flow_id))
-        db.execute("DELETE FROM flow_runs WHERE id NOT IN (SELECT id FROM flow_runs ORDER BY id DESC LIMIT 50)")
+        db.execute("DELETE FROM flow_runs WHERE id NOT IN (SELECT id FROM flow_runs ORDER BY id DESC LIMIT ?)", (KEEP_ROWS["flow_runs"],))
     return {"ok": True, "run_id": run_id, "status": status, "steps": log, "summary": summary}
 
 
@@ -7670,7 +8864,7 @@ def flow_context(request: Request) -> dict:
     return {
         "flows": flows, "flow_runs": runs, "flow_edit": edit,
         "flow_blocks": [{"key": k, "label": v[0], "group": v[1], "needs": v[2], "params": v[4],
-                         "ready": not v[2] or bool(globals().get(v[2]))} for k, v in FLOW_BLOCKS.items()],
+                         "ready": not v[2] or setting_present(v[2])} for k, v in FLOW_BLOCKS.items()],
         "flow_templates": {k: {**v, "label": flow_schedule_label(v["schedule"])} for k, v in FLOW_TEMPLATES.items()},
         "flow_block_labels": {k: v[0] for k, v in FLOW_BLOCKS.items()},
         "flow_conditions": FLOW_CONDITIONS, "flow_max_steps": FLOW_MAX_STEPS,

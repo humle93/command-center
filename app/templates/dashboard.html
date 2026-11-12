@@ -146,6 +146,13 @@
                 <h1 class="font-semibold text-[13px] tracking-wide whitespace-nowrap">Command Center <span class="text-emerald-400">v{{ app_version }}</span></h1>
                 <p class="hidden sm:block text-[11px] text-zinc-500 truncate">SEO, indhold og drift</p>
             </div>
+            {% if projects and projects|length > 1 %}
+            <form id="cc-project" action="/projects/switch" method="POST" class="ml-2">
+                <select name="pid" onchange="this.form.submit()" title="Aktivt projekt" class="bg-zinc-900 border border-emerald-500/30 rounded-lg px-2 py-1 text-[12px] text-emerald-300 max-w-[11rem]">
+                    {% for p in projects %}<option value="{{ p.id }}"{{ ' selected' if p.id == project_id else '' }}>{{ p.name }}</option>{% endfor %}
+                </select>
+            </form>
+            {% endif %}
         </div>
         <div class="flex items-center gap-2 text-[11px] shrink-0">
             <form action="/update/apply" method="POST" onsubmit="return confirm('Hent og installér nyeste version fra GitHub? Der laves en DB-backup først, og appen skal genstartes bagefter.')"><button class="text-[11px] text-zinc-400 hover:text-emerald-400" title="Opdatér fra GitHub">⬆️<span class="hidden sm:inline"> Opdatér</span></button></form>
@@ -638,7 +645,9 @@
                 {% for art in articles %}
                 <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-4 text-xs space-y-2">
                     <div class="flex justify-between items-start gap-2">
-                        <div class="font-bold text-sm">{{ art.title }} <span class="text-[10px] font-normal text-zinc-500">({{ art.source }})</span></div>
+                        <div class="font-bold text-sm">{{ art.title }} <span class="text-[10px] font-normal text-zinc-500">({{ art.source }})</span>
+                            {% set rv = (art.review_json or '')|fromjson %}{% if rv %}<span class="ml-1 text-[10px] font-normal px-2 py-0.5 rounded {% if rv.status == 'godkendt' %}bg-emerald-500/10 text-emerald-400{% elif rv.status == 'venter' %}bg-amber-500/10 text-amber-400{% else %}bg-rose-500/10 text-rose-400{% endif %}" title="{{ (rv.reasons or [])|join(' · ') }}">Kvalitet: {{ rv.status }}{% if rv.score is not none %} {{ rv.score }}/10{% endif %}</span>{% endif %}
+                            {% if rv and rv.status != 'godkendt' and rv.reasons %}<div class="text-[11px] font-normal text-zinc-500 mt-1">{{ rv.reasons[:2]|join(' · ') }}</div>{% endif %}</div>
                         <div class="flex gap-2 items-center shrink-0">
                             {% if art.wp_link %}<a href="{{ art.wp_link }}" target="_blank" class="text-emerald-400">Åbn i WP ↗</a>
                             {% else %}
@@ -1020,6 +1029,44 @@
                 </div>
             </div>
         </div>
+
+        <div id="medier" class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <div class="flex flex-wrap items-baseline justify-between gap-2 mb-1">
+                <h3 class="font-semibold">🖼️ Medier</h3>
+                <span class="text-xs text-zinc-500">Billedbudget: ${{ '%.2f'|format(media_spent) }} af ${{ '%.0f'|format(media_limit) }} denne måned</span>
+            </div>
+            <p class="cc-note mb-3">Billeder laves med AI og gemmes her. Hvert billede tjekkes først af faste regler (størrelse, format, kontrast, dubletter) og derefter af en gratis AI-bedømmer. Kun billeder med mindst {{ qa_min_score }}/10 bliver godkendt og kan sendes til WordPress. Svarer bedømmeren ikke, venter billedet på dig.</p>
+            {% if media_feedback %}
+            <div class="{% if media_feedback.ok %}bg-emerald-500/10 border-emerald-500/30 text-emerald-300{% else %}bg-rose-500/10 border-rose-500/30 text-rose-300{% endif %} border rounded-xl px-3 py-2 text-xs mb-3">{{ media_feedback.msg }}</div>
+            {% endif %}
+            <form action="/media/generate" method="POST" class="flex flex-wrap gap-2 mb-4">
+                <select name="purpose" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                    {% for p in media_purposes %}<option value="{{ p }}">{{ {'artikel': 'Artikel (16:9)', 'social': 'Socialt opslag (1:1)', 'pinterest': 'Pinterest (2:3)'}.get(p, p) }}</option>{% endfor %}
+                </select>
+                <input name="subject" required maxlength="300" placeholder="Hvad skal billedet vise? fx brass steampunk goggles på et værkstedsbord" class="flex-1 min-w-[16rem] bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <input name="keyword" maxlength="80" placeholder="Søgeord (valgfrit)" class="w-48 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-2 rounded-xl text-sm">Lav billede</button>
+            </form>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {% for m in media_items %}
+                <div class="bg-zinc-950 border {% if m.status == 'godkendt' %}border-emerald-500/30{% elif m.status == 'afvist' or m.status == 'fejl' %}border-rose-500/30{% else %}border-amber-500/30{% endif %} rounded-xl overflow-hidden text-xs">
+                    {% if m.file %}<a href="/media/file/{{ m.id }}" target="_blank"><img src="/media/file/{{ m.id }}" alt="{{ m.alt_text or m.subject }}" loading="lazy" class="w-full h-32 object-cover"></a>{% endif %}
+                    <div class="p-2 space-y-1">
+                        <div class="flex justify-between gap-1"><b>#{{ m.id }} {{ m.status }}</b><span class="text-zinc-500">{% if m.qa_score is not none %}{{ m.qa_score }}/10{% endif %}</span></div>
+                        <div class="text-zinc-400 truncate" title="{{ m.subject }}">{{ m.purpose }} · {{ m.subject }}</div>
+                        {% for r in (m.qa.reasons or [])[:2] %}<div class="text-zinc-500">· {{ r }}</div>{% endfor %}
+                        <div class="flex gap-2 pt-1">
+                            {% if m.status != 'godkendt' and m.file %}<form action="/media/status" method="POST"><input type="hidden" name="id" value="{{ m.id }}"><input type="hidden" name="status" value="godkendt"><button class="text-emerald-400">Godkend</button></form>{% endif %}
+                            {% if m.status == 'godkendt' %}<form action="/media/status" method="POST"><input type="hidden" name="id" value="{{ m.id }}"><input type="hidden" name="status" value="afvist"><button class="text-amber-400">Afvis</button></form>{% endif %}
+                            <form action="/media/delete" method="POST" class="ml-auto"><input type="hidden" name="id" value="{{ m.id }}"><button class="text-zinc-500 hover:text-rose-400">Slet</button></form>
+                        </div>
+                    </div>
+                </div>
+                {% else %}
+                <p class="cc-note col-span-full">Ingen billeder endnu.</p>
+                {% endfor %}
+            </div>
+        </div>
     </section>
 
     <!-- KEYWORDS -->
@@ -1039,6 +1086,7 @@
                     <div>
                         <span class="font-medium">{{ kw.keyword }}</span>
                         {% if kw.position %}<span class="ml-2 px-2 py-0.5 rounded {% if kw.position <= 3 %}bg-emerald-500/10 text-emerald-400{% elif kw.position <= 10 %}bg-amber-500/10 text-amber-400{% else %}bg-zinc-800 text-zinc-400{% endif %}">#{{ kw.position }}</span>{% else %}<span class="text-zinc-600 ml-2">ikke i top 50</span>{% endif %}
+                        {% set tr = kw_trends.get(kw.keyword) %}{% if tr and tr.delta %}<span class="ml-1 {% if tr.delta > 0 %}text-emerald-400{% else %}text-rose-400{% endif %}" title="Ændring de sidste 30 dage">{% if tr.delta > 0 %}▲{{ tr.delta }}{% else %}▼{{ -tr.delta }}{% endif %}</span>{% endif %}{% if tr %}<span class="text-zinc-600 ml-1" title="Målinger gemt i alt">· {{ tr.points }} målinger</span>{% endif %}
                         {% if kw.target_url %}<a href="{{ kw.target_url }}" target="_blank" class="text-zinc-500 ml-2 truncate inline-block max-w-xs align-bottom">{{ kw.target_url }}</a>{% endif %}
                     </div>
                     <form action="/keywords/delete" method="POST">
@@ -1413,6 +1461,79 @@
 
     <!-- MODULER -->
     <section x-show="tab === 'moduler'" class="space-y-4" style="display: none;">
+        <div id="forbindelser" class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">🔌 Forbindelser (hovedprojektet)</h2>
+            <p class="text-xs text-zinc-500 mb-3">Sæt nøglerne her i stedet for i <code>.env</code> - ingen SSH. Gemte værdier vinder over <code>.env</code>, og hemmelige felter vises aldrig igen (lad feltet stå tomt for at beholde det gemte). Alt testes, når du gemmer.</p>
+            {% if conn_feedback %}
+            <div class="{% if conn_feedback.ok %}bg-emerald-500/10 border-emerald-500/30 text-emerald-300{% else %}bg-amber-500/10 border-amber-500/30 text-amber-300{% endif %} border rounded-xl px-3 py-2 text-xs mb-3">{{ conn_feedback.msg }}</div>
+            {% endif %}
+            {% if connections.authorize_url %}
+            <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs mb-3">
+                <b>WordPress i to klik:</b> <a href="{{ connections.authorize_url }}" target="_blank" rel="noopener" class="text-emerald-400 underline">1. Åbn "Godkend app" i WordPress</a> og tryk <i>Ja, jeg godkender</i>. 2. Kopiér koden WordPress viser, og sæt den ind herunder sammen med dit WordPress-brugernavn.
+            </div>
+            {% endif %}
+            <form action="/connections/save" method="POST" class="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
+                {% for f in connections.fields %}
+                <label class="block">
+                    <span class="text-[11px] text-zinc-500">{{ f.label }} · <span class="{% if f.source == 'mangler' %}text-amber-400{% else %}text-zinc-400{% endif %}">{{ f.source }}</span>{% if f.hint %} ({{ f.hint }}){% endif %}{% set r = connections.results.get({'WP_URL':'wordpress','WP_USER':'wordpress','WP_APP_PASSWORD':'wordpress','OPENROUTER_API_KEY':'openrouter','SERPAPI_KEY':'serpapi','GITHUB_TOKEN':'github'}[f.key]) %}{% if r and f.key in ('WP_APP_PASSWORD','OPENROUTER_API_KEY','SERPAPI_KEY','GITHUB_TOKEN') %} · <span class="{% if r[0] %}text-emerald-400{% else %}text-rose-400{% endif %}">{{ r[1] }}</span>{% endif %}</span>
+                    {% if f.secret %}
+                    <input name="{{ f.key }}" type="password" autocomplete="new-password" placeholder="{% if f.hint %}gemt - skriv for at skifte{% else %}indsæt{% endif %}" class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                    {% else %}
+                    <input name="{{ f.key }}" value="{{ f.value or (connections.wp_default if f.key == 'WP_URL' else '') }}" class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                    {% endif %}
+                </label>
+                {% endfor %}
+                <div class="md:col-span-2 flex flex-wrap gap-2 items-center">
+                    <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-2 rounded-xl">Gem og test</button>
+                    <button formaction="/connections/test" class="text-zinc-400 border border-zinc-800 px-4 py-2 rounded-xl">Test igen</button>
+                    {% if connections.tested_at %}<span class="text-[11px] text-zinc-500">Sidst testet {{ connections.tested_at[:16].replace('T', ' ') }}</span>{% endif %}
+                </div>
+            </form>
+        </div>
+        <div id="projekter" class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">🗂️ Projekter</h2>
+            <p class="text-xs text-zinc-500 mb-3">Hvert projekt er et site med egne søgeord, crawl, artikler, medier, flows, alarmer og WordPress-forbindelse. Brugere, logins, MCP-nøgler og chat er fælles. Du arbejder nu i <b class="text-emerald-300">{{ project_name }}</b> - skift i vælgeren øverst. Planlagte jobs kører for alle projekter.</p>
+            {% if proj_feedback %}
+            <div class="{% if proj_feedback.ok %}bg-emerald-500/10 border-emerald-500/30 text-emerald-300{% else %}bg-rose-500/10 border-rose-500/30 text-rose-300{% endif %} border rounded-xl px-3 py-2 text-xs mb-3">{{ proj_feedback.msg }}</div>
+            {% endif %}
+            <div class="space-y-2 mb-4">
+                {% for p in projects %}
+                <div class="bg-zinc-950 border {% if p.id == project_id %}border-emerald-500/40{% else %}border-zinc-800{% endif %} rounded-xl p-3 text-xs">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <b>{{ p.name }}</b><span class="text-zinc-500">{{ p.domain }}</span>
+                        {% if p.main %}<span class="cc-pill">hovedprojekt (.env)</span>{% endif %}
+                        <span class="{% if p.wp_set %}text-emerald-400{% else %}text-amber-400{% endif %}">{% if p.wp_set %}WordPress forbundet{% else %}WordPress ikke forbundet{% endif %}</span>
+                        {% if p.id != project_id %}<form action="/projects/switch" method="POST" class="ml-auto"><input type="hidden" name="pid" value="{{ p.id }}"><button class="text-emerald-400">Arbejd i dette projekt</button></form>{% endif %}
+                    </div>
+                    {% if not p.main %}
+                    <details class="mt-2"><summary class="text-zinc-500 cursor-pointer">WordPress og sletning</summary>
+                        <form action="/projects/wp" method="POST" class="flex flex-wrap gap-2 mt-2">
+                            <input type="hidden" name="id" value="{{ p.id }}">
+                            <input name="wp_url" value="{{ p.wp_url }}" placeholder="https://site.dk" class="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 w-56">
+                            <input name="wp_user" value="{{ p.wp_user }}" placeholder="WordPress-bruger" class="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 w-40">
+                            <input name="wp_app_password" type="password" placeholder="{% if p.wp_set %}gemt - skriv for at skifte{% else %}applikationsadgangskode{% endif %}" autocomplete="new-password" class="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 w-56">
+                            <button class="text-emerald-400">Gem</button>
+                        </form>
+                        <form action="/projects/delete" method="POST" class="flex gap-2 mt-2">
+                            <input type="hidden" name="id" value="{{ p.id }}">
+                            <input name="confirm" placeholder="skriv SLET" class="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 w-28">
+                            <button class="text-rose-400">Fjern projekt</button>
+                        </form>
+                    </details>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+            <form action="/projects/add" method="POST" class="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
+                <input name="name" required maxlength="60" placeholder="Navn, fx Kaffeguiden" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                <input name="domain" required placeholder="Domæne, fx kaffeguiden.dk" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                <input name="wp_url" placeholder="WordPress-adresse (valgfri), https://…" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                <input name="wp_user" placeholder="WordPress-bruger (valgfri)" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                <input name="wp_app_password" type="password" autocomplete="new-password" placeholder="Applikationsadgangskode (valgfri)" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                <input name="media_style" maxlength="600" placeholder="Billedstil (valgfri), fx lyse skandinaviske køkkenmiljøer" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                <button class="md:col-span-2 bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-2 rounded-xl">➕ Opret projekt</button>
+            </form>
+        </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">Moduler</h2>
             <p class="text-xs text-zinc-500 mb-4">Slå funktioner til/fra. Slukkede moduler kører ikke automatisk og viser ikke knapper i API-kald.</p>

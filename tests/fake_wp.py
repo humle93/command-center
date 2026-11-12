@@ -59,6 +59,10 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/wp-json/sgap/v1/cc-link":
             open(STATE + ".cclink", "w").write(json.dumps(data))
             return self.send(200, {"ok": True, "linked": bool(data.get("secret")), "url": data.get("url")})
+        if self.path == "/wp-json/sgap/v1/priorities":
+            open(STATE + ".priorities", "w").write(json.dumps(data))
+            items = data.get("items") or []
+            return self.send(200, {"saved": len(items), "skipped": [], "status": {"active": len(items)}})
         if self.path == "/wp-json/sgap/v1/drafts":
             drafts.append({"id": len(drafts) + 1, "status": "pending", **data})
             open(STATE + ".last", "w").write(json.dumps(data))

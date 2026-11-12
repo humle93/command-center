@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 11. november 2026 · **Version:** 7.30.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 11. november 2026 · **Version:** 7.36.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,57 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Forbindelser i browseren (v7.36.0, 12. november)
+- **Baggrund:** "er en doven skid og vil lave så lidt som muligt". Nøglerne krævede SSH og `.env`. Nu sættes de under Moduler → Forbindelser, med WordPress' *authorize-application*-side til applikationsadgangskoden.
+- **Valg:** gemt > `.env`, lagret i center.db (`settings.ui_keys`, uanset aktivt projekt), anvendt på modul-globalerne straks. Delvise formularer rører kun de sendte felter (fejl fundet i test).
+- **Faldgrube:** WordPress' `success_url` kræver https, og CC kører på http://IP:port, så koden kopieres i stedet for at blive sendt tilbage automatisk.
+- **Test:** 10 `forbindelser:`-checks mod fakes. Ikke kaldt mod de rigtige tjenester herfra.
+
+### Flere projekter (v7.35.0, 12. november)
+- **Baggrund:** affiliate-nichesiden (kaffe, se steamgears-site `docs/library/affiliate-niche-plan-2026-11-12.md`) skal køre i samme CC. Brugeren valgte fler-projekt frem for en ekstra installation.
+- **Valg:** én database pr. projekt i stedet for `project_id` på 40 tabeller og 260 kald. Fælles tabeller nås via `ATTACH center.db AS g` (SQLite slår ukvalificerede navne op i main → g). Projekt 1 = `.env` + center.db, uændret.
+- **Faldgruber:**
+  - `run_in_executor` kopierer ikke contextvars, så `executor` er en `_ContextExecutor`.
+  - Konfigurationen blev skiftet med `tokenize` (63 steder), så strenge og beskeder er urørte.
+  - Testene sætter stadig `main.WP_URL` (projekt 1 læser modul-globalerne).
+  - `settings` og `alarms` er pr. projekt, `alert_outbox` er fælles.
+- **Test:** 28 `projekt:`-checks. Browser: oprettelse, skift, 17 faner uden JS-fejl.
+
+### JPEG til WordPress (v7.34.1, 12. november)
+- Instagram tager kun JPEG, og pluginnet (7.84.0) poster nu selv til Instagram/Pinterest, så Publer kan opsiges. `wp_upload_media()` konverterer derfor PNG → JPEG q90. 1 nyt check.
+
+### Medier + kvalitetssikring (v7.34.0, 12. november)
+- **Baggrund:** "kan command center ik os lave og gemme [billeder] … kvalitetssikre materialer så den ik bare sender lort afsted". Budget: $30/md. Formål: artikler + sociale opslag nu, produkt-mockups venter på Printful.
+- **Kode:** `make_image` → `_openrouter_image` (modalities image) → `image_rules` (Pillow) → `review_image` (nedskaleret JPEG til gratis vision-modeller) → `qa_verdict`. Tekst: `review_text`/`review_article` oven på `quality_check`. `rereview_pending` + job `rereview`. Flow-blok `billede` (19 blokke) i Indholdsmaskinen. `wp_upload_media` + `featured_media`.
+- **Princip:** fail closed. Intet svar fra en bedømmer = `venter`, aldrig godkendt.
+- **Målt live fra steamgears.eu:** (1) OpenRouter afviser > 3 modeller i `models`. (2) Billeder kræver ≥ $1 saldo (402). (3) De gratis modeller ræsonnerer: 1 200 tokens gav tomt svar, så loftet er 4 000. (4) Et 340 KB-billede gav 504, 35 KB blev bedømt på 3,5 s, derfor nedskaleres billedet. (5) `inkling-2-small:free` er 403 i regionen.
+- **Plugin:** Steamgears Autopilot 7.83.2 (`SGAP_Editor`) bedømmer sociale opslag live: rigtige opslag 8/5/9, et opdigtet tilbud 1-2/10.
+- **Test:** 34 `medie`/`tekst-qa`/`qa`-checks. Billedkaldet er ikke lavet mod det rigtige OpenRouter (saldo < $1).
+
+### Prioritetsbro + historik for altid (v7.33.0, 12. november)
+- **Baggrund:** brugeren spurgte, om det ikke var en god idé at bruge CC's data i pluginnet. Det var det, men til *hvilke sider* pluginnet laver sociale opslag om, ikke til artikler: CC skriver selv artiklerne, og pluginnets `articles_per_week` er 0 (målt live). Og: "de 8 terabyte er alle sammen mine. Så vi gemmer som vi har lyst til".
+- **Bro:** `cc_priority_items()` + `sgap_push_priorities()` → `POST /sgap/v1/priorities` (Steamgears Autopilot 7.82.0, `SGAP_Priorities`). Flow-blok `prioriteter` (18. blok), i *Ugentlig optimering* efter `soegeord`. Pluginnets `pick()` tager siderne først (7 dages pause pr. side) og skriver søgeordet ind i prompten. Kø, kanaler, lofter og kvalitetsgaten er pluginnets, uændret.
+- **Historik:** `keyword_history` og `page_history` (også i grundskemaet, fordi testene laver en frisk DB uden `migrate_db`), ryddes aldrig. `KEEP_DAYS` 0 = for altid. Ruterne hedder `/api/trend/*`, fordi `/api/history/{domain_id}` allerede findes (et sammenstød gav 422).
+- **Test:** 9 `prioritet:`- og 9 `historik:`-checks; begge suiter ALL PASS. Pluginnets rute er målt live (200, afvisning med grund, 401 uden login). Et rigtigt kald fra CC mangler WP-oplysningerne i serverens `.env`.
+
+### Længere historik (v7.32.0, 12. november)
+- **Baggrund:** serveren har masser af plads (8 TB, 50 Gbit), men er delt — brugeren: "så længe det ik påvirker fair usage … vil ik ødelægge noget for de andre".
+- **Valg:** kun opbevaring er hævet (`KEEP_DAYS`, `KEEP_ROWS`, `BACKUP_KEEP`/`CC_BACKUP_KEEP`). Crawl-loft (100), pause (0,4 s) og jobfrekvenser er **uændrede**; `login_attempts` forbliver 30 dage (IP-adresser). Visningerne har stadig `LIMIT`, så siderne bliver ikke tungere.
+- **Ikke gjort:** crawl-historik over tid — `seopages`-forespørgsler skal først filtrere på `run_id` overalt.
+- **Test:** 3 `historik:`-checks.
+
+### Gratis AI-reserve (v7.31.0, 12. november)
+- **Baggrund:** brugeren: "openrouter har en auto/free som vi kan tilføje". Målt fra steamgears.eu (containeren når ikke openrouter.ai): `openrouter/free` har pris 0, og `openrouter/auto` er betalt (pris -1 = variabel), så det er kun `free`, der bruges som reserve.
+- **Kode:** `_openrouter_post()`, `ai_wants_free_retry()`, `AI_FREE_MODELS` (env, standard `nvidia/nemotron-3-ultra-550b-a55b:free,google/gemma-4-31b-it:free,openrouter/free`; Nemotron Ultra først efter brugerens valg), `AI_LAST_FALLBACK`, info-alarm. Kun kreditfejl skifter model, og 401/404 er uændrede.
+- **Test:** 8 `gratis:`-checks. Ikke kaldt mod det rigtige OpenRouter herfra. Pluginnets tilsvarende kode (7.81.0) er målt live: 3 opslag fra en `:free`-model med `cost: 0`.
+
+### Rettet model-slug (v7.30.1, 12. november)
+- Standarden for `AI_MODEL` var `google/gemini-3-8-flash`, som ikke findes hos OpenRouter. Den er nu `google/gemini-3.8-flash`
+  (main.py, `.env.example`, manual, `install.sh`). En `.env` med `AI_MODEL` sat skal rettes i hånden; self-update rører ikke `.env`.
+- **Grænsen mod Steamgears Autopilot (besluttet 12/11):** pluginnet ejer sociale opslag (kø, feeds, kanaler, evergreen, klik).
+  Command Center ejer analyse, SEO og artikler. Artikler går kun som kladder, og CC læser `/snapshot` uden at skrive i
+  pluginnets kø. Plugin 7.80.0 (steamgears-site) holder opslag til slukkede kanaler tilbage og melder tomme AI-kørsler i selvtjekket.
 
 ### Flows (v7.30.0, 12. november) — implementeret
 - **Baggrund:** ønsket var "flow-system … udvid alle funktioner, så de kan kædes sammen til auto-optimering".
@@ -91,12 +142,12 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
 
 ### AI via OpenRouter i stedet for aimlapi (v7.25.0) — implementeret
 - **Baggrund:** ønsket var "Tilføj openrouter api i stedet for aimlapi". aimlapi er fjernet; der er ingen fallback til den gamle nøgle (den virker ikke mod OpenRouter).
-- **Konfiguration:** `OPENROUTER_API_KEY` (erstatter `AIMLAPI_KEY`), `AI_MODEL` (nu en OpenRouter-slug, default uændret `google/gemini-3-8-flash`) og valgfri `OPENROUTER_BASE_URL` (default `https://openrouter.ai/api/v1`).
+- **Konfiguration:** `OPENROUTER_API_KEY` (erstatter `AIMLAPI_KEY`), `AI_MODEL` (nu en OpenRouter-slug, default uændret `google/gemini-3.8-flash`) og valgfri `OPENROUTER_BASE_URL` (default `https://openrouter.ai/api/v1`).
 - **Ét kald:** `ai_chat(prompt, max_tokens, timeout)` er eneste vej til modellen; `generate_article_ai()` og outreach-draften brugte før hver sin kopi af `HTTP.post`. Den sender `X-Title: Command Center` og `HTTP-Referer: CC_PUBLIC_URL` (når sat), læser OpenRouters `error`-objekt før `choices` og kaster `AIError` (en `RequestException`), så de eksisterende `except`-grene fanger den.
 - **Budget:** `API_BUDGETS["ai"]` tæller værtsnavnet fra `OPENROUTER_BASE_URL` (`openrouter.ai`), ikke `aimlapi.com`.
 - **Gammel nøgle:** `warn_legacy_aimlapi()` i lifespan giver `[cc] advarsel:` + alarm (`ai`), når kun `AIMLAPI_KEY` er sat.
 - **Test:** 15 `openrouter:`-checks i `tests/test_v8_features.py` (URL, headers, model/max_tokens/timeout, budget, fejl i 200-svar, 401 uden nøgle i teksten, tomt choices, tom besked, ikke-JSON, ingen Referer uden `CC_PUBLIC_URL`, advarsel, ingen `aimlapi.com` i koden).
-- **Ikke verificeret her:** et rigtigt kald til openrouter.ai (containerens proxy afviser værten), og om slug'en `google/gemini-3-8-flash` findes hos OpenRouter — tjek den på openrouter.ai/models og sæt `AI_MODEL` efter behov.
+- **Ikke verificeret her:** et rigtigt kald til openrouter.ai (containerens proxy afviser værten), og om slug'en `google/gemini-3.8-flash` findes hos OpenRouter — tjek den på openrouter.ai/models og sæt `AI_MODEL` efter behov.
 - **Screenshots:** dashboardets AI-tekster er ændret, men `docs/img/` er ikke fotograferet om (commit med `[skip screenshots]`).
 - **Lokal testkørsel i en container uden DNS:** `NO_PROXY=127.0.0.1,localhost,testserver` og en `sitecustomize.py`, der giver ukendte navne en offentlig IP; ellers fejler SSRF-tjekkene på `example.com`/`example.dk` (det sker også på main).
 

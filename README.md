@@ -1,12 +1,55 @@
-# Command Center v7.30 PRO
+# Command Center v7.36 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
 
+## Nyheder i v7.36
+
+- **Forbindelser i browseren (v7.36.0)** — kortet **🔌 Forbindelser** under Moduler sætter WordPress (adresse, bruger, applikationsadgangskode), OpenRouter, SerpAPI og GitHub-token for hovedprojektet uden SSH.
+  - **WordPress i to klik:** linket åbner WordPress' egen *Godkend app*-side. Du godkender og indsætter koden.
+  - **Test ved gem:** WordPress-rolle (administrator kræves til autopilot-broen), OpenRouter-kredit, SerpAPI-søgninger tilbage og adgang til GitHub-repoet.
+  - **Gemte værdier vinder over `.env`** og bruges straks uden genstart. Hemmelige felter vises aldrig igen (kun de sidste 4 tegn), og et tomt felt beholder det gemte.
+  - **Lagring:** nøglerne ligger i `center.db` som connector-nøglerne og følger derfor med i backups.
+
+## Nyheder i v7.35
+
+- **Flere projekter (v7.35.0)** — ét Command Center kan nu styre flere sites. Opret et projekt under **Moduler → 🗂️ Projekter** (navn, domæne, valgfrit WordPress og billedstil), og skift i vælgeren øverst.
+  - **Hvad hvert projekt har for sig selv:** søgeord og historik, crawl, artikler, medier, flows, alarmer, noter, moduler, indstillinger og WordPress-forbindelse, i sin egen databasefil (`app/data/projects/p<id>.db`).
+  - **Hvad der er fælles:** brugere, logins, MCP-nøgler og chat.
+  - **Hovedprojektet** er det oprindelige site med `.env`. Ingen data flyttes, og navnet sættes med `CC_PROJECT_NAME`.
+  - **Sikkerhed:** et nyt projekt bruger aldrig hovedprojektets WordPress-nøgler.
+  - **Jobs og alarmer:** planlagte jobs kører for alle projekter, og alarmer har projektets navn foran.
+  - **Backups og sletning:** backups navngives pr. projekt, og gendannelse virker kun i hovedprojektet. Sletning gemmer databasen som `.slettet`-fil.
+
+## Nyheder i v7.34
+
+- **v7.34.1:** billeder lægges i WordPress som JPEG (kvalitet 90). Instagram tager kun JPEG, og Steamgears Autopilot 7.84.0 kan nu poste direkte til Instagram og Pinterest (Publer udfases). Originalen ligger stadig som PNG i Command Center.
+- **Medier og kvalitetssikring (v7.34.0)** — kortet **🖼️ Medier** i fanen Vækst laver billeder til artikler (16:9), sociale opslag (1:1) og Pinterest (2:3) via OpenRouter (`IMAGE_MODEL`, standard `google/gemini-3.1-flash-lite-image`) og gemmer dem på serveren med prompt, model og pris. Hvert billede tjekkes i to trin:
+  - **Faste regler:** kan åbnes, størrelse og format til formålet, ikke ensfarvet eller udvasket, ikke en dublet af et godkendt billede (dHash).
+  - **Gratis AI-bedømmer** (`VISION_MODELS`): emne, forvrænget tekst, ekstra fingre, artefakter og steampunk-stil.
+
+  Under 7/10 (`QA_MIN_SCORE`) afvises billedet med grunden, og der laves ét nyt forsøg. Svarer ingen bedømmer, **venter** billedet. Det bliver aldrig godkendt af sig selv, og et job prøver igen hver time. Månedsloft `IMAGE_MONTHLY_LIMIT_USD=30` stopper før kaldet. OpenRouter kræver mindst $1 på kontoen for billeder.
+- **AI-redaktør på artikler** — oven på de faste regler (ord, søgeord, overskrifter) læser en gratis model artiklen. Den ser efter opdigtede priser, rabatter, løfter og påstande, klichéer, gentagelser og blandet sprog. Kun 7/10 eller mere går videre til WordPress (flow og growth-autopilot). Artikellisten viser dommen.
+- **Indholdsmaskinen** laver nu et godkendt billede til hver godkendt artikel. Kladden kommer i WordPress med billedet som udvalgt billede og en alt-tekst. Sociale opslag i Steamgears Autopilot 7.83+ får samme redaktør.
+
+## Nyheder i v7.33
+
+- **Broen til autopiloten (v7.33.0)** — ny flow-blok **"Send sider tæt på toppen til autopiloten"** (også i *Ugentlig optimering*, lige efter Søgeord). Den sender op til 30 af dine egne sider på plads 4-20 med deres søgeord til Steamgears Autopilot (`POST /sgap/v1/priorities`, plugin 7.82.0+). Pluginnet laver sociale opslag om de sider først og bruger søgeordet i opslaget. Sider med fejl af høj prioritet fra on-page-tjekket bliver ikke sendt. Pluginnet bestemmer stadig selv kø, kanaler og lofter.
+- **Historik for altid** — hver søgeordsmåling gemmes i `keyword_history` og hver crawlet side i `page_history`. Intet ryddes automatisk. Fanen Keywords viser udviklingen de sidste 30 dage (▲/▼) og antal målinger, og hele forløbet ligger på `GET /api/trend/keyword?keyword=` og `GET /api/trend/page?url=`. Oppetid, sundhedsscore og søgeordsidéer gemmes også for altid, backups i 365 eksemplarer (`CC_BACKUP_KEEP`). Sikkerhedslogs har stadig en grænse: MCP-audit 1 år, login-forsøg 30 dage. Crawl-tempoet er uændret.
+
+## Nyheder i v7.32
+
+- **Længere historik (v7.32.0)** — CC gemmer nu 1 år oppetidstjek, sundhedsscore, søgeordsidéer og MCP-audit (før 90-180 dage), 180 dage løste alarmer (før 30), 500 flow-kørsler og indholdsmålinger (før 50), 200 optimeringer (før 20) og 60 backups pr. type (før 14, `CC_BACKUP_KEEP`). Det koster kun diskplads — ingen ekstra kald. Crawleren er **bevidst uændret** (højst 100 sider, 0,4 s pause), så en delt server og de sider, der crawles, ikke mærker noget. Login-forsøg (IP-adresser) gemmes stadig kun 30 dage.
+
+## Nyheder i v7.31
+
+- **Gratis AI-reserve (v7.31.0)** — afviser OpenRouter `AI_MODEL` for manglende kredit (402), prøves kaldet én gang til på gratis modeller via OpenRouters `models`-liste: `nvidia/nemotron-3-ultra-550b-a55b:free`, `google/gemma-4-31b-it:free` og til sidst `openrouter/free` (OpenRouters router over de gratis modeller). Skiftet bliver en info-alarm, så du kan se det. Styres med `AI_FREE_MODELS` i `.env` (tom = slået fra). Gratis modeller har en dagsgrænse hos OpenRouter, og kvaliteten svinger.
+
 ## Nyheder i v7.30
 
+- **v7.30.1:** standardmodellen er `google/gemini-3.8-flash` (den gamle `google/gemini-3-8-flash` findes ikke hos OpenRouter). Har du `AI_MODEL=` i `.env`, så ret den dér.
 - **Flows — kæd funktionerne sammen til auto-optimering (v7.30.0)** — ny fane **🔁 Flows**. En flow er en kæde af op til 10 **blokke**, der kører i rækkefølge og deler resultater: *Analyse* (teknik, crawl, on-page, indholdsscore, søgeord, monitors, konkurrenter, content gap, backlinks), *Generér* (søgeordsidéer, AI-titler/meta, indholdsplan, AI-artikel) og *Handling* (WordPress-kladde, growth-autopilot, rapport til Alarmer/kanaler, note). "Søgeord" finder ord på plads 4-20, og "Indholdsplan"/"Skriv artikel" bruger dem automatisk. Hver blok kan have en betingelse (*altid*, *kun hvis forrige trin fandt noget*, *kun hvis der er høj prioritet*), og flowen kører **manuelt, hver time, dagligt eller ugentligt**. Fire færdige flows: **Daglig sundhed**, **Ugentlig optimering**, **Indholdsmaskine** (søgeord tæt på toppen → plan → AI-artikel → WordPress-kladde) og **Konkurrent-overvågning**. Sikkerhed: alt til WordPress er **kladder** (aldrig udgivet), kun artikler der består kvalitetstjekket sendes, højst 2 AI-artikler pr. blok, én kørsel ad gangen (også mod 1-klik optimeringen), og en blok uden nøgle springes over med en forklaring. Hver kørsel logges trin for trin
 
 ## Nyheder i v7.29

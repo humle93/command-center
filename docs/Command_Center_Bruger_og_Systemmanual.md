@@ -257,7 +257,7 @@ Fanen **💬 Chat** er en samtale med AI'en (OpenRouter, `CHAT_MODEL` eller `AI_
 
 ## AI Tools
 
-Samlede AI-værktøjer: titel/meta-rewrites, outreach-drafts, artikel-meta, interne link-forslag og AI-synlighed. Bruger OpenRouter: `OPENROUTER_API_KEY` + `AI_MODEL` (en OpenRouter-slug, default `google/gemini-3-8-flash`; max_tokens 3000 pga. reasoning-tokens). Nøglen laves på openrouter.ai/keys, og modellerne står på openrouter.ai/models. `OPENROUTER_BASE_URL` kan pege på en anden OpenAI-kompatibel adresse. Står kun den gamle `AIMLAPI_KEY` i `.env` (før v7.25.0), bruges den ikke: opstarten skriver en advarsel, og der kommer en alarm under Alarmer. Månedens forbrug tælles og stoppes ved `AI_MONTHLY_LIMIT`.
+Samlede AI-værktøjer: titel/meta-rewrites, outreach-drafts, artikel-meta, interne link-forslag og AI-synlighed. Bruger OpenRouter: `OPENROUTER_API_KEY` + `AI_MODEL` (en OpenRouter-slug, default `google/gemini-3.8-flash`; max_tokens 3000 pga. reasoning-tokens). Nøglen laves på openrouter.ai/keys, og modellerne står på openrouter.ai/models. `OPENROUTER_BASE_URL` kan pege på en anden OpenAI-kompatibel adresse. Står kun den gamle `AIMLAPI_KEY` i `.env` (før v7.25.0), bruges den ikke: opstarten skriver en advarsel, og der kommer en alarm under Alarmer. Månedens forbrug tælles og stoppes ved `AI_MONTHLY_LIMIT`. **Gratis reserve (v7.31.0):** afviser OpenRouter modellen for manglende kredit (402), prøves samme kald på `AI_FREE_MODELS` (standard `nvidia/nemotron-3-ultra-550b-a55b:free,google/gemma-4-31b-it:free,openrouter/free`). Du får en info-alarm med den model, der svarede. Gratis modeller har en dagsgrænse hos OpenRouter. Sæt `AI_FREE_MODELS=` (tom) for at slå reserven fra.
 
 **AI-synlighed** (fanen *AI*, `/ai/visibility`): stil det spørgsmål en kunde ville stille en AI-assistent (fx "hvor køber jeg steampunk-goggles?"). CC beder modellen om at nævne konkrete butikker og registrerer, om `TRACK_DOMAIN` optræder i svaret — med et uddrag af svaret som dokumentation. Hvert tjek gemmes i `ai_visibility`, så du kan følge, om sitet bliver nævnt i AI-svar over tid. Kræver `OPENROUTER_API_KEY`.
 
@@ -310,6 +310,66 @@ Cockpit-panelet viser **installeret commit** og **seneste commit på `main`**:
 
 Opdateringen kører kontrollen automatisk, **før** den skriver noget: er `install.sh` på disken ældre end koden, stopper den med kode 7 og rører ingen filer. Beskeden siger hvad man gør i stedet (`git checkout -- install.sh` eller `git pull`), og at intet er ændret. Grunden er, at en gammel installatør ellers kan ligge klar og rulle koden tilbage, næste gang nogen kører den. `--check` og `--version` skriver intet og virker uanset. `bash scripts/restart.sh` genstarter uden at opdatere
 - Status som JSON: `GET /api/update` (inkl. `restart_mode`/`auto_restart`), `POST /api/update/check`, `POST /api/update/apply` (bruges af scriptet). `/self-update` er alias for `/update/apply`
+
+## Forbindelser i browseren (v7.36.0)
+
+Fanen **Moduler → 🔌 Forbindelser** er den nemme vej til nøglerne. Du skal ikke ind på serveren.
+
+1. **WordPress:** klik **Åbn "Godkend app" i WordPress** og godkend. Kopiér koden, WordPress viser, og indsæt den sammen med dit WordPress-brugernavn. Brugeren skal være administrator, hvis autopilot-broen skal virke.
+2. **OpenRouter, SerpAPI og GitHub-token:** indsæt nøglen.
+3. Tryk **Gem og test**. Ved hver forbindelse står resultatet: WordPress-navn og rolle, OpenRouter-kredit, SerpAPI-søgninger tilbage og adgang til GitHub-repoet (også når det er privat).
+
+Gemte værdier vinder over `.env` og virker med det samme. Et tomt hemmeligt felt beholder det gemte, og afkrydsning af *ryd* (feltet `clear_<NØGLE>`) sender dig tilbage til `.env`. Andre projekter end hovedprojektet sætter WordPress under **🗂️ Projekter**.
+
+## Flere projekter (v7.35.0)
+
+Command Center kan styre flere sites. Hvert site er et **projekt** med egne søgeord og historik, crawl, artikler, medier, flows, alarmer, noter, moduler og WordPress-forbindelse. Brugere, logins, MCP-nøgler og chat er fælles.
+
+**Opret:** fanen **Moduler → 🗂️ Projekter**. Udfyld navn og domæne. WordPress-adresse, bruger og applikationsadgangskode er valgfri (alle tre eller ingen) og kan tilføjes senere. Billedstil er valgfri. Uden den bruges en neutral fotostil i stedet for steamgears' steampunk-stil.
+
+**Skift:** vælgeren øverst ved siden af versionsnummeret. Alt, hvad du gør bagefter (formularer, crawl, flows, medier), sker i det valgte projekt.
+
+**Hovedprojektet** er det oprindelige site. Det bruger `.env` og den gamle database, så intet er flyttet. Navnet i vælgeren sættes med `CC_PROJECT_NAME`.
+
+**Godt at vide:**
+- Planlagte jobs (oppetid, søgeord, flows, backup osv.) kører for alle projekter.
+- Alarmer til Telegram, e-mail m.fl. har projektets navn foran.
+- Backups hedder `cc-p<id>-…` for projekter. Gendannelse virker kun i hovedprojektet.
+- Et nyt projekt bruger aldrig hovedprojektets WordPress-nøgler.
+- WordPress-adgangskoden gemmes i klartekst i `center.db` (som connector-nøgler) og vises aldrig i siden. Et tomt kodeordsfelt beholder den gemte.
+- **Fjern projekt** kræver, at du skriver `SLET`. Databasen bliver liggende som `.slettet`-fil i `app/data/projects/`.
+
+## Medier og kvalitetssikring (v7.34.0)
+
+Kortet **🖼️ Medier** ligger nederst i fanen **Vækst**. Vælg formål (artikel 16:9, socialt opslag 1:1, Pinterest 2:3), skriv hvad billedet skal vise, og tryk **Lav billede**. Alle billeder gemmes på serveren, også de afviste, så du kan se, hvad der blev stoppet og hvorfor.
+
+**Sådan bliver et billede godkendt:**
+1. **Faste regler:** billedet kan åbnes, har mindst 1200×630 (artikel), 1000×1000 (socialt) eller 800×1200 (Pinterest) og har det rigtige format. Det må ikke være ensfarvet, for mørkt eller for lyst og må ikke være næsten magen til et godkendt billede.
+2. **AI-bedømmer:** en gratis vision-model giver 0-10 for emne, forvrænget tekst, logoer, ekstra fingre, smeltede ting og steampunk-stil. Mindst 7/10 (`QA_MIN_SCORE`) giver godkendt.
+3. **Afvist:** grunden gemmes, og der laves ét nyt forsøg, hvor de første fejl skal undgås. **Svarer ingen bedømmer**, står billedet som *venter*. Det godkendes ikke af sig selv, og der prøves igen hver time. Du kan altid godkende eller afvise i hånden.
+
+**Budget:** `IMAGE_MONTHLY_LIMIT_USD` (standard $30) tjekkes før hvert kald. OpenRouter laver kun billeder, når der står mindst $1 på kontoen.
+
+**Tekster:** artikler fra flows og growth-autopiloten skal både bestå de faste regler og få mindst 7/10 af AI-redaktøren, før de sendes til WordPress. Artikellisten viser "Kvalitet: godkendt 8/10" eller grunden til, at artiklen er holdt tilbage. Den manuelle knap *Send til WP* er din egen beslutning og sender stadig.
+
+## Historik og diskplads (v7.33.0)
+
+| Data | Gemmes |
+|---|---|
+| Søgeordsplaceringer (hver måling) | for altid (`keyword_history`) |
+| Crawlede sider (hvert crawl) | for altid (`page_history`) |
+| Oppetidstjek, sundhedsscore, søgeordsidéer | for altid |
+| Løste alarmer, MCP-audit | 1 år |
+| Flow-kørsler, indholdsmålinger | de seneste 5000 |
+| 1-klik optimeringer | de seneste 2000 |
+| Backups | de seneste 365 pr. type (`CC_BACKUP_KEEP`) |
+| Login-forsøg (IP-adresser) | 30 dage (privatliv) |
+
+Fanen **Keywords** viser ▲/▼ for udviklingen de sidste 30 dage og hvor mange målinger der er gemt. Hele forløbet kan hentes som JSON: `/api/trend/keyword?keyword=…` og `/api/trend/page?url=…`. Crawleren er ikke gjort hurtigere eller større (højst 100 sider, 0,4 s pause), så den delte server og de sider, den henter, ikke mærker noget.
+
+## Broen til autopiloten (v7.33.0)
+
+Flow-blokken **"Send sider tæt på toppen til autopiloten"** (gruppe *Handling*, kræver WordPress-broen) sender dine egne sider på plads 4-20 med søgeord til Steamgears Autopilot 7.82.0+. Pluginnet laver sociale opslag om dem først og bruger søgeordet i teksten. Sider med fejl af høj prioritet fra *On-page* sendes ikke. Blokken ligger i *Ugentlig optimering* lige efter *Søgeord*. Har dit plugin ikke ruten endnu, siger blokken det (opdatér til 7.82.0).
 
 ## Flows (v7.30.0)
 
@@ -374,6 +434,10 @@ svaret) — ingen går ned. Hvad hver funktion kræver:
 | Monitors (tekst, JSON, pris), noter, backup, moduler, API-nøgler, brugere (login/kode) | intet | virker (pris-monitor rettet i 7.28.1) |
 | 1-klik optimering (teknik, crawl, on-page, indhold, monitors) | intet (AI-forslag og placeringer kræver deres nøgle) | virker (v7.29.0) |
 | Flows (automatiske kæder) | blokkene kræver det samme som funktionerne ovenfor | virker (v7.30.0) |
+| Forbindelser i browseren | intet | virker (v7.36.0); testkaldene er prøvet mod fakes, ikke de rigtige tjenester |
+| Flere projekter | intet (WordPress pr. projekt valgfrit) | virker (v7.35.0) |
+| Medier + kvalitetssikring | `OPENROUTER_API_KEY` (billeder: min. $1 på kontoen) | virker (v7.34.0); bedømmerne er målt live, billedkaldet ikke (saldo < $1) |
+| Prioriteter til autopiloten | WordPress-broen + Steamgears Autopilot 7.82.0 + målte søgeord | virker (v7.33.0); kaldet mod sitet er testet med en fake |
 | Konkurrent-søgning (Spy) | intet (DuckDuckGo) | virker, men DuckDuckGo kan blokere servere — så siger alarmen det |
 | Søgeordsidéer | intet (Google/DuckDuckGo-forslag) | virker |
 | Søgeords-placeringer, backlink-prospekter, content gap, sværhedsgrad | `SERPAPI_KEY` | virker med nøgle |

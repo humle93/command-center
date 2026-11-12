@@ -21,7 +21,9 @@ jobs:
       # Reglen: kildekode kraever dokumentation i samme commit. install.sh er undtaget,
       # fordi den genereres fra kilderne og i forvejen tjekkes af paritetstrinnet nedenfor.
       # Paa pull_request er HEAD en merge-commit ("Merge X into Y"), saa [skip docs]/[skip screenshots]
-      # laeses fra PR'ens egen head-commit (HEAD_SHA); paa push er det github.sha.
+      # laeses fra PR'ens egen head-commit (HEAD_SHA); paa push er det github.sha. Er HEAD_SHA selv en
+      # merge-commit (push til main efter "Merge pull request"), laeses ogsaa dens anden forælder (PR'ens
+      # sidste commit) - ellers fejlede main efter hver PR med en markoer (#9 og #11).
       - name: Documentation follows code changes
         shell: bash
         env:
@@ -45,7 +47,7 @@ jobs:
           code="${code:-0}"; docs="${docs:-0}"
           echo "kode-filer: $code · dokumentations-filer: $docs"
           if [ "$code" -gt 0 ] && [ "$docs" -eq 0 ]; then
-            if git log -1 --pretty=%B "$HEAD_SHA" | grep -q '\[skip docs\]'; then
+            if { git log -1 --pretty=%B "$HEAD_SHA"; if git rev-parse -q --verify "$HEAD_SHA^2" >/dev/null; then git log -1 --pretty=%B "$HEAD_SHA^2"; fi; } | grep -q '\[skip docs\]'; then
               echo "Dokumentation sprunget over ([skip docs])."
               exit 0
             fi
@@ -75,7 +77,7 @@ jobs:
           template_date="$(date -u -d "@$template_time" '+%Y-%m-%d')"
           echo "$template: $template_date - docs/img/: $shot_date"
           if [ "$template_time" -gt "$shot_time" ]; then
-            if git log -1 --pretty=%B "$HEAD_SHA" | grep -q '\[skip screenshots\]'; then
+            if { git log -1 --pretty=%B "$HEAD_SHA"; if git rev-parse -q --verify "$HEAD_SHA^2" >/dev/null; then git log -1 --pretty=%B "$HEAD_SHA^2"; fi; } | grep -q '\[skip screenshots\]'; then
               echo "Screenshots sprunget over ([skip screenshots])."
               exit 0
             fi

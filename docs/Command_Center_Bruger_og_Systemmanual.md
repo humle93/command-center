@@ -313,7 +313,7 @@ Opdateringen kører kontrollen automatisk, **før** den skriver noget: er `insta
 
 ## Forbindelser i browseren (v7.36.0)
 
-Fanen **Moduler → 🔌 Forbindelser** er den nemme vej til nøglerne. Du skal ikke ind på serveren.
+Fanen **Moduler → 🔌 Forbindelser** er den nemme vej til nøglerne. Den gule opsætningsbjælke øverst linker direkte hertil, når en nøgle mangler. Du skal ikke ind på serveren.
 
 1. **WordPress:** klik **Åbn "Godkend app" i WordPress** og godkend. Kopiér koden, WordPress viser, og indsæt den sammen med dit WordPress-brugernavn. Brugeren skal være administrator, hvis autopilot-broen skal virke.
 2. **OpenRouter, SerpAPI og GitHub-token:** indsæt nøglen.

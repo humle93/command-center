@@ -311,6 +311,16 @@ Cockpit-panelet viser **installeret commit** og **seneste commit på `main`**:
 Opdateringen kører kontrollen automatisk, **før** den skriver noget: er `install.sh` på disken ældre end koden, stopper den med kode 7 og rører ingen filer. Beskeden siger hvad man gør i stedet (`git checkout -- install.sh` eller `git pull`), og at intet er ændret. Grunden er, at en gammel installatør ellers kan ligge klar og rulle koden tilbage, næste gang nogen kører den. `--check` og `--version` skriver intet og virker uanset. `bash scripts/restart.sh` genstarter uden at opdatere
 - Status som JSON: `GET /api/update` (inkl. `restart_mode`/`auto_restart`), `POST /api/update/check`, `POST /api/update/apply` (bruges af scriptet). `/self-update` er alias for `/update/apply`
 
+## Forbindelser i browseren (v7.36.0)
+
+Fanen **Moduler → 🔌 Forbindelser** er den nemme vej til nøglerne. Du skal ikke ind på serveren.
+
+1. **WordPress:** klik **Åbn "Godkend app" i WordPress** og godkend. Kopiér koden, WordPress viser, og indsæt den sammen med dit WordPress-brugernavn. Brugeren skal være administrator, hvis autopilot-broen skal virke.
+2. **OpenRouter, SerpAPI og GitHub-token:** indsæt nøglen.
+3. Tryk **Gem og test**. Ved hver forbindelse står resultatet: WordPress-navn og rolle, OpenRouter-kredit, SerpAPI-søgninger tilbage og adgang til GitHub-repoet (også når det er privat).
+
+Gemte værdier vinder over `.env` og virker med det samme. Et tomt hemmeligt felt beholder det gemte, og afkrydsning af *ryd* (feltet `clear_<NØGLE>`) sender dig tilbage til `.env`. Andre projekter end hovedprojektet sætter WordPress under **🗂️ Projekter**.
+
 ## Flere projekter (v7.35.0)
 
 Command Center kan styre flere sites. Hvert site er et **projekt** med egne søgeord og historik, crawl, artikler, medier, flows, alarmer, noter, moduler og WordPress-forbindelse. Brugere, logins, MCP-nøgler og chat er fælles.
@@ -424,6 +434,7 @@ svaret) — ingen går ned. Hvad hver funktion kræver:
 | Monitors (tekst, JSON, pris), noter, backup, moduler, API-nøgler, brugere (login/kode) | intet | virker (pris-monitor rettet i 7.28.1) |
 | 1-klik optimering (teknik, crawl, on-page, indhold, monitors) | intet (AI-forslag og placeringer kræver deres nøgle) | virker (v7.29.0) |
 | Flows (automatiske kæder) | blokkene kræver det samme som funktionerne ovenfor | virker (v7.30.0) |
+| Forbindelser i browseren | intet | virker (v7.36.0); testkaldene er prøvet mod fakes, ikke de rigtige tjenester |
 | Flere projekter | intet (WordPress pr. projekt valgfrit) | virker (v7.35.0) |
 | Medier + kvalitetssikring | `OPENROUTER_API_KEY` (billeder: min. $1 på kontoen) | virker (v7.34.0); bedømmerne er målt live, billedkaldet ikke (saldo < $1) |
 | Prioriteter til autopiloten | WordPress-broen + Steamgears Autopilot 7.82.0 + målte søgeord | virker (v7.33.0); kaldet mod sitet er testet med en fake |

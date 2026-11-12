@@ -129,10 +129,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.35.0"
+APP_VERSION = "7.36.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.36.0", "Forbindelser i browseren: WordPress, OpenRouter, SerpAPI og GitHub saettes og testes under Moduler - ingen SSH"),
     ("7.35.0", "Flere projekter: hvert site faar egne soegeord, crawl, artikler, medier, flows og WordPress - vaelg projekt oeverst, opret under Moduler"),
     ("7.34.1", "Billeder sendes til WordPress som JPEG (Instagram kraever det); originalen bliver i CC"),
     ("7.34.0", "Medier + kvalitetssikring: CC laver og gemmer billeder, alt bedoemmes af regler + en gratis AI-bedoemmer (min. 7/10) - intet svar = det venter paa dig"),
@@ -171,7 +172,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Flere projekter i ét Command Center - vaelgeren oeverst, opret under Moduler"
+NEWEST_LINE = "Saet noeglerne i browseren under Moduler -> Forbindelser (ingen SSH)"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -1795,6 +1796,169 @@ async def projects_delete(id: str = Form(""), confirm: str = Form("")):
     return _projects_redirect(not err, err or "Projektet er fjernet fra listen; databasen er gemt som .slettet-fil")
 
 
+
+# ---------- Forbindelser i browseren (v7.36.0) ----------
+# Noeglerne kan saettes under Moduler uden SSH. De gemmes i center.db (settings.ui_keys, klartekst som
+# connector-noeglerne og projekternes WordPress-kodeord), vinder over .env, og vises aldrig igen i siden.
+UI_KEYS = {
+    "WP_URL": "WordPress-adresse", "WP_USER": "WordPress-bruger", "WP_APP_PASSWORD": "WordPress-applikationsadgangskode",
+    "OPENROUTER_API_KEY": "OpenRouter-nøgle", "SERPAPI_KEY": "SerpAPI-nøgle", "GITHUB_TOKEN": "GitHub-token (opdatering)",
+}
+UI_SECRET_KEYS = {"WP_APP_PASSWORD", "OPENROUTER_API_KEY", "SERPAPI_KEY", "GITHUB_TOKEN"}
+_ENV_KEYS = {k: globals().get(k, "") for k in UI_KEYS}
+
+
+def ui_keys_stored() -> dict:
+    conn = _global_db()
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key='ui_keys'").fetchone()
+        data = jsonlib.loads(row["value"]) if row and row["value"] else {}
+    except (sqlite3.Error, ValueError):
+        data = {}
+    finally:
+        conn.close()
+    return {k: str(v) for k, v in data.items() if k in UI_KEYS and v}
+
+
+def ui_keys_apply() -> int:
+    """Laegger de gemte vaerdier ind i modul-globalerne (kaldes ved opstart og efter gem)."""
+    stored = ui_keys_stored()
+    for k in UI_KEYS:
+        globals()[k] = stored.get(k) or _ENV_KEYS.get(k, "")
+    return len(stored)
+
+
+def ui_keys_save(values: dict, clear: tuple = ()) -> dict:
+    """Gemmer udfyldte felter. Et tomt hemmeligt felt beholder den gemte vaerdi; `clear` sletter."""
+    stored = ui_keys_stored()
+    for k, v in values.items():
+        if k not in UI_KEYS:
+            continue
+        v = (v or "").strip()
+        if k == "WP_URL":
+            v = v.rstrip("/")
+        if v:
+            stored[k] = v
+        elif k not in UI_SECRET_KEYS:
+            stored.pop(k, None)
+    for k in clear:
+        stored.pop(k, None)
+    conn = _global_db()
+    try:
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ui_keys', ?)", (jsonlib.dumps(stored),))
+        conn.commit()
+    finally:
+        conn.close()
+    ui_keys_apply()
+    return stored
+
+
+def _mask(v: str) -> str:
+    return ("…" + v[-4:]) if v and len(v) > 8 else ("sat" if v else "")
+
+
+def connection_tests() -> dict:
+    """Ét kald pr. forbindelse, der viser om den virker - uden at noeglen kommer med i svaret."""
+    out = {}
+    if WP_URL and WP_USER and WP_APP_PASSWORD:
+        try:
+            r = HTTP.get(f"{WP_URL.rstrip('/')}/wp-json/wp/v2/users/me", params={"context": "edit"},
+                         auth=(WP_USER, WP_APP_PASSWORD), timeout=15)
+            d = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+            roles = d.get("roles") or []
+            out["wordpress"] = ((True, f"forbundet som {d.get('name') or WP_USER} ({', '.join(roles) or 'ukendt rolle'})"
+                                 + ("" if "administrator" in roles else " - autopilot-broen kræver administrator"))
+                                if r.status_code == 200 else (False, f"WordPress svarede {r.status_code}: {str(d.get('message') or '')[:120]}"))
+        except (requests.RequestException, ValueError) as e:
+            out["wordpress"] = (False, f"WordPress svarede ikke: {str(e)[:120]}")
+    if OPENROUTER_API_KEY:
+        try:
+            r = HTTP.get(f"{OPENROUTER_BASE_URL}/key", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"}, timeout=15)
+            d = (r.json() or {}).get("data") or {}
+            if r.status_code == 200:
+                left = d.get("limit_remaining")
+                out["openrouter"] = (True, "nøglen virker" + (f", ${float(left):.2f} tilbage på nøglens grænse" if left is not None else "")
+                                     + (f", brugt ${float(d.get('usage') or 0):.2f}" if d.get("usage") is not None else ""))
+            else:
+                out["openrouter"] = (False, f"OpenRouter afviste nøglen ({r.status_code})")
+        except (requests.RequestException, ValueError) as e:
+            out["openrouter"] = (False, f"OpenRouter svarede ikke: {str(e)[:120]}")
+    if SERPAPI_KEY:
+        try:
+            r = HTTP.get("https://serpapi.com/account.json", params={"api_key": SERPAPI_KEY}, timeout=15)
+            d = r.json() or {}
+            out["serpapi"] = ((True, f"{d.get('plan_name') or 'konto'}: {d.get('total_searches_left', '?')} søgninger tilbage denne måned")
+                              if r.status_code == 200 and not d.get("error") else (False, f"SerpAPI: {str(d.get('error') or r.status_code)[:120]}"))
+        except (requests.RequestException, ValueError) as e:
+            out["serpapi"] = (False, f"SerpAPI svarede ikke: {str(e)[:120]}")
+    if GITHUB_TOKEN:
+        try:
+            r = HTTP.get(f"https://api.github.com/repos/{GITHUB_REPO}", headers={"Authorization": f"Bearer {GITHUB_TOKEN}",
+                         "Accept": "application/vnd.github+json"}, timeout=15)
+            d = r.json() or {}
+            out["github"] = ((True, f"adgang til {GITHUB_REPO} ({'privat' if d.get('private') else 'offentligt'} repo)")
+                             if r.status_code == 200 else (False, f"GitHub svarede {r.status_code} - tokenet skal kunne læse {GITHUB_REPO}"))
+        except (requests.RequestException, ValueError) as e:
+            out["github"] = (False, f"GitHub svarede ikke: {str(e)[:120]}")
+    conn = _global_db()
+    try:
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ui_keys_test', ?)",
+                     (jsonlib.dumps({"at": now_iso(), "results": {k: list(v) for k, v in out.items()}}),))
+        conn.commit()
+    finally:
+        conn.close()
+    return out
+
+
+def connections_view() -> dict:
+    stored = ui_keys_stored()
+    conn = _global_db()
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key='ui_keys_test'").fetchone()
+        last = jsonlib.loads(row["value"]) if row and row["value"] else {}
+    except (sqlite3.Error, ValueError):
+        last = {}
+    finally:
+        conn.close()
+    wp = WP_URL or (f"https://{TRACK_DOMAIN}" if TRACK_DOMAIN else "")
+    return {
+        "fields": [{"key": k, "label": lbl, "secret": k in UI_SECRET_KEYS,
+                    "value": "" if k in UI_SECRET_KEYS else (globals().get(k) or ""),
+                    "hint": _mask(globals().get(k) or "") if k in UI_SECRET_KEYS else "",
+                    "source": "gemt her" if k in stored else ("fra .env" if _ENV_KEYS.get(k) else "mangler")}
+                   for k, lbl in UI_KEYS.items()],
+        "authorize_url": (f"{wp.rstrip('/')}/wp-admin/authorize-application.php?app_name=Command%20Center" if wp else ""),
+        "wp_default": wp, "tested_at": last.get("at", ""), "results": last.get("results", {}),
+    }
+
+
+@app.post("/connections/save")
+async def connections_save(request: Request):
+    form = await request.form()
+    clear = tuple(k for k in UI_KEYS if form.get("clear_" + k))
+    # Kun felter der faktisk er sendt, saa en delvis formular ikke rydder resten.
+    ui_keys_save({k: form.get(k, "") for k in UI_KEYS if k in form}, clear)
+    loop = asyncio.get_running_loop()
+    res = await loop.run_in_executor(executor, connection_tests)
+    bad = [k for k, (ok, _m) in res.items() if not ok]
+    msg = ("Gemt og testet - alt virker" if res and not bad else
+           "Gemt" + (f" - tjek: {', '.join(bad)}" if bad else " (intet at teste endnu)"))
+    with get_db() as db:
+        add_alarm(db, "forbindelser", "Forbindelser ændret i browseren (" + ", ".join(sorted(set(k for k in UI_KEYS if form.get(k)) | set(clear))) + ")", "info")
+    return RedirectResponse("/?tab=moduler&conn=" + ("ok" if not bad else "fejl") + "&conn_msg=" + urllib.parse.quote(msg) + "#forbindelser", status_code=303)
+
+
+@app.post("/connections/test")
+async def connections_test():
+    loop = asyncio.get_running_loop()
+    res = await loop.run_in_executor(executor, connection_tests)
+    bad = [k for k, (ok, _m) in res.items() if not ok]
+    msg = "Alt virker" if res and not bad else ("Intet at teste - indsæt nøgler først" if not res else "Tjek: " + ", ".join(bad))
+    return RedirectResponse("/?tab=moduler&conn=" + ("ok" if res and not bad else "fejl") + "&conn_msg=" + urllib.parse.quote(msg) + "#forbindelser", status_code=303)
+
+
+_safe(ui_keys_apply)
+
 def project_view() -> list:
     """Projektlisten til dashboardet - aldrig med adgangskoder."""
     return [{"id": p["id"], "name": p["name"], "domain": p.get("domain") or "", "wp_url": p.get("wp_url") or (WP_URL if p["id"] == 1 else ""),
@@ -2815,6 +2979,8 @@ TASK_ESTIMATES = {
     "/connectors/refresh": {"label": "Henter vaerktoejer", "seconds": 8},
     "/growth/optimize": {"label": "Indholdsoptimering", "seconds": 12},
     "/media/generate": {"label": "Laver og kvalitetssikrer billede", "seconds": 60},
+    "/connections/save": {"label": "Gemmer og tester forbindelser", "seconds": 10},
+    "/connections/test": {"label": "Tester forbindelser", "seconds": 10},
     "/growth/compare": {"label": "Konkurrent-sammenligning", "seconds": 20},
     "/growth/brief": {"label": "Indholds-brief", "seconds": 15},
     "/seo/rewrite": {"label": "AI titel/meta-forslag", "seconds": 25},
@@ -6357,6 +6523,9 @@ async def dashboard(request: Request):
     except Exception:
         sgap_state = {}
     return templates.TemplateResponse("dashboard.html", {
+        "connections": connections_view(),
+        "conn_feedback": ({"ok": request.query_params.get("conn") == "ok", "msg": (request.query_params.get("conn_msg") or "")[:200]}
+                          if request.query_params.get("conn") in ("ok", "fejl") else None),
         "projects": project_view(), "project_id": (current_project() or {}).get("id", 1),
         "project_name": (current_project() or project_main())["name"],
         "proj_feedback": ({"ok": request.query_params.get("proj") == "ok", "msg": (request.query_params.get("proj_msg") or "")[:200]}

@@ -1461,6 +1461,35 @@
 
     <!-- MODULER -->
     <section x-show="tab === 'moduler'" class="space-y-4" style="display: none;">
+        <div id="forbindelser" class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">🔌 Forbindelser (hovedprojektet)</h2>
+            <p class="text-xs text-zinc-500 mb-3">Sæt nøglerne her i stedet for i <code>.env</code> - ingen SSH. Gemte værdier vinder over <code>.env</code>, og hemmelige felter vises aldrig igen (lad feltet stå tomt for at beholde det gemte). Alt testes, når du gemmer.</p>
+            {% if conn_feedback %}
+            <div class="{% if conn_feedback.ok %}bg-emerald-500/10 border-emerald-500/30 text-emerald-300{% else %}bg-amber-500/10 border-amber-500/30 text-amber-300{% endif %} border rounded-xl px-3 py-2 text-xs mb-3">{{ conn_feedback.msg }}</div>
+            {% endif %}
+            {% if connections.authorize_url %}
+            <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs mb-3">
+                <b>WordPress i to klik:</b> <a href="{{ connections.authorize_url }}" target="_blank" rel="noopener" class="text-emerald-400 underline">1. Åbn "Godkend app" i WordPress</a> og tryk <i>Ja, jeg godkender</i>. 2. Kopiér koden WordPress viser, og sæt den ind herunder sammen med dit WordPress-brugernavn.
+            </div>
+            {% endif %}
+            <form action="/connections/save" method="POST" class="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
+                {% for f in connections.fields %}
+                <label class="block">
+                    <span class="text-[11px] text-zinc-500">{{ f.label }} · <span class="{% if f.source == 'mangler' %}text-amber-400{% else %}text-zinc-400{% endif %}">{{ f.source }}</span>{% if f.hint %} ({{ f.hint }}){% endif %}{% set r = connections.results.get({'WP_URL':'wordpress','WP_USER':'wordpress','WP_APP_PASSWORD':'wordpress','OPENROUTER_API_KEY':'openrouter','SERPAPI_KEY':'serpapi','GITHUB_TOKEN':'github'}[f.key]) %}{% if r and f.key in ('WP_APP_PASSWORD','OPENROUTER_API_KEY','SERPAPI_KEY','GITHUB_TOKEN') %} · <span class="{% if r[0] %}text-emerald-400{% else %}text-rose-400{% endif %}">{{ r[1] }}</span>{% endif %}</span>
+                    {% if f.secret %}
+                    <input name="{{ f.key }}" type="password" autocomplete="new-password" placeholder="{% if f.hint %}gemt - skriv for at skifte{% else %}indsæt{% endif %}" class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                    {% else %}
+                    <input name="{{ f.key }}" value="{{ f.value or (connections.wp_default if f.key == 'WP_URL' else '') }}" class="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                    {% endif %}
+                </label>
+                {% endfor %}
+                <div class="md:col-span-2 flex flex-wrap gap-2 items-center">
+                    <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-2 rounded-xl">Gem og test</button>
+                    <button formaction="/connections/test" class="text-zinc-400 border border-zinc-800 px-4 py-2 rounded-xl">Test igen</button>
+                    {% if connections.tested_at %}<span class="text-[11px] text-zinc-500">Sidst testet {{ connections.tested_at[:16].replace('T', ' ') }}</span>{% endif %}
+                </div>
+            </form>
+        </div>
         <div id="projekter" class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">🗂️ Projekter</h2>
             <p class="text-xs text-zinc-500 mb-3">Hvert projekt er et site med egne søgeord, crawl, artikler, medier, flows, alarmer og WordPress-forbindelse. Brugere, logins, MCP-nøgler og chat er fælles. Du arbejder nu i <b class="text-emerald-300">{{ project_name }}</b> - skift i vælgeren øverst. Planlagte jobs kører for alle projekter.</p>

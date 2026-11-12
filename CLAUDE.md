@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 11. november 2026 · **Version:** 7.35.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 11. november 2026 · **Version:** 7.36.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,12 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Forbindelser i browseren (v7.36.0, 12. november)
+- **Baggrund:** "er en doven skid og vil lave så lidt som muligt". Nøglerne krævede SSH og `.env`. Nu sættes de under Moduler → Forbindelser, med WordPress' *authorize-application*-side til applikationsadgangskoden.
+- **Valg:** gemt > `.env`, lagret i center.db (`settings.ui_keys`, uanset aktivt projekt), anvendt på modul-globalerne straks. Delvise formularer rører kun de sendte felter (fejl fundet i test).
+- **Faldgrube:** WordPress' `success_url` kræver https, og CC kører på http://IP:port, så koden kopieres i stedet for at blive sendt tilbage automatisk.
+- **Test:** 10 `forbindelser:`-checks mod fakes. Ikke kaldt mod de rigtige tjenester herfra.
 
 ### Flere projekter (v7.35.0, 12. november)
 - **Baggrund:** affiliate-nichesiden (kaffe, se steamgears-site `docs/library/affiliate-niche-plan-2026-11-12.md`) skal køre i samme CC. Brugeren valgte fler-projekt frem for en ekstra installation.

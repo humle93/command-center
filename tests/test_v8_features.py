@@ -2414,7 +2414,7 @@ check("projekt: projektets database har site-tabellerne, men ingen faelles tabel
 with main.get_db() as db:
     db.execute("DELETE FROM keywords WHERE keyword='kun-i-kaffe'")
 _wp_before = (main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD)
-main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD = "https://steamgears.eu", "admin", "hemmelig"
+main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD = "https://steamgears.eu", "admin", "Xq9-hemmelig-kode"
 with main.use_project(_p2):
     with main.get_db() as db:
         db.execute("INSERT INTO keywords (keyword) VALUES ('kun-i-kaffe')")
@@ -2471,7 +2471,7 @@ _fc.cookies.set("cc_project", "2")
 _html = _fc.get("/?tab=moduler").text
 check("projekt: dashboardet viser vaelgeren med projekt 2 valgt og projektkortet", 'id="cc-project"' in _html
       and '<option value="2" selected>Kaffeguiden</option>' in _html and 'id="projekter"' in _html)
-check("projekt: ingen adgangskode i siden", "hemmelig" not in _html)
+check("projekt: ingen adgangskode i siden", "Xq9-hemmelig-kode" not in _html and "abcd efgh" not in _html)
 _fc.post("/keywords/add", data={"keyword": "bedste kaffevægt"}, follow_redirects=False)
 with main.use_project(_p2), main.get_db() as db:
     _k2 = db.execute("SELECT COUNT(*) FROM keywords WHERE keyword='bedste kaffevægt'").fetchone()[0]
@@ -2493,6 +2493,56 @@ _r = _fc.post("/projects/delete", data={"id": "2", "confirm": "SLET"}, follow_re
 check("projekt: sletning fjerner projektet men gemmer databasen", "proj=ok" in _r.headers["location"] and main.load_project(2) is None
       and not os.path.exists(os.path.join(main.PROJECTS_DIR, "p2.db"))
       and any(f.startswith("p2.db.") and f.endswith(".slettet") for f in os.listdir(main.PROJECTS_DIR)))
+
+# ---------- forbindelser i browseren (v7.36.0) ----------
+import urllib.parse
+_cb = {k: getattr(main, k) for k in main.UI_KEYS}
+class _R:
+    def __init__(self, code, data, ct="application/json"):
+        self.status_code, self._d, self.headers = code, data, {"content-type": ct}
+    def json(self):
+        return self._d
+_gets = []
+def _fake_get(url, **kw):
+    _gets.append((url, kw))
+    if "/wp-json/wp/v2/users/me" in url:
+        return _R(200, {"name": "Henning", "roles": ["administrator"]}) if kw.get("auth", ("", ""))[1] == "abcd efgh ijkl" else _R(401, {"message": "Ugyldigt kodeord"})
+    if url.endswith("/key"):
+        return _R(200, {"data": {"limit_remaining": 4.5, "usage": 25.5}})
+    if "serpapi.com/account" in url:
+        return _R(200, {"plan_name": "Free", "total_searches_left": 87})
+    if "api.github.com/repos/" in url:
+        return _R(200, {"private": True})
+    return _R(404, {})
+_real_get = main.HTTP.get
+main.HTTP.get = _fake_get
+_r = _fc.post("/connections/save", data={"WP_URL": "https://steamgears.eu/", "WP_USER": "henning", "WP_APP_PASSWORD": "abcd efgh ijkl",
+                                         "OPENROUTER_API_KEY": "sk-or-v1-forbind-1234", "SERPAPI_KEY": "serp-5678", "GITHUB_TOKEN": "ghp_test9999"},
+              follow_redirects=False)
+check("forbindelser: gem og test i browseren, alt virker", "conn=ok" in _r.headers["location"], _r.headers["location"])
+check("forbindelser: nøglerne bruges straks (uden genstart)", main.WP_URL == "https://steamgears.eu" and main.OPENROUTER_API_KEY == "sk-or-v1-forbind-1234"
+      and main.sgap_ready() == main.module_on("autopilot"))
+_v = main.connections_view()
+_res = _v["results"]
+check("forbindelser: testene viser rolle, kredit, søgninger og repo", "administrator" in _res["wordpress"][1] and "$4.50" in _res["openrouter"][1]
+      and "87" in _res["serpapi"][1] and "privat" in _res["github"][1], _res)
+_html = _fc.get("/?tab=moduler").text
+check("forbindelser: kortet vises, med WordPress-godkendelseslink og uden nogen nøgle i siden", 'id="forbindelser"' in _html
+      and "authorize-application.php?app_name=Command%20Center" in _html
+      and not any(x in _html for x in ("abcd efgh ijkl", "sk-or-v1-forbind-1234", "serp-5678", "ghp_test9999")))
+check("forbindelser: hemmelige felter viser kun de sidste 4 tegn", "…1234" in _html and "…9999" in _html)
+check("forbindelser: nøglen er ikke i URL'en til WordPress-testen", not any("abcd" in u for u, _k in _gets))
+_fc.post("/connections/save", data={"WP_URL": "https://steamgears.eu", "WP_USER": "henning", "WP_APP_PASSWORD": "", "OPENROUTER_API_KEY": "", "SERPAPI_KEY": "", "GITHUB_TOKEN": ""}, follow_redirects=False)
+check("forbindelser: tomme hemmelige felter beholder det gemte", main.WP_APP_PASSWORD == "abcd efgh ijkl" and main.SERPAPI_KEY == "serp-5678")
+_r = _fc.post("/connections/save", data={"WP_APP_PASSWORD": "forkert kode"}, follow_redirects=False)
+check("forbindelser: et forkert WordPress-kodeord bliver meldt", "conn=fejl" in _r.headers["location"] and "wordpress" in urllib.parse.unquote(_r.headers["location"]))
+_fc.post("/connections/save", data={"clear_SERPAPI_KEY": "1"}, follow_redirects=False)
+check("forbindelser: en nøgle kan ryddes, og .env-værdien gælder igen", main.SERPAPI_KEY == main._ENV_KEYS["SERPAPI_KEY"])
+main.ui_keys_save({}, tuple(main.UI_KEYS))
+check("forbindelser: alt ryddet = tilbage til .env", all(getattr(main, k) == main._ENV_KEYS[k] for k in main.UI_KEYS))
+main.HTTP.get = _real_get
+for _k, _vv in _cb.items():
+    setattr(main, _k, _vv)
 
 # ---------- lang historik (v7.32.0) ----------
 _old = lambda d: (main.datetime.now() - main.timedelta(days=d)).isoformat(timespec="seconds")

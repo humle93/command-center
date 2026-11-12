@@ -1,9 +1,17 @@
-# Command Center v7.35 PRO
+# Command Center v7.36 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
+
+## Nyheder i v7.36
+
+- **Forbindelser i browseren (v7.36.0)** — kortet **🔌 Forbindelser** under Moduler sætter WordPress (adresse, bruger, applikationsadgangskode), OpenRouter, SerpAPI og GitHub-token for hovedprojektet uden SSH.
+  - **WordPress i to klik:** linket åbner WordPress' egen *Godkend app*-side. Du godkender og indsætter koden.
+  - **Test ved gem:** WordPress-rolle (administrator kræves til autopilot-broen), OpenRouter-kredit, SerpAPI-søgninger tilbage og adgang til GitHub-repoet.
+  - **Gemte værdier vinder over `.env`** og bruges straks uden genstart. Hemmelige felter vises aldrig igen (kun de sidste 4 tegn), og et tomt felt beholder det gemte.
+  - **Lagring:** nøglerne ligger i `center.db` som connector-nøglerne og følger derfor med i backups.
 
 ## Nyheder i v7.35
 

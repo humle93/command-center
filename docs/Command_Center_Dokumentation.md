@@ -235,6 +235,7 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 
 ## 12. Versionshistorik (kort)
 
+- **v7.36.0** — `UI_KEYS` + `settings.ui_keys` i center.db (via `_global_db()`, uanset projekt). `ui_keys_apply()` sætter modul-globalerne (gemt > `.env`, `_ENV_KEYS` husker `.env`). `ui_keys_save(values, clear)` rører kun sendte felter, og tomme hemmelige felter beholdes. `connection_tests()` gemmer resultatet i `settings.ui_keys_test` uden nøgler. Ruter: `POST /connections/save|test` (begge med `TASK_ESTIMATES`).
 - **v7.35.0** — **Flere projekter.**
   - **Projekter og databaser:** tabellen `projects` ligger kun i center.db (id ≥ 2). Projekt 1 er `.env` og center.db. `current_db_path()` vælger projektets fil. `get_db()` hænger center.db på som `g`, så de fælles tabeller (`GLOBAL_TABLES`: users, sessions, login_attempts, sso_used, api_clients, api_audit, alert_outbox, chat_*, mcp_connectors, _selftest, projects) findes med de samme ukvalificerede navne.
   - **Skema:** `ensure_project_db()` kopierer site-tabellernes skema, manglende kolonner (med DEFAULT) og indekser fra center.db, og `sync_project_dbs()` kører ved opstart.

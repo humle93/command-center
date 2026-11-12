@@ -29,7 +29,7 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
 
 ### Gratis AI-reserve (v7.31.0, 12. november)
 - **Baggrund:** brugeren: "openrouter har en auto/free som vi kan tilføje". Målt fra steamgears.eu (containeren når ikke openrouter.ai): `openrouter/free` har pris 0, og `openrouter/auto` er betalt (pris -1 = variabel), så det er kun `free`, der bruges som reserve.
-- **Kode:** `_openrouter_post()`, `ai_wants_free_retry()`, `AI_FREE_MODELS` (env, standard `google/gemma-4-31b-it:free,openrouter/free`), `AI_LAST_FALLBACK`, info-alarm. Kun kreditfejl skifter model, og 401/404 er uændrede.
+- **Kode:** `_openrouter_post()`, `ai_wants_free_retry()`, `AI_FREE_MODELS` (env, standard `nvidia/nemotron-3-ultra-550b-a55b:free,google/gemma-4-31b-it:free,openrouter/free`; Nemotron Ultra først efter brugerens valg), `AI_LAST_FALLBACK`, info-alarm. Kun kreditfejl skifter model, og 401/404 er uændrede.
 - **Test:** 8 `gratis:`-checks. Ikke kaldt mod det rigtige OpenRouter herfra. Pluginnets tilsvarende kode (7.81.0) er målt live: 3 opslag fra en `:free`-model med `cost: 0`.
 
 ### Rettet model-slug (v7.30.1, 12. november)

@@ -87,7 +87,7 @@ AI_MODEL = os.environ.get("AI_MODEL", "google/gemini-3.8-flash")
 # OpenRouters "models"-liste; openrouter/free er OpenRouters egen router over de gratis modeller.
 # Tom vaerdi slaar reserven fra.
 AI_FREE_MODELS = [m.strip() for m in os.environ.get(
-    "AI_FREE_MODELS", "google/gemma-4-31b-it:free,openrouter/free").split(",") if m.strip()]
+    "AI_FREE_MODELS", "nvidia/nemotron-3-ultra-550b-a55b:free,google/gemma-4-31b-it:free,openrouter/free").split(",") if m.strip()]
 # aimlapi er udfaset: en tilbagebleven noegle bruges ikke, men giver en advarsel ved opstart.
 LEGACY_AIMLAPI_KEY_SET = bool(os.environ.get("AIMLAPI_KEY", "").strip())
 WP_URL = os.environ.get("WP_URL", "").strip()                # fx https://steamgears.eu

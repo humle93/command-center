@@ -83,7 +83,7 @@ UPDATE_RESTART_CMD=
 OPENROUTER_API_KEY=
 AI_MODEL=google/gemini-3.8-flash
 # Gratis reserve ved manglende kredit (402), proeves i raekkefoelge. Tom = slaa reserven fra.
-AI_FREE_MODELS=google/gemma-4-31b-it:free,openrouter/free
+AI_FREE_MODELS=nvidia/nemotron-3-ultra-550b-a55b:free,google/gemma-4-31b-it:free,openrouter/free
 # Valgfri: anden OpenAI-kompatibel adresse (budget-loftet AI_MONTHLY_LIMIT foelger vaertsnavnet).
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 # Chat-fanen (v7.26): tom CHAT_MODEL = AI_MODEL. Modellen skal kunne bruge tools (function calling).
@@ -226,7 +226,7 @@ AI_MODEL = os.environ.get("AI_MODEL", "google/gemini-3.8-flash")
 # OpenRouters "models"-liste; openrouter/free er OpenRouters egen router over de gratis modeller.
 # Tom vaerdi slaar reserven fra.
 AI_FREE_MODELS = [m.strip() for m in os.environ.get(
-    "AI_FREE_MODELS", "google/gemma-4-31b-it:free,openrouter/free").split(",") if m.strip()]
+    "AI_FREE_MODELS", "nvidia/nemotron-3-ultra-550b-a55b:free,google/gemma-4-31b-it:free,openrouter/free").split(",") if m.strip()]
 # aimlapi er udfaset: en tilbagebleven noegle bruges ikke, men giver en advarsel ved opstart.
 LEGACY_AIMLAPI_KEY_SET = bool(os.environ.get("AIMLAPI_KEY", "").strip())
 WP_URL = os.environ.get("WP_URL", "").strip()                # fx https://steamgears.eu
@@ -10646,7 +10646,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 
 ## Nyheder i v7.31
 
-- **Gratis AI-reserve (v7.31.0)** — afviser OpenRouter `AI_MODEL` for manglende kredit (402), prøves kaldet én gang til på gratis modeller via OpenRouters `models`-liste: `google/gemma-4-31b-it:free` og derefter `openrouter/free` (OpenRouters router over de gratis modeller). Skiftet bliver en info-alarm, så du kan se det. Styres med `AI_FREE_MODELS` i `.env` (tom = slået fra). Gratis modeller har en dagsgrænse hos OpenRouter, og kvaliteten svinger.
+- **Gratis AI-reserve (v7.31.0)** — afviser OpenRouter `AI_MODEL` for manglende kredit (402), prøves kaldet én gang til på gratis modeller via OpenRouters `models`-liste: `nvidia/nemotron-3-ultra-550b-a55b:free`, `google/gemma-4-31b-it:free` og til sidst `openrouter/free` (OpenRouters router over de gratis modeller). Skiftet bliver en info-alarm, så du kan se det. Styres med `AI_FREE_MODELS` i `.env` (tom = slået fra). Gratis modeller har en dagsgrænse hos OpenRouter, og kvaliteten svinger.
 
 ## Nyheder i v7.30
 

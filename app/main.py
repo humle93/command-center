@@ -85,9 +85,11 @@ OPENROUTER_BASE_URL = (os.environ.get("OPENROUTER_BASE_URL", "").strip()
 AI_MODEL = os.environ.get("AI_MODEL", "google/gemini-3.8-flash")
 # Historik (v7.32.0): kun disk, ingen ekstra kald ud af huset. Tallene er sat efter en delt server
 # med god plads; crawleren er bevidst IKKE gjort hurtigere eller stoerre (fair use + hoeflighed).
-KEEP_DAYS = {"check_history": 365, "alarms": 180, "health_history": 365, "keyword_ideas": 365, "api_audit": 365}
-KEEP_ROWS = {"content_audits": 500, "flow_runs": 500, "optimize_runs": 200}
-BACKUP_KEEP = max(1, int(os.environ.get("CC_BACKUP_KEEP", "60") or 60))
+# v7.33.0: pladsen er brugerens egen (8 TB), saa maaledata gemmes for altid (0 = ryd aldrig).
+# Sikkerhedslogs har stadig en graense: api_audit 1 aar, login_attempts 30 dage (IP-adresser).
+KEEP_DAYS = {"check_history": 0, "alarms": 365, "health_history": 0, "keyword_ideas": 0, "api_audit": 365}
+KEEP_ROWS = {"content_audits": 5000, "flow_runs": 5000, "optimize_runs": 2000}
+BACKUP_KEEP = max(1, int(os.environ.get("CC_BACKUP_KEEP", "365") or 365))
 # Gratis reserve naar OpenRouter afviser AI_MODEL for manglende kredit (402). Prøves i raekkefoelge via
 # OpenRouters "models"-liste; openrouter/free er OpenRouters egen router over de gratis modeller.
 # Tom vaerdi slaar reserven fra.
@@ -126,10 +128,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.32.0"
+APP_VERSION = "7.33.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.33.0", "Broen til autopiloten: sider paa plads 4-20 faar sociale opslag foerst, med soegeordet - og soegeord og sider gemmer nu hele deres historik"),
     ("7.32.0", "Laengere historik: 1 aar oppetid/sundhed/soegeordsideer, 500 flow-koersler og indholdsmaalinger, 60 backups - crawleren er uaendret (fair use)"),
     ("7.31.0", "Gratis reserve: mangler OpenRouter-kredit, svarer en gratis model (openrouter/free) i stedet for en fejl - og det bliver en alarm"),
     ("7.30.1", "Standardmodellen er rettet til google/gemini-3.8-flash - den gamle slug findes ikke hos OpenRouter"),
@@ -164,7 +167,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Laengere historik (1 aar) uden ekstra belastning af serveren"
+NEWEST_LINE = "Sider taet paa toppen sendes til autopiloten; placeringer gemmes over tid"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -310,6 +313,14 @@ def init_db():
             score INTEGER,
             issues TEXT,
             crawled_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS keyword_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, keyword TEXT NOT NULL, position INTEGER,
+            url TEXT, checked_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS page_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, url TEXT NOT NULL, http_status INTEGER,
+            title TEXT, meta_len INTEGER, words INTEGER, score INTEGER, issues TEXT, crawled_at TEXT
         );
         CREATE TABLE IF NOT EXISTS crawl_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -576,6 +587,17 @@ def migrate_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, keyword TEXT, score INTEGER,
             words INTEGER, target_words INTEGER, terms_json TEXT, checks_json TEXT, created_at TEXT
         )""")
+        # Historik over tid (v7.33.0): én raekke pr. maaling, ryddes aldrig automatisk.
+        db.execute("""CREATE TABLE IF NOT EXISTS keyword_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, keyword TEXT NOT NULL, position INTEGER,
+            url TEXT, checked_at TEXT NOT NULL
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_keyword_history ON keyword_history (keyword, checked_at)")
+        db.execute("""CREATE TABLE IF NOT EXISTS page_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, url TEXT NOT NULL, http_status INTEGER,
+            title TEXT, meta_len INTEGER, words INTEGER, score INTEGER, issues TEXT, crawled_at TEXT
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_page_history ON page_history (url, crawled_at)")
         # Flows (v7.30.0): kaedede blokke med plan; en koersel = én raekke med log pr. trin.
         db.execute("""CREATE TABLE IF NOT EXISTS flows (
             id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, enabled INTEGER DEFAULT 1,
@@ -675,6 +697,9 @@ def cleanup_old_data():
     now = datetime.now()
 
     def cutoff(days):
+        # 0 = gem for altid: en dato foer alle maalinger, saa DELETE ikke rammer noget.
+        if not days:
+            return "0000"
         return (now - timedelta(days=days)).isoformat(timespec="seconds")
 
     with get_db() as db:
@@ -2608,6 +2633,10 @@ def site_crawl_sync(start_url: str, max_pages: int = 30):
                         max(sitemap_count - pages_saved, 0) if sitemap_ok else 0, run_id))
             db.execute("INSERT INTO health_history (host, avg_score, pages, run_id, checked_at) VALUES (?,?,?,?,?)",
                        (host, avg, pages_saved, run_id, now_iso()))
+            # Crawlet ryddes ved naeste koersel (forespoergslerne regner med ét run); historikken bliver.
+            db.execute("INSERT INTO page_history (run_id, url, http_status, title, meta_len, words, score, issues, crawled_at) "
+                       "SELECT run_id, url, http_status, title, meta_len, words, score, issues, crawled_at FROM seopages WHERE run_id=?",
+                       (run_id,))
             if sitemap_broken:
                 add_alarm(db, "sitemap", f"{len(sitemap_broken)} sitemap-URLs fejler (foerste 50 tjekket)", "advarsel")
         CRAWL_STATE.update({"running": False, "avg": avg, "finished_at": now_iso()})
@@ -3844,6 +3873,8 @@ def check_all_keywords_sync():
                     "UPDATE keywords SET position=?, target_url=?, checked_at=? WHERE id=?",
                     (res["position"], res["url"], now_iso(), kw["id"]),
                 )
+                db.execute("INSERT INTO keyword_history (keyword, position, url, checked_at) VALUES (?,?,?,?)",
+                           (kw["keyword"], res["position"], res["url"], now_iso()))
     with get_db() as db:
         kws2 = db.execute("SELECT * FROM keywords").fetchall()
         score = 0.0
@@ -5491,6 +5522,8 @@ async def dashboard(request: Request):
         socialqueue = db.execute("SELECT * FROM socialqueue ORDER BY id DESC LIMIT 100").fetchall()  # full list: /social/export.csv
         notes = db.execute("SELECT * FROM notes ORDER BY id DESC LIMIT 10").fetchall()
         keywords = db.execute("SELECT * FROM keywords ORDER BY position IS NULL, position").fetchall()
+    kw_trends = keyword_trends()
+    with get_db() as db:
         alarms = db.execute("SELECT * FROM alarms WHERE resolved=0 ORDER BY id DESC LIMIT 20").fetchall()
         ideas = db.execute("SELECT * FROM keyword_ideas ORDER BY id DESC LIMIT 30").fetchall()
         gaps = db.execute("SELECT * FROM content_gap ORDER BY id DESC LIMIT 5").fetchall()
@@ -5538,6 +5571,7 @@ async def dashboard(request: Request):
     except Exception:
         sgap_state = {}
     return templates.TemplateResponse("dashboard.html", {
+        "kw_trends": kw_trends,
         "request": request,
         "domains": domains,
         "competitors": competitors,
@@ -7497,6 +7531,116 @@ def _flow_autopilot(ctx, params):
     return False, f"autopilot: {res}", 0
 
 
+# --- Prioriteter til Steamgears Autopilot (v7.33.0) ---
+# CC maaler hvilke sider der ligger paa plads 4-20 og for hvilket soegeord; pluginnet vaelger selv,
+# hvilke sider der laves sociale opslag om. Broen sender listen (POST /sgap/v1/priorities, plugin
+# 7.82.0+), saa pluginnet tager de sider foerst og bruger soegeordet i opslaget. Koe, kanaler, lofter
+# og kvalitetsgaten i pluginnet er uaendrede.
+CC_PRIORITY_MAX = 30
+
+
+def _same_site(url: str, base: str) -> bool:
+    a = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    b = (urlparse(base).hostname or "").lower().removeprefix("www.")
+    return bool(a) and a == b
+
+
+def keyword_trends(days: int = 30) -> dict:
+    """keyword -> {"delta": +n bedre / -n daarligere end for ~days siden, "points": antal maalinger}.
+    Sammenligner den nyeste maaling med den aeldste inden for vinduet; uden placering begge steder: None."""
+    since = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+    out = {}
+    with get_db() as db:
+        rows = db.execute("SELECT keyword, position, checked_at FROM keyword_history WHERE checked_at >= ? "
+                          "ORDER BY keyword, checked_at, id", (since,)).fetchall()
+        totals = {r["keyword"]: r["n"] for r in db.execute(
+            "SELECT keyword, COUNT(*) AS n FROM keyword_history GROUP BY keyword").fetchall()}
+    first, last = {}, {}
+    for r in rows:
+        first.setdefault(r["keyword"], r["position"])
+        last[r["keyword"]] = r["position"]
+    for kw, n in totals.items():
+        a, b = first.get(kw), last.get(kw)
+        out[kw] = {"delta": (a - b) if (a and b) else None, "points": n}
+    return out
+
+
+def history_series(kind: str, key: str, limit: int = 365) -> list:
+    """Hele forloebet for ét soegeord ('keyword') eller én side ('page'), aeldste foerst."""
+    with get_db() as db:
+        if kind == "keyword":
+            rows = db.execute("SELECT checked_at AS at, position, url FROM keyword_history WHERE keyword=? "
+                              "ORDER BY checked_at DESC, id DESC LIMIT ?", (key, limit)).fetchall()
+        else:
+            rows = db.execute("SELECT crawled_at AS at, http_status, score, words, title, meta_len FROM page_history "
+                              "WHERE url IN (?, ?) ORDER BY crawled_at DESC, id DESC LIMIT ?",
+                              (key.rstrip("/"), key.rstrip("/") + "/", limit)).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+
+@app.get("/api/trend/keyword")
+async def api_keyword_history(keyword: str = ""):
+    return {"keyword": keyword, "points": history_series("keyword", keyword.strip())}
+
+
+@app.get("/api/trend/page")
+async def api_page_history(url: str = ""):
+    return {"url": url, "points": history_series("page", url.strip())}
+
+
+def cc_priority_items(skip_urls=()) -> list:
+    """Sider paa plads 4-20 med deres soegeord, taettest paa toppen foerst. Kun sitets egne URL'er,
+    hver side én gang, og sider med hoej-prioritets-fejl springes over (dem skal der ikke sendes
+    trafik til, foer de er rettet)."""
+    base = WP_URL or optimize_project_url() or ""
+    skip = {u.rstrip("/") for u in skip_urls if u}
+    with get_db() as db:
+        rows = db.execute("SELECT keyword, position, target_url FROM keywords WHERE position BETWEEN 4 AND 20 "
+                          "AND target_url IS NOT NULL AND target_url != '' ORDER BY position, id").fetchall()
+    items, seen = [], set()
+    for r in rows:
+        url = r["target_url"].strip()
+        key = url.rstrip("/")
+        if not _same_site(url, base) or key in seen or key in skip:
+            continue
+        seen.add(key)
+        items.append({"url": url, "keyword": r["keyword"], "position": int(r["position"]), "reason": "striking"})
+        if len(items) >= CC_PRIORITY_MAX:
+            break
+    return items
+
+
+def sgap_push_priorities(skip_urls=()) -> dict:
+    """Sender listen til pluginnet og gemmer svaret i settings.cc_priorities_last."""
+    items = cc_priority_items(skip_urls)
+    res = sgap_api("POST", "/priorities", json={"items": items})
+    out = {"at": now_iso(), "sent": len(items), "saved": int(res.get("saved", 0) or 0),
+           "skipped": [s.get("url", "") + ": " + s.get("reason", "") for s in (res.get("skipped") or [])][:10]}
+    with get_db() as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('cc_priorities_last', ?)", (jsonlib.dumps(out),))
+    return out
+
+
+def _flow_priorities(ctx, params):
+    if not sgap_ready():
+        return None, "sprunget over: WordPress-broen er ikke sat op (WP_URL/WP_USER/WP_APP_PASSWORD + modulet autopilot)", 0
+    bad = [a.get("url", "") for a in ctx.get("actions", []) if a.get("priority") == "høj"]
+    if not cc_priority_items(bad):
+        return True, "ingen sider på plads 4-20 at sende (kør Søgeord-blokken først)", 0
+    try:
+        res = sgap_push_priorities(bad)
+    except requests.HTTPError as e:
+        if getattr(e.response, "status_code", None) == 404:
+            return False, "pluginnet kender ikke /priorities - opdatér Steamgears Autopilot til 7.82.0 eller nyere", 0
+        return False, sgap_error_text(e), 0
+    except requests.RequestException as e:
+        return False, f"WordPress svarede ikke: {str(e)[:120]}", 0
+    note = f"{res['saved']} sider sendt til autopiloten - de får sociale opslag først, med søgeordet"
+    if res["skipped"]:
+        note += f"; {len(res['skipped'])} afvist af WordPress ({res['skipped'][0]})"
+    return True, note, res["saved"]
+
+
 def _flow_sorted(actions: list) -> list:
     return sorted(actions, key=lambda a: (OPTIMIZE_PRIORITY.get(a.get("priority"), 9), a.get("score", 100)))
 
@@ -7545,6 +7689,7 @@ FLOW_BLOCKS = {
     "artikel": ("Skriv artikel (AI)", "Generér", "OPENROUTER_API_KEY", _flow_article, ["keyword", "max"]),
     "wp_kladde": ("Send nye artikler til WordPress som kladde", "Handling", "WP_URL", _flow_wp_draft, []),
     "autopilot": ("Growth-autopilot (idé → artikel → kladde)", "Handling", "OPENROUTER_API_KEY", _flow_autopilot, []),
+    "prioriteter": ("Send sider tæt på toppen til autopiloten (sociale opslag)", "Handling", "WP_URL", _flow_priorities, []),
     "rapport": ("Send rapport (Alarmer + kanaler)", "Handling", "", _flow_report, ["level"]),
     "note": ("Skriv note med resultatet", "Handling", "", _flow_note, []),
 }
@@ -7555,9 +7700,10 @@ FLOW_TEMPLATES = {
                        "steps": [{"block": "teknik"}, {"block": "monitors"},
                                  {"block": "rapport", "when": "hvis_fund", "params": {"level": "advarsel"}}]},
     "ugentlig_optimering": {"name": "Ugentlig optimering", "schedule": "weekly@1@06",
-                            "hint": "Mandag: crawl, on-page, indhold, AI-titler og placeringer - samlet i én note.",
+                            "hint": "Mandag: crawl, on-page, indhold, AI-titler og placeringer - sider tæt på toppen sendes til autopiloten, og det hele samles i én note.",
                             "steps": [{"block": "crawl"}, {"block": "onpage"}, {"block": "indhold"},
                                       {"block": "ai_meta", "when": "hvis_fund"}, {"block": "soegeord"},
+                                      {"block": "prioriteter", "when": "hvis_fund"},
                                       {"block": "note"}, {"block": "rapport"}]},
     "indholdsmaskine": {"name": "Indholdsmaskine", "schedule": "weekly@3@06",
                         "hint": "Onsdag: søgeord tæt på toppen → plan → AI-artikel → WordPress-kladde (aldrig udgivet).",

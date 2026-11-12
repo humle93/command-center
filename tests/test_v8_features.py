@@ -2171,6 +2171,55 @@ check("flow: 'flows' er et gyldigt fane-navn og har et heartbeat-job",
       "flows" in main.DASHBOARD_TABS and "flows" in main.JOB_MAX_AGE_HOURS)
 
 
+# ---------- prioriteter til autopiloten (v7.33.0) ----------
+_pv = (main.WP_URL, main.sgap_api, main.sgap_ready)
+main.WP_URL = "https://steamgears.eu"
+with main.get_db() as db:
+    db.execute("DELETE FROM keywords")
+    for kw, pos, url in [("steampunk goggles", 7, "https://steamgears.eu/goggles/"), ("top hat", 4, "https://www.steamgears.eu/hat/"),
+                         ("goggles brass", 9, "https://steamgears.eu/goggles"), ("first page", 2, "https://steamgears.eu/a/"),
+                         ("far away", 35, "https://steamgears.eu/b/"), ("competitor", 5, "https://other.example/x/"),
+                         ("broken page", 12, "https://steamgears.eu/broken/"), ("no url", 8, "")]:
+        db.execute("INSERT INTO keywords (keyword, position, target_url, checked_at) VALUES (?,?,?,?)", (kw, pos, url, main.now_iso()))
+_items = main.cc_priority_items(["https://steamgears.eu/broken"])
+check("prioritet: kun plads 4-20 paa eget site, taettest paa toppen foerst, hver side én gang",
+      [i["keyword"] for i in _items] == ["top hat", "steampunk goggles"] and _items[0]["position"] == 4
+      and all(i["reason"] == "striking" for i in _items), _items)
+check("prioritet: sider med hoej-prioritets-fejl sendes ikke",
+      "https://steamgears.eu/broken/" in [i["url"] for i in main.cc_priority_items()]
+      and "https://steamgears.eu/broken/" not in [i["url"] for i in _items])
+_sent = []
+def _fake_sgap(method, path, **kw):
+    _sent.append((method, path, kw.get("json")))
+    return {"saved": len(kw["json"]["items"]) - 1, "skipped": [{"url": "https://www.steamgears.eu/hat/", "reason": "unknown page"}]}
+main.sgap_api = _fake_sgap
+main.sgap_ready = lambda: True
+_ok, _note, _n = main.FLOW_BLOCKS["prioriteter"][3]({"actions": [{"priority": "høj", "url": "https://steamgears.eu/broken/"}]}, {})
+check("prioritet: flow-blokken sender listen til /priorities", _sent and _sent[-1][:2] == ("POST", "/priorities")
+      and len(_sent[-1][2]["items"]) == 2, _sent)
+check("prioritet: blokken melder gemt og afvist", _ok is True and _n == 1 and "1 sider sendt" in _note and "afvist" in _note, _note)
+with main.get_db() as db:
+    _last = main.jsonlib.loads(db.execute("SELECT value FROM settings WHERE key='cc_priorities_last'").fetchone()[0])
+check("prioritet: seneste afsendelse gemmes", _last["sent"] == 2 and _last["saved"] == 1, _last)
+def _sgap_404(method, path, **kw):
+    r = main.requests.Response(); r.status_code = 404
+    raise main.requests.HTTPError("404", response=r)
+main.sgap_api = _sgap_404
+_ok, _note, _n = main.FLOW_BLOCKS["prioriteter"][3]({"actions": []}, {})
+check("prioritet: et plugin uden ruten giver en forklaring", _ok is False and "7.82.0" in _note, _note)
+main.sgap_ready = lambda: False
+_ok, _note, _n = main.FLOW_BLOCKS["prioriteter"][3]({"actions": []}, {})
+check("prioritet: uden WordPress-bro springes blokken over", _ok is None and "sprunget over" in _note, _note)
+main.sgap_ready = lambda: True
+with main.get_db() as db:
+    db.execute("DELETE FROM keywords")
+_ok, _note, _n = main.FLOW_BLOCKS["prioriteter"][3]({"actions": []}, {})
+check("prioritet: ingen sider tæt på toppen = intet kald", _ok is True and _n == 0 and "ingen sider" in _note, _note)
+check("prioritet: 'Ugentlig optimering' sender sider efter Søgeord",
+      [s["block"] for s in main.FLOW_TEMPLATES["ugentlig_optimering"]["steps"]].index("prioriteter")
+      == [s["block"] for s in main.FLOW_TEMPLATES["ugentlig_optimering"]["steps"]].index("soegeord") + 1)
+main.WP_URL, main.sgap_api, main.sgap_ready = _pv
+
 # ---------- lang historik (v7.32.0) ----------
 _old = lambda d: (main.datetime.now() - main.timedelta(days=d)).isoformat(timespec="seconds")
 with main.get_db() as db:
@@ -2180,9 +2229,38 @@ main.cleanup_old_data()
 with main.get_db() as db:
     _kept = [r[0] for r in db.execute("SELECT checked_at FROM check_history WHERE domain_id=999").fetchall()]
     db.execute("DELETE FROM check_history WHERE domain_id=999")
-check("historik: tjek fra for 200 dage siden bliver, 400 dage ryddes", len(_kept) == 1 and _kept[0][:10] == _old(200)[:10], _kept)
-check("historik: lofterne er hævet (1 år, 500 kørsler, 60 backups)",
-      main.KEEP_DAYS["check_history"] == 365 and main.KEEP_ROWS["flow_runs"] == 500 and main.BACKUP_KEEP == 60)
+check("historik: maalinger gemmes for altid (200 og 400 dage gamle bliver)", len(_kept) == 2, _kept)
+check("historik: lofterne er hævet (for altid, 5000 kørsler, 365 backups; sikkerhedslogs har stadig graense)",
+      main.KEEP_DAYS["check_history"] == 0 and main.KEEP_ROWS["flow_runs"] == 5000 and main.BACKUP_KEEP == 365
+      and main.KEEP_DAYS["api_audit"] == 365)
+with main.get_db() as db:
+    db.execute("DELETE FROM keyword_history")
+    for _d, _p in [(40, 15), (25, 12), (10, 9), (1, 6)]:
+        db.execute("INSERT INTO keyword_history (keyword, position, url, checked_at) VALUES ('trend kw', ?, 'https://steamgears.eu/x/', ?)", (_p, _old(_d)))
+    db.execute("INSERT INTO keyword_history (keyword, position, url, checked_at) VALUES ('faldt', 3, '', ?)", (_old(20),))
+    db.execute("INSERT INTO keyword_history (keyword, position, url, checked_at) VALUES ('faldt', 8, '', ?)", (_old(2),))
+_tr = main.keyword_trends()
+check("historik: udvikling over 30 dage (12 -> 6 = +6, 3 -> 8 = -5) og antal maalinger i alt",
+      _tr["trend kw"] == {"delta": 6, "points": 4} and _tr["faldt"]["delta"] == -5, _tr)
+_ser = main.history_series("keyword", "trend kw")
+check("historik: hele forloebet for et soegeord, aeldste foerst", [p["position"] for p in _ser] == [15, 12, 9, 6], _ser)
+_r = _fc.get("/api/trend/keyword", params={"keyword": "trend kw"})
+check("historik: /api/trend/keyword svarer med forloebet", _r.status_code == 200 and len(_r.json()["points"]) == 4, _r.text[:200])
+with main.get_db() as db:
+    _ph = db.execute("SELECT COUNT(*) FROM page_history").fetchone()[0]
+    _runs = db.execute("SELECT COUNT(*) FROM health_history WHERE run_id IS NOT NULL").fetchone()[0]
+check("historik: et crawl kopierer sine sider til page_history", _runs == 0 or _ph > 0, (_ph, _runs))
+with main.get_db() as db:
+    db.execute("DELETE FROM page_history")
+    db.execute("INSERT INTO page_history (run_id, url, score, words, crawled_at) VALUES (1, 'https://steamgears.eu/p/', 60, 300, ?)", (_old(30),))
+    db.execute("INSERT INTO page_history (run_id, url, score, words, crawled_at) VALUES (2, 'https://steamgears.eu/p', 80, 900, ?)", (_old(1),))
+_r = _fc.get("/api/trend/page", params={"url": "https://steamgears.eu/p/"})
+check("historik: /api/trend/page samler med og uden / og viser scoren over tid",
+      _r.status_code == 200 and [p["score"] for p in _r.json()["points"]] == [60, 80], _r.text[:200])
+_html = _fc.get("/?tab=keywords").text
+check("historik: dashboardet kan vises med trends", "målinger" in _html or "Ingen keywords" in _html)
+with main.get_db() as db:
+    db.execute("DELETE FROM keyword_history"); db.execute("DELETE FROM page_history")
 check("historik: crawleren er uændret (max 100 sider, 0,4 s pause)",
       "max(5, min(int(max_pages or 30), 100))" in open(os.path.join(ROOT, "app", "main.py")).read()
       and "time.sleep(0.4)" in open(os.path.join(ROOT, "app", "main.py")).read())

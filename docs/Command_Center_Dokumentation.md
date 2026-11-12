@@ -235,6 +235,7 @@ Den tidligere "hent `install.sh` og kør `bash`"-funktion er fjernet — appen k
 
 ## 12. Versionshistorik (kort)
 
+- **v7.33.0** — Nye tabeller `keyword_history` (keyword, position, url, checked_at; skrives i `check_all_keywords_sync`) og `page_history` (kopi af `seopages` for hvert run, skrives sidst i `site_crawl_sync`), begge i grundskemaet og `migrate_db`, ryddes aldrig. `KEEP_DAYS` med 0 = for altid (`cutoff()` giver `"0000"`). `keyword_trends()`, `history_series()`, ruter `GET /api/trend/keyword` og `/api/trend/page`. Prioritetsbro: `cc_priority_items(skip_urls)` (plads 4-20, eget site, unik URL, højst 30), `sgap_push_priorities()` → `POST /sgap/v1/priorities` og `settings.cc_priorities_last`. Flow-blokken `prioriteter` (`WP_URL`), 18 blokke.
 - **v7.32.0** — Oprydning styres af `KEEP_DAYS` (check_history/health_history/keyword_ideas/api_audit 365, løste alarmer 180), `KEEP_ROWS` (content_audits 500, flow_runs 500, optimize_runs 200) og `BACKUP_KEEP` (env `CC_BACKUP_KEEP`, 60). `login_attempts` uændret 30 dage, crawl beholder stadig kun forrige run.
 - **v7.31.0** — `openrouter_complete()` deler kaldet i `_openrouter_post()`; ved kreditfejl (`ai_wants_free_retry`: 402 eller »can only afford«/»more credits«) sendes samme body med `model=AI_FREE_MODELS[0]` og `models=AI_FREE_MODELS`. `AI_LAST_FALLBACK` + info-alarm `ai`. Ny env `AI_FREE_MODELS`.
 - **v7.30.1** — `AI_MODEL`-standard `google/gemini-3.8-flash`. Ansvarsdeling: Steamgears Autopilot ejer sociale opslag; CC ejer analyse, SEO og artikler (kun kladder) og læser `/snapshot`.

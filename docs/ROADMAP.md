@@ -31,6 +31,7 @@ findes.
 
 | Version | Indhold |
 | --- | --- |
+| **v7.33.0** | Prioritetsbro til Steamgears Autopilot (`cc_priority_items`, `sgap_push_priorities`, flow-blok `prioriteter`, i *Ugentlig optimering*) + historik for altid (`keyword_history`, `page_history`, `keyword_trends`, `/api/trend/*`, ▲/▼ i Keywords; `KEEP_DAYS` 0 = for altid). 18 blokke. Plugin 7.82.0 har ruten. Næste: vis pluginnets klik pr. prioriteret side ved siden af placeringen (fra `/snapshot`). Verifikation: `grep -n 'def sgap_push_priorities' app/main.py` |
 | **v7.32.0** | Længere historik: `KEEP_DAYS`/`KEEP_ROWS`/`BACKUP_KEEP` (1 år, 500 kørsler, 60 backups); crawl-tempo og -loft uændret af hensyn til fair use på den delte server · 3 `historik:`-checks. Næste: crawl-historik over tid (kræver at forespørgsler på `seopages` filtrerer på `run_id`). Verifikation: `grep -n 'KEEP_DAYS' app/main.py` |
 | **v7.31.0** | Gratis AI-reserve: kreditfejl (402) → `AI_FREE_MODELS` (`nvidia/nemotron-3-ultra-550b-a55b:free`, `google/gemma-4-31b-it:free`, `openrouter/free`) via `models`-listen + info-alarm · 8 `gratis:`-checks. Samme reserve i Steamgears Autopilot 7.81.0. Verifikation: `grep -n 'def ai_wants_free_retry' app/main.py` |
 | **v7.30.1** | Standard-`AI_MODEL` rettet til `google/gemini-3.8-flash`; grænsen mod Steamgears Autopilot skrevet ned (pluginnet = sociale opslag, CC = analyse/SEO/artikler som kladder). Verifikation: `grep -n 'gemini-3.8-flash' app/main.py` |

@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 11. november 2026 · **Version:** 7.32.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 11. november 2026 · **Version:** 7.33.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,12 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Prioritetsbro + historik for altid (v7.33.0, 12. november)
+- **Baggrund:** brugeren spurgte, om det ikke var en god idé at bruge CC's data i pluginnet. Det var det, men til *hvilke sider* pluginnet laver sociale opslag om, ikke til artikler: CC skriver selv artiklerne, og pluginnets `articles_per_week` er 0 (målt live). Og: "de 8 terabyte er alle sammen mine. Så vi gemmer som vi har lyst til".
+- **Bro:** `cc_priority_items()` + `sgap_push_priorities()` → `POST /sgap/v1/priorities` (Steamgears Autopilot 7.82.0, `SGAP_Priorities`). Flow-blok `prioriteter` (18. blok), i *Ugentlig optimering* efter `soegeord`. Pluginnets `pick()` tager siderne først (7 dages pause pr. side) og skriver søgeordet ind i prompten. Kø, kanaler, lofter og kvalitetsgaten er pluginnets, uændret.
+- **Historik:** `keyword_history` og `page_history` (også i grundskemaet, fordi testene laver en frisk DB uden `migrate_db`), ryddes aldrig. `KEEP_DAYS` 0 = for altid. Ruterne hedder `/api/trend/*`, fordi `/api/history/{domain_id}` allerede findes (et sammenstød gav 422).
+- **Test:** 9 `prioritet:`- og 9 `historik:`-checks; begge suiter ALL PASS. Pluginnets rute er målt live (200, afvisning med grund, 401 uden login). Et rigtigt kald fra CC mangler WP-oplysningerne i serverens `.env`.
 
 ### Længere historik (v7.32.0, 12. november)
 - **Baggrund:** serveren har masser af plads (8 TB, 50 Gbit), men er delt — brugeren: "så længe det ik påvirker fair usage … vil ik ødelægge noget for de andre".

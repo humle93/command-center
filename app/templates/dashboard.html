@@ -1039,6 +1039,7 @@
                     <div>
                         <span class="font-medium">{{ kw.keyword }}</span>
                         {% if kw.position %}<span class="ml-2 px-2 py-0.5 rounded {% if kw.position <= 3 %}bg-emerald-500/10 text-emerald-400{% elif kw.position <= 10 %}bg-amber-500/10 text-amber-400{% else %}bg-zinc-800 text-zinc-400{% endif %}">#{{ kw.position }}</span>{% else %}<span class="text-zinc-600 ml-2">ikke i top 50</span>{% endif %}
+                        {% set tr = kw_trends.get(kw.keyword) %}{% if tr and tr.delta %}<span class="ml-1 {% if tr.delta > 0 %}text-emerald-400{% else %}text-rose-400{% endif %}" title="Ændring de sidste 30 dage">{% if tr.delta > 0 %}▲{{ tr.delta }}{% else %}▼{{ -tr.delta }}{% endif %}</span>{% endif %}{% if tr %}<span class="text-zinc-600 ml-1" title="Målinger gemt i alt">· {{ tr.points }} målinger</span>{% endif %}
                         {% if kw.target_url %}<a href="{{ kw.target_url }}" target="_blank" class="text-zinc-500 ml-2 truncate inline-block max-w-xs align-bottom">{{ kw.target_url }}</a>{% endif %}
                     </div>
                     <form action="/keywords/delete" method="POST">

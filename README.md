@@ -1,9 +1,14 @@
-# Command Center v7.32 PRO
+# Command Center v7.33 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
+
+## Nyheder i v7.33
+
+- **Broen til autopiloten (v7.33.0)** — ny flow-blok **"Send sider tæt på toppen til autopiloten"** (også i *Ugentlig optimering*, lige efter Søgeord). Den sender op til 30 af dine egne sider på plads 4-20 med deres søgeord til Steamgears Autopilot (`POST /sgap/v1/priorities`, plugin 7.82.0+). Pluginnet laver sociale opslag om de sider først og bruger søgeordet i opslaget. Sider med fejl af høj prioritet fra on-page-tjekket bliver ikke sendt. Pluginnet bestemmer stadig selv kø, kanaler og lofter.
+- **Historik for altid** — hver søgeordsmåling gemmes i `keyword_history` og hver crawlet side i `page_history`. Intet ryddes automatisk. Fanen Keywords viser udviklingen de sidste 30 dage (▲/▼) og antal målinger, og hele forløbet ligger på `GET /api/trend/keyword?keyword=` og `GET /api/trend/page?url=`. Oppetid, sundhedsscore og søgeordsidéer gemmes også for altid, backups i 365 eksemplarer (`CC_BACKUP_KEEP`). Sikkerhedslogs har stadig en grænse: MCP-audit 1 år, login-forsøg 30 dage. Crawl-tempoet er uændret.
 
 ## Nyheder i v7.32
 

@@ -31,6 +31,7 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
 - `main` fejlede i "Screenshots are not older than the dashboard" efter merge af #11: på push er HEAD merge-committen, som ikke bærer `[skip screenshots]` (samme fejl efter #9).
 - Rettet to steder: (1) alle 18 billeder i `docs/img/` er taget igen mod v7.36 med demo-data (projektvælger, ▲/▼, kvalitetsdom), (2) `ci.yml` læser markørerne også fra `HEAD_SHA^2`, når HEAD er en merge-commit. Afprøvet lokalt på merge-committen `3bc4a85`.
 - Opsætningsbjælken peger nu på Moduler → Forbindelser i stedet for `.env.example`.
+- **Fundet af en bot på #12:** 53 testbackups (`app/backups/*.db`, kun `@example.dk`-testbrugere, 0 rigtige nøgler, tjekket automatisk) var kommet med i commits siden v7.30.1 og dermed på main via #11. Fjernet fra repoet, `app/backups/` og `*.db` er i `.gitignore`, og `test_v8_features.py` sletter de backups, den selv laver. De ligger stadig i historikken (rene testdata).
 
 ### Forbindelser i browseren (v7.36.0, 12. november)
 - **Baggrund:** "er en doven skid og vil lave så lidt som muligt". Nøglerne krævede SSH og `.env`. Nu sættes de under Moduler → Forbindelser, med WordPress' *authorize-application*-side til applikationsadgangskoden.

@@ -9,3 +9,10 @@ venv/
 # koerselstid (skrives af run.sh / scripts/restart.sh)
 nohup.out
 app/data/cc.pid
+
+# Database-backups (app/backups) er driftsdata - de maa aldrig i repoet.
+# Testene skriver ogsaa her; 53 testbackups kom med i #11 og er fjernet igen.
+app/backups/
+*.db
+*.db-wal
+*.db-shm

@@ -1,9 +1,13 @@
-# Command Center v7.28 PRO
+# Command Center v7.29 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
+
+## Nyheder i v7.29
+
+- **1-klik optimering (v7.29.0)** — øverst i Cockpit: **⚡ Optimér hele projektet** kører teknik (oppetid, svartid, SSL), crawl, on-page, AI-forslag til titel/meta, indhold, søgeord og monitors i ét hug og samler alt i **én prioriteret liste** (høj/middel/lav) med konkrete rettelser pr. side. Knapperne **Teknik**, **On-page**, **Indhold**, **Søgeord** og **Monitors** kører kun den del. Intet ændres på sitet — du kopierer forslagene og markerer dem **✓ Løst**. Trin, der mangler en nøgle, springes over med en forklaring (AI-forslag kræver `OPENROUTER_API_KEY`, placeringer `SERPAPI_KEY`), og AI bruges højst på 3 sider pr. kørsel. Fremdriften vises live, rapporten gemmes (de sidste 20), og en færdig kørsel står under Alarmer. Samtidig rettet: et tomt Alpine-udtryk i SEO-fanens "Seneste crawl" gav en JavaScript-fejl, hver gang der fandtes et crawl
 
 ## Nyheder i v7.28
 

@@ -116,10 +116,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.28.1"
+APP_VERSION = "7.29.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.29.0", "1-klik optimering i Cockpit: hele projektet eller en enkelt del (teknik, on-page, indhold, soegeord, monitors) giver én prioriteret liste med faerdige forslag - intet aendres paa sitet"),
     ("7.28.1", "Funktionsrevision: AI-omskrivning af titel/meta gik ned med en AI-noegle, og en pris-monitor kunne ikke oprettes uden et meningsloest felt - begge rettet"),
     ("7.28.0", "Login uden Cloudflare: direkte paa serverens IP (http://ip:port, CC_HOST=0.0.0.0) eller paa en understi bag Ultra.cc's nginx - login-laasen kan ikke laengere snydes med X-Forwarded-For"),
     ("7.27.0", "Log ind fra WordPress med et klik: knappen i Steamgears (7.76+) sender en signeret billet, der holder 1 minut og kun virker en gang - kun for en kendt e-mail"),
@@ -149,7 +150,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Login med e-mail og adgangskode direkte paa serverens IP - ingen Cloudflare-tunnel"
+NEWEST_LINE = "1-klik optimering af hele projektet eller enkelte dele - Cockpit, oeverst"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -560,6 +561,11 @@ def migrate_db():
         db.execute("""CREATE TABLE IF NOT EXISTS content_audits (
             id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, keyword TEXT, score INTEGER,
             words INTEGER, target_words INTEGER, terms_json TEXT, checks_json TEXT, created_at TEXT
+        )""")
+        # 1-klik optimering (v7.29.0): én raekke pr. koersel, rapporten (trin + handlinger) som JSON.
+        db.execute("""CREATE TABLE IF NOT EXISTS optimize_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT, url TEXT, status TEXT,
+            started_at TEXT, finished_at TEXT, summary_json TEXT
         )""")
         # Chat + MCP-connectors (v7.26.0). secret vises aldrig i UI'et igen - kun secret_hint.
         db.execute("""CREATE TABLE IF NOT EXISTS mcp_connectors (
@@ -5493,6 +5499,11 @@ async def dashboard(request: Request):
             for s, (u, l) in budget_usage().items()
         ],
         "job_rows": job_status(),
+        "optimize": (_opt_latest := optimize_latest()),
+        "optimize_state": optimize_progress(),
+        "optimize_url": (_opt_latest or {}).get("url") or optimize_project_url(),
+        "optimize_parts": [(k, v[0]) for k, v in OPTIMIZE_PARTS.items()],
+        "optimize_ai_pages": OPTIMIZE_AI_PAGES,
         "ai_enabled": bool(OPENROUTER_API_KEY),
         "wp_enabled": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "serpapi_enabled": bool(SERPAPI_KEY),
@@ -6900,6 +6911,363 @@ async def lifespan(app_: FastAPI):
         print("[cc] scheduler kunne ikke starte (app koerer videre uden cron):", repr(e), flush=True)
     yield
     scheduler.shutdown()
+
+
+# ---------- 1-klik optimering (v7.29.0) ----------
+# Én knap koerer appens eksisterende analyser paa projektet i raekkefoelge og samler resultatet i én
+# prioriteret handlingsliste med faerdige forslag. Intet skrives til det levende site: forslagene vises,
+# og brugeren vaelger selv. Hver del kan ogsaa koeres alene. AI-forslag er loftet (OPTIMIZE_AI_PAGES),
+# saa et klik ikke kan bruge AI-budgettet op.
+OPTIMIZE_PARTS = {
+    "alt": ("Hele projektet", ["teknik", "crawl", "onpage", "meta", "indhold", "soegeord", "monitors"]),
+    "teknik": ("Teknik", ["teknik", "crawl"]),
+    "onpage": ("On-page", ["crawl", "onpage", "meta"]),
+    "indhold": ("Indhold", ["crawl", "indhold"]),
+    "soegeord": ("Søgeord", ["soegeord"]),
+    "monitors": ("Monitors", ["monitors"]),
+}
+OPTIMIZE_STEP_LABELS = {
+    "teknik": "Teknik: oppetid, svartid og SSL", "crawl": "Crawl af sitet",
+    "onpage": "On-page: titel, meta, overskrifter, links", "meta": "AI-forslag til titel og meta",
+    "indhold": "Indhold: dækning og struktur", "soegeord": "Søgeord: placeringer",
+    "monitors": "Monitors: indhold og priser",
+}
+OPTIMIZE_CRAWL_PAGES = 30
+OPTIMIZE_AI_PAGES = 3
+OPTIMIZE_CONTENT_PAGES = 5
+OPTIMIZE_MAX_PAGE_ACTIONS = 25
+OPTIMIZE_PRIORITY = {"høj": 0, "middel": 1, "lav": 2}
+OPTIMIZE_STATE = {"running": False, "run_id": None, "scope": "", "label": "", "step": 0, "steps": 0,
+                  "started_at": None, "error": None}
+_OPTIMIZE_LOCK = threading.Lock()
+# On-page-tjekkene fra analyze_page(): vaegt -> prioritet, og hvad man goer ved det.
+ONPAGE_FIXES = {
+    "HTTP 200": (3, "Siden svarer ikke 200 - ret den, eller viderestil (301) til en side der virker"),
+    "HTTPS": (3, "Server siden over https"),
+    "Titel findes": (3, "Giv siden en <title> med sidens emne"),
+    "Titel-laengde 30-60": (2, "Ret titlen til 30-60 tegn, så den ikke klippes i Google"),
+    "Meta description findes": (3, "Skriv en meta description (70-160 tegn), der får folk til at klikke"),
+    "Meta description 70-160": (2, "Ret meta description til 70-160 tegn"),
+    "Praecis een H1": (3, "Brug præcis én H1-overskrift"),
+    "Min. 2 H2-underoverskrifter": (2, "Del teksten op med mindst 2 H2-underoverskrifter"),
+    "Viewport (mobil)": (3, "Tilføj <meta name=\"viewport\">, så siden virker på mobil"),
+    "Ikke noindex": (3, "Siden har noindex - fjern det, hvis den skal kunne findes i Google"),
+    "Canonical": (2, "Tilføj et canonical-link"),
+    "JSON-LD schema": (2, "Tilføj struktureret data (JSON-LD), fx Product eller Article"),
+    "Open Graph": (1, "Tilføj Open Graph-tags, så delinger på sociale medier ser rigtige ud"),
+    "Twitter card": (1, "Tilføj twitter:card"),
+    "Favicon": (1, "Tilføj et favicon"),
+    "lang-attribut": (1, "Sæt lang=\"da\" på <html>"),
+    "Billeder har alt-tekst": (2, "Giv billederne alt-tekst"),
+    "Mindst 300 ord": (3, "Udbyg teksten til mindst 300 ord"),
+    "Lesbarhed: saetninger < 25 ord": (1, "Skriv kortere sætninger"),
+    "Flesch-lesbarhed > 50": (1, "Gør teksten lettere at læse"),
+    "Korte afsnit (< 150 ord)": (1, "Del lange afsnit op"),
+    "Min. 3 interne links": (2, "Tilføj mindst 3 interne links til relevante sider"),
+    "Min. 1 eksternt link": (1, "Link til mindst én relevant ekstern kilde"),
+    "Intet mixed content": (2, "Hent alle billeder og scripts over https"),
+    "Svartid < 1500 ms": (2, "Gør siden hurtigere (cache, mindre billeder)"),
+}
+_META_ISSUES = {"Titel findes", "Titel-laengde 30-60", "Meta description findes", "Meta description 70-160"}
+
+
+def _weight_priority(weight: int) -> str:
+    return "høj" if weight >= 3 else ("middel" if weight == 2 else "lav")
+
+
+def optimize_project_url() -> str:
+    """Projektets adresse: det foerste domaene under Domæner, ellers TRACK_DOMAIN."""
+    with get_db() as db:
+        row = db.execute("SELECT url FROM domains ORDER BY id LIMIT 1").fetchone()
+    return row["url"] if row else f"https://{TRACK_DOMAIN}"
+
+
+def _optimize_keyword_for(url: str) -> str:
+    with get_db() as db:
+        row = db.execute("SELECT keyword FROM keywords WHERE target_url=? LIMIT 1", (url,)).fetchone()
+    return row["keyword"] if row else ""
+
+
+def _latest_crawl_pages() -> list:
+    with get_db() as db:
+        run = db.execute("SELECT id FROM crawl_runs ORDER BY id DESC LIMIT 1").fetchone()
+        if not run:
+            return []
+        rows = [dict(r) for r in db.execute("SELECT * FROM seopages WHERE run_id=? ORDER BY score ASC, id",
+                                            (run["id"],)).fetchall()]
+    # Crawleren gemmer start-URL'en uden "/" og linket til forsiden med - samme side to gange.
+    seen, pages = set(), []
+    for p in rows:
+        key = p["url"].rstrip("/")
+        if key not in seen:
+            seen.add(key)
+            pages.append(p)
+    return pages
+
+
+def _optimize_step(key: str, url: str, actions: list, ctx: dict) -> tuple:
+    """Koerer ét trin. Returnerer (ok, note); ok=None betyder sprunget over (fx manglende noegle)."""
+    if key == "teknik":
+        urls = [url]
+        with get_db() as db:
+            urls += [r["url"] for r in db.execute("SELECT url FROM domains").fetchall() if r["url"] != url]
+        if len(urls) > 1:
+            check_all_domains_sync()   # opdaterer Domæner-fanen og alarmerne som den almindelige knap
+        bad = 0
+        for u in urls[:10]:
+            res = check_domain_sync(u)
+            if res["status"] != "Oppe":
+                bad += 1
+                actions.append({"area": "Teknik", "priority": "høj", "url": u, "problem": f"Siden svarer: {res['status']}",
+                                "fix": ["Tjek at siden er oppe, og at domænet peger rigtigt"] + ([res["error"]] if res.get("error") else [])})
+                continue
+            if isinstance(res.get("ssl_days"), int) and res["ssl_days"] < SSL_WARN_DAYS:
+                actions.append({"area": "Teknik", "priority": "høj" if res["ssl_days"] < 7 else "middel", "url": u,
+                                "problem": f"SSL-certifikatet udløber om {res['ssl_days']} dage", "fix": ["Forny certifikatet"]})
+            if isinstance(res.get("ms"), int) and res["ms"] > 2000:
+                actions.append({"area": "Teknik", "priority": "middel", "url": u,
+                                "problem": f"Langsom svartid: {res['ms']} ms", "fix": ["Slå sidecache til og gør billederne mindre"]})
+        return True, f"{len(urls[:10])} adresse(r) tjekket, {bad} nede"
+    if key == "crawl":
+        for _ in range(600):              # et crawl startet andetsteds faerdiggoeres foerst
+            if not CRAWL_STATE.get("running"):
+                break
+            time.sleep(1)
+        res = site_crawl_sync(url, OPTIMIZE_CRAWL_PAGES)
+        if not res or not res.get("ok"):
+            return False, f"Crawl fejlede: {(res or {}).get('error') or 'ukendt fejl'}"
+        ctx["crawl"] = res
+        if not res.get("robots_ok"):
+            actions.append({"area": "Teknik", "priority": "middel", "url": url, "problem": "robots.txt mangler eller kan ikke læses",
+                            "fix": ["Læg en robots.txt i roden med en Sitemap:-linje"]})
+        if not res.get("sitemap_ok"):
+            actions.append({"area": "Teknik", "priority": "middel", "url": url, "problem": "sitemap.xml mangler eller kan ikke læses",
+                            "fix": ["Lav et XML-sitemap (fx via Rank Math/Yoast) og nævn det i robots.txt"]})
+        for p in _latest_crawl_pages():
+            if not p["http_status"] or p["http_status"] >= 400:
+                actions.append({"area": "Teknik", "priority": "høj", "url": p["url"],
+                                "problem": f"Siden svarer {p['http_status'] or 'ikke'}",
+                                "fix": ["Ret siden, eller viderestil (301) til en side der virker, og fjern links til den"]})
+        return True, f"{res.get('pages', 0)} sider, gennemsnitlig score {res.get('avg_score', 0)}"
+    if key == "onpage":
+        pages = [p for p in _latest_crawl_pages() if p["http_status"] and p["http_status"] < 400]
+        if not pages:
+            return False, "Ingen crawlede sider - kør Teknik eller hele projektet først"
+        n = 0
+        for p in pages:
+            names = [i.strip() for i in (p["issues"] or "").split(";") if i.strip() and i.strip() != "HTTP 200"]
+            if not names:
+                continue
+            weight = max(ONPAGE_FIXES.get(i, (1, ""))[0] for i in names)
+            actions.append({"area": "On-page", "priority": _weight_priority(weight), "url": p["url"],
+                            "problem": f"On-page-score {p['score']}/100 - {len(names)} ting at rette",
+                            "fix": [ONPAGE_FIXES.get(i, (1, f"Ret: {i}"))[1]
+                                    for i in sorted(names, key=lambda n: -ONPAGE_FIXES.get(n, (1, ""))[0])],
+                            "score": p["score"]})
+            n += 1
+            if n >= OPTIMIZE_MAX_PAGE_ACTIONS:
+                break
+        return True, f"{n} side(r) med forbedringer"
+    if key == "meta":
+        if not OPENROUTER_API_KEY:
+            return None, "sprunget over: OPENROUTER_API_KEY mangler i .env"
+        cands = [p for p in _latest_crawl_pages() if p["http_status"] == 200
+                 and _META_ISSUES & {i.strip() for i in (p["issues"] or "").split(";")}][:OPTIMIZE_AI_PAGES]
+        if not cands:
+            return True, "ingen sider med titel/meta-problemer"
+        made = 0
+        for p in cands:
+            res = rewrite_meta_sync(p["url"], p["title"] or "", "", _optimize_keyword_for(p["url"]))
+            if res.get("error"):
+                continue
+            made += 1
+            target = next((a for a in actions if a["area"] == "On-page" and a["url"] == p["url"]), None)
+            if target is None:
+                target = {"area": "On-page", "priority": "middel", "url": p["url"], "problem": "Titel/meta kan forbedres", "fix": []}
+                actions.append(target)
+            target["suggestions"] = {"titles": res.get("titles", []), "descriptions": res.get("descriptions", []),
+                                     "note": res.get("note", "")}
+        return (True if made else False), f"AI-forslag til {made} af {len(cands)} side(r) (højst {OPTIMIZE_AI_PAGES} pr. kørsel)"
+    if key == "indhold":
+        pages = [p for p in _latest_crawl_pages() if p["http_status"] == 200][:OPTIMIZE_CONTENT_PAGES]
+        if not pages:
+            return False, "Ingen crawlede sider - kør Teknik eller hele projektet først"
+        scored = 0
+        for p in pages:
+            got = fetch_page_html(p["url"])
+            if not got.get("ok"):
+                continue
+            kw = _optimize_keyword_for(p["url"])
+            res = local_content_optimizer(got["html"], keyword=kw)
+            scored += 1
+            if res["score"] >= 70:
+                continue
+            actions.append({"area": "Indhold", "priority": "høj" if res["score"] < 40 else "middel", "url": p["url"],
+                            "problem": f"Indholdsscore {res['score']}/100 ({res['words']} ord, {res['h2_count']} H2)"
+                                       + (f" for '{kw}'" if kw else " - intet søgeord knyttet til siden"),
+                            "fix": [f"{f['text']}: {f['hint']}" if f.get("hint") else f["text"] for f in res["fixes"][:4]],
+                            "score": res["score"]})
+        return True, f"{scored} side(r) målt"
+    if key == "soegeord":
+        with get_db() as db:
+            count = db.execute("SELECT COUNT(*) FROM keywords").fetchone()[0]
+        if not count:
+            actions.append({"area": "Søgeord", "priority": "lav", "url": "", "problem": "Ingen søgeord at måle på",
+                            "fix": ["Tilføj de søgeord, du vil findes på, under fanen Keywords"]})
+            return True, "ingen søgeord"
+        note = f"{count} søgeord"
+        ok = True
+        if SERPAPI_KEY:
+            check_all_keywords_sync()
+        else:
+            ok, note = None, "placeringer ikke opdateret: SERPAPI_KEY mangler i .env (viser de seneste)"
+        with get_db() as db:
+            rows = db.execute("SELECT * FROM keywords").fetchall()
+        for k in rows:
+            pos = k["position"]
+            if not k["checked_at"]:
+                continue
+            if pos is None:
+                actions.append({"area": "Søgeord", "priority": "middel", "url": k["target_url"] or "",
+                                "problem": f"'{k['keyword']}' er ikke i top 50",
+                                "fix": ["Lav eller udbyg en side målrettet ordet (Vækst → plan)", "Link til den fra forsiden"]})
+            elif 4 <= pos <= 20:
+                actions.append({"area": "Søgeord", "priority": "høj", "url": k["target_url"] or "",
+                                "problem": f"'{k['keyword']}' ligger nr. {pos} - tæt på toppen",
+                                "fix": ["Udbyg siden (Vækst → optimerer)", "Sæt ordet i titel og H1",
+                                        "Tilføj interne links med ordet som linktekst"]})
+        return ok, note
+    if key == "monitors":
+        with get_db() as db:
+            count = db.execute("SELECT COUNT(*) FROM monitors").fetchone()[0]
+        if not count:
+            actions.append({"area": "Monitor", "priority": "lav", "url": url, "problem": "Ingen monitors",
+                            "fix": ["Opret en monitor for forsiden og din vigtigste produktside (fanen Monitors)"]})
+            return True, "ingen monitors"
+        check_all_monitors_sync()
+        with get_db() as db:
+            rows = db.execute("SELECT * FROM monitors").fetchall()
+        bad = 0
+        for m in rows:
+            status = m["last_status"] or ""
+            if status.startswith(("IKKE", "HTTP-fejl", "Fejl", "Ingen pris", "Ukendt")):
+                bad += 1
+                actions.append({"area": "Monitor", "priority": "høj", "url": m["url"], "problem": f"{m['name']}: {status}",
+                                "fix": ["Tjek siden - noget er ændret eller nede"]})
+        return True, f"{count} tjekket, {bad} med fejl"
+    return False, "ukendt trin"
+
+
+def optimize_project_sync(run_id: int, scope: str, url: str) -> dict:
+    """Koerer en optimering og gemmer rapporten i optimize_runs. Kaldes i executoren."""
+    label, parts = OPTIMIZE_PARTS[scope]
+    steps, actions, ctx = [], [], {}
+    OPTIMIZE_STATE.update({"steps": len(parts), "step": 0, "label": OPTIMIZE_STEP_LABELS[parts[0]]})
+    status = "ok"
+    try:
+        for i, key in enumerate(parts):
+            OPTIMIZE_STATE.update({"step": i, "label": OPTIMIZE_STEP_LABELS[key]})
+            t0 = time.time()
+            try:
+                ok, note = _optimize_step(key, url, actions, ctx)
+            except Exception as e:    # ét trin maa ikke vaelte resten
+                ok, note = False, f"fejl: {str(e)[:160]}"
+            steps.append({"key": key, "label": OPTIMIZE_STEP_LABELS[key], "ok": ok, "note": note,
+                          "secs": round(time.time() - t0, 1)})
+        actions.sort(key=lambda a: (OPTIMIZE_PRIORITY.get(a["priority"], 9), a.get("score", 100)))
+        for i, a in enumerate(actions):
+            a["id"], a["done"] = i, False
+    except Exception as e:
+        status, OPTIMIZE_STATE["error"] = "fejl", str(e)[:200]
+    counts = {p: sum(1 for a in actions if a["priority"] == p) for p in OPTIMIZE_PRIORITY}
+    summary = {"scope": scope, "label": label, "url": url, "steps": steps, "actions": actions, "counts": counts,
+               "crawl": ctx.get("crawl")}
+    with get_db() as db:
+        db.execute("UPDATE optimize_runs SET status=?, finished_at=?, summary_json=? WHERE id=?",
+                   (status, now_iso(), jsonlib.dumps(summary, ensure_ascii=False), run_id))
+        db.execute("DELETE FROM optimize_runs WHERE id NOT IN (SELECT id FROM optimize_runs ORDER BY id DESC LIMIT 20)")
+        add_alarm(db, "optimering", f"1-klik optimering ({label}) færdig: {counts['høj']} høj, {counts['middel']} middel, "
+                                    f"{counts['lav']} lav prioritet", "info")
+    OPTIMIZE_STATE.update({"running": False, "step": len(parts)})
+    return summary
+
+
+def optimize_latest() -> dict | None:
+    with get_db() as db:
+        row = db.execute("SELECT * FROM optimize_runs WHERE summary_json IS NOT NULL ORDER BY id DESC LIMIT 1").fetchone()
+    if not row:
+        return None
+    data = jsonlib.loads(row["summary_json"])
+    data.update({"id": row["id"], "status": row["status"], "started_at": row["started_at"],
+                 "finished_at": row["finished_at"]})
+    data["open"] = sum(1 for a in data.get("actions", []) if not a.get("done"))
+    return data
+
+
+def optimize_progress() -> dict:
+    s = dict(OPTIMIZE_STATE)
+    elapsed = 0
+    if s.get("started_at"):
+        try:
+            elapsed = int((datetime.now() - datetime.fromisoformat(s["started_at"])).total_seconds())
+        except ValueError:
+            elapsed = 0
+    pct = round(s["step"] / s["steps"] * 100) if s.get("steps") else 0
+    return {"running": s["running"], "scope": s["scope"], "label": s["label"], "step": s["step"],
+            "steps": s["steps"], "percent": min(pct, 99) if s["running"] else 100, "elapsed_seconds": elapsed,
+            "run_id": s["run_id"], "error": s["error"]}
+
+
+@app.post("/optimize/run")
+async def optimize_run(request: Request):
+    form = await request.form()
+    scope = str(form.get("scope", "alt")).strip()
+    if scope not in OPTIMIZE_PARTS:
+        scope = "alt"
+    raw_url = str(form.get("url", "")).strip() or optimize_project_url()
+    try:
+        url = normalize_url(raw_url)
+    except ValueError as e:
+        with get_db() as db:
+            add_alarm(db, "optimering", f"1-klik optimering blev ikke startet: {e}", "advarsel")
+        return RedirectResponse("/?tab=cockpit&opt=fejl", status_code=303)
+    with _OPTIMIZE_LOCK:                  # dobbeltklik = én koersel
+        if OPTIMIZE_STATE["running"]:
+            return RedirectResponse("/?tab=cockpit&opt=koerer", status_code=303)
+        with get_db() as db:
+            cur = db.execute("INSERT INTO optimize_runs (scope, url, status, started_at) VALUES (?,?,?,?)",
+                             (scope, url, "koerer", now_iso()))
+            run_id = cur.lastrowid
+        OPTIMIZE_STATE.update({"running": True, "run_id": run_id, "scope": scope, "step": 0,
+                               "steps": len(OPTIMIZE_PARTS[scope][1]), "label": "Starter",
+                               "started_at": datetime.now().isoformat(timespec="seconds"), "error": None})
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(executor, optimize_project_sync, run_id, scope, url)
+    return RedirectResponse("/?tab=cockpit&opt=startet", status_code=303)
+
+
+@app.get("/api/optimize/status")
+async def optimize_status():
+    latest = optimize_latest()
+    return JSONResponse({**optimize_progress(), "latest": {k: latest[k] for k in ("id", "label", "counts", "open", "finished_at")}
+                         if latest else None})
+
+
+@app.post("/optimize/done")
+async def optimize_done(run_id: str = Form(""), action_id: str = Form("")):
+    """Markér en handling som løst (eller ikke løst) - kun paa den seneste rapport."""
+    if not (run_id.isdigit() and action_id.isdigit()):
+        return RedirectResponse("/?tab=cockpit", status_code=303)
+    with get_db() as db:
+        row = db.execute("SELECT summary_json FROM optimize_runs WHERE id=?", (int(run_id),)).fetchone()
+        if row and row["summary_json"]:
+            data = jsonlib.loads(row["summary_json"])
+            for a in data.get("actions", []):
+                if a.get("id") == int(action_id):
+                    a["done"] = not a.get("done")
+            db.execute("UPDATE optimize_runs SET summary_json=? WHERE id=?",
+                       (jsonlib.dumps(data, ensure_ascii=False), int(run_id)))
+    return RedirectResponse("/?tab=cockpit#optimering", status_code=303)
 
 
 # ---------- Understi bag nginx (v7.28): Ultra.cc uden Cloudflare-tunnel ----------

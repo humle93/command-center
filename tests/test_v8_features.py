@@ -160,6 +160,11 @@ with main.get_db() as db:
 check("revision: contains-monitor uden tekst afvises med en forklaring (ikke tavst)",
       r.status_code == 303 and _none == 0 and _msg and "forventet" in _msg["message"]
       and "tab=monitors" in r.headers.get("location", ""), (_none, _msg and _msg["message"]))
+import re as _re_alp
+_tpl = open(os.path.join(ROOT, "app", "templates", "dashboard.html"), encoding="utf-8").read()
+check("revision: ingen tomme Alpine-udtryk i dashboardet (et tomt :class gav en JS-fejl ved hvert crawl)",
+      not _re_alp.search(r'\s(?::[a-z-]+|x-[a-z.:-]+|@[a-z.:-]+)=""', _tpl),
+      _re_alp.findall(r'\s(?::[a-z-]+|x-[a-z.:-]+|@[a-z.:-]+)=""', _tpl)[:5])
 check("revision: formularen kraever ikke 'forventet' (pris bruger det ikke)",
       'name="expected" placeholder="fx \'Add to cart\' eller products.0.name (tom ved pris)" class' in
       open(os.path.join(ROOT, "app", "templates", "dashboard.html"), encoding="utf-8").read())
@@ -1895,6 +1900,92 @@ check("systemd: enhederne foelger CC_HOST/CC_PORT fra .env med standard",
           and "$${CC_PORT:-8000}" in open(os.path.join(ROOT, "deploy", _u)).read()
           for _u in ("command-center.user.service", "command-center.service")))
 shutil.rmtree(_ud, ignore_errors=True)
+
+# --- v7.29.0: 1-klik optimering af hele projektet eller én del ---
+_ob = f"http://127.0.0.1:{port}/"
+_saved_opt = (main.OPENROUTER_API_KEY, main.SERPAPI_KEY)
+main.OPENROUTER_API_KEY, main.SERPAPI_KEY = "", ""
+with main.get_db() as db:
+    db.execute("DELETE FROM keywords"); db.execute("DELETE FROM monitors")
+    db.execute("INSERT INTO keywords (keyword, position, target_url, checked_at) VALUES (?,?,?,?)",
+               ("brass goggles", 7, _ob + "a", main.now_iso()))
+    _rid = db.execute("INSERT INTO optimize_runs (scope, url, status, started_at) VALUES ('alt', ?, 'koerer', ?)",
+                      (_ob, main.now_iso())).lastrowid
+_sum = main.optimize_project_sync(_rid, "alt", _ob)
+_steps = {s["key"]: s for s in _sum["steps"]}
+check("optimering: hele projektet koerer alle syv trin", list(_steps) == ["teknik", "crawl", "onpage", "meta", "indhold", "soegeord", "monitors"],
+      list(_steps))
+check("optimering: crawl og on-page virker uden noegler", _steps["crawl"]["ok"] is True and _steps["onpage"]["ok"] is True,
+      (_steps["crawl"], _steps["onpage"]))
+check("optimering: AI- og placeringstrin springes over med forklaring uden noegle",
+      _steps["meta"]["ok"] is None and "OPENROUTER_API_KEY" in _steps["meta"]["note"]
+      and _steps["soegeord"]["ok"] is None and "SERPAPI_KEY" in _steps["soegeord"]["note"], (_steps["meta"], _steps["soegeord"]))
+_acts = _sum["actions"]
+check("optimering: handlingerne er sorteret efter prioritet",
+      [main.OPTIMIZE_PRIORITY[a["priority"]] for a in _acts] == sorted(main.OPTIMIZE_PRIORITY[a["priority"]] for a in _acts) and _acts,
+      [a["priority"] for a in _acts])
+check("optimering: on-page-handlinger har konkrete rettelser pr. side",
+      any(a["area"] == "On-page" and a["url"].startswith(_ob) and a["fix"] and "On-page-score" in a["problem"] for a in _acts))
+_op_urls = [a["url"].rstrip("/") for a in _acts if a["area"] == "On-page"]
+check("optimering: samme side optraeder kun én gang (forside med og uden /)", len(_op_urls) == len(set(_op_urls)), _op_urls)
+check("optimering: manglende robots.txt/sitemap bliver en teknisk handling",
+      any(a["area"] == "Teknik" and "sitemap" in a["problem"] for a in _acts))
+check("optimering: soegeord nr. 7 er 'taet paa toppen' med hoej prioritet",
+      any(a["area"] == "Søgeord" and "nr. 7" in a["problem"] and a["priority"] == "høj" for a in _acts))
+check("optimering: ingen monitors giver et forslag om at oprette en", any(a["area"] == "Monitor" for a in _acts))
+check("optimering: rapporten gemmes og kan laeses igen", (main.optimize_latest() or {}).get("id") == _rid
+      and main.optimize_latest()["counts"]["høj"] == sum(1 for a in _acts if a["priority"] == "høj"))
+with main.get_db() as db:
+    _al = db.execute("SELECT message FROM alarms WHERE type='optimering' ORDER BY id DESC LIMIT 1").fetchone()
+check("optimering: en faerdig koersel staar under Alarmer", _al and "færdig" in _al["message"], _al and _al["message"])
+# AI-forslag til titel/meta: hoejst OPTIMIZE_AI_PAGES kald, og forslagene haefter paa sidens handling
+_opt_calls = []
+_real_rw = main.rewrite_meta_sync
+def _fake_rw(url, title, desc, kw):
+    _opt_calls.append(url)
+    return {"titles": [f"Ny titel {len(_opt_calls)}"], "descriptions": ["Ny beskrivelse"], "note": ""}
+main.rewrite_meta_sync, main.OPENROUTER_API_KEY = _fake_rw, "sk-test"
+with main.get_db() as db:
+    _rid2 = db.execute("INSERT INTO optimize_runs (scope, url, status, started_at) VALUES ('onpage', ?, 'koerer', ?)",
+                       (_ob, main.now_iso())).lastrowid
+_sum2 = main.optimize_project_sync(_rid2, "onpage", _ob)
+main.rewrite_meta_sync, main.OPENROUTER_API_KEY = _real_rw, ""
+check("optimering: kun den valgte del koeres (on-page = crawl, on-page, meta)", [s["key"] for s in _sum2["steps"]] == ["crawl", "onpage", "meta"],
+      [s["key"] for s in _sum2["steps"]])
+check("optimering: AI-forslag er loftet og haefter paa sidens handling",
+      0 < len(_opt_calls) <= main.OPTIMIZE_AI_PAGES and any(a.get("suggestions", {}).get("titles") for a in _sum2["actions"]),
+      (_opt_calls, [a.get("suggestions") for a in _sum2["actions"]][:3]))
+# Ruterne: start, status, dobbeltklik og "Løst"
+_oc = TestClient(main.app)
+main.create_user("optimering@example.dk", "optimering-pass")
+_oc.post("/login", data={"email": "optimering@example.dk", "password": "optimering-pass"}, follow_redirects=False)
+main.OPTIMIZE_STATE["running"] = True
+r = _oc.post("/optimize/run", data={"scope": "monitors", "url": _ob}, follow_redirects=False)
+check("optimering: et andet klik mens den koerer starter ikke en ny", "opt=koerer" in r.headers.get("location", ""),
+      r.headers.get("location"))
+main.OPTIMIZE_STATE["running"] = False
+r = _oc.post("/optimize/run", data={"scope": "monitors", "url": _ob}, follow_redirects=False)
+check("optimering: knappen starter en koersel og sender tilbage til Cockpit", "opt=startet" in r.headers.get("location", ""),
+      r.headers.get("location"))
+for _ in range(100):
+    if not main.OPTIMIZE_STATE["running"]:
+        break
+    main.time.sleep(0.1)
+_st = _oc.get("/api/optimize/status").json()
+check("optimering: status-API giver fremdrift og seneste rapport", _st["running"] is False and _st["latest"]
+      and _st["latest"]["label"] == "Monitors", _st)
+r = _oc.post("/optimize/run", data={"scope": "alt", "url": "ikke en adresse"}, follow_redirects=False)
+check("optimering: en ugyldig adresse forklares i stedet for at starte", "opt=fejl" in r.headers.get("location", ""),
+      r.headers.get("location"))
+_last = main.optimize_latest()
+_oc.post("/optimize/done", data={"run_id": str(_last["id"]), "action_id": "0"}, follow_redirects=False)
+check("optimering: en handling kan markeres som løst", main.optimize_latest()["actions"][0]["done"] is True
+      and main.optimize_latest()["open"] == len(_last["actions"]) - 1)
+_page = _oc.get("/?tab=cockpit").text
+check("optimering: kortet vises i Cockpit med knapper til hele projektet og de enkelte dele",
+      "⚡ Optimér hele projektet" in _page and 'value="onpage"' in _page and 'value="indhold"' in _page
+      and "Seneste rapport" in _page, _page[:100])
+main.OPENROUTER_API_KEY, main.SERPAPI_KEY = _saved_opt
 
 srv.shutdown()
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)

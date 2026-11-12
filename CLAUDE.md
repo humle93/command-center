@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 11. november 2026 · **Version:** 7.28.1 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 11. november 2026 · **Version:** 7.29.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,13 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### 1-klik optimering (v7.29.0, 12. november) — implementeret
+- **Baggrund:** ønsket var "en form for 1-kliks optimering af et helt projekt eller enkelte dele".
+- **Valg:** analyser + forslag, **ingen automatisk skrivning** til WordPress/sitet (brugeren kopierer/markerer "Løst"). Et "Anvend"-trin, der skriver godkendte titler/meta til WordPress, står i roadmappen som næste skridt.
+- **Kode:** `OPTIMIZE_PARTS` (alt, teknik, onpage, indhold, soegeord, monitors), `optimize_project_sync()` + `_optimize_step()` genbruger de eksisterende funktioner; `ONPAGE_FIXES` oversætter `analyze_page`-tjek til dansk rettelse + prioritet (vægt 3/2/1 = høj/middel/lav). Tabel `optimize_runs`, ruter `POST /optimize/run`, `GET /api/optimize/status`, `POST /optimize/done`. Kortet ligger øverst i Cockpit (`#optimering`) med live fremdrift (`ccPollOptimize`).
+- **Fundet undervejs:** tomt `:class=""` i SEO-fanens "Seneste crawl" gav en Alpine-JS-fejl, hver gang der fandtes et crawl (revisionens browsertjek ramte en frisk DB uden crawl). Rettet + test mod tomme Alpine-udtryk. Crawleren gemmer forsiden både med og uden `/` — optimeringen fjerner dubletten.
+- **Test:** 21 `optimering:`-checks; browserforløb i Chromium: klik → fremdrift → rapport (11 handlinger på en testside) → "Løst", ingen JS-fejl; alle 16 faner fejlfri med crawl-data.
 
 ### Funktionsrevision (v7.28.1, 12. november) — gennemført
 - **Baggrund:** brugeren kan nu logge ind på `laser` (direkte på IP'en, port fra `app-ports free`) og bad om at få "kigget på funktionerne på siden og om de overhovedet virker".

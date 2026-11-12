@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 11. november 2026 · **Version:** 7.34.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 11. november 2026 · **Version:** 7.34.1 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,9 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### JPEG til WordPress (v7.34.1, 12. november)
+- Instagram tager kun JPEG, og pluginnet (7.84.0) poster nu selv til Instagram/Pinterest, så Publer kan opsiges. `wp_upload_media()` konverterer derfor PNG → JPEG q90. 1 nyt check.
 
 ### Medier + kvalitetssikring (v7.34.0, 12. november)
 - **Baggrund:** "kan command center ik os lave og gemme [billeder] … kvalitetssikre materialer så den ik bare sender lort afsted". Budget: $30/md. Formål: artikler + sociale opslag nu, produkt-mockups venter på Printful.

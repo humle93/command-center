@@ -2342,6 +2342,9 @@ _ok, _note, _ = main.FLOW_BLOCKS["billede"][3](_ctx, {})
 check("flow: billede-blokken laver et godkendt billede til artiklen", _ok and "1 billede" in _note, _note)
 _ok, _note, _ = main.FLOW_BLOCKS["wp_kladde"][3](_ctx, {})
 _post = [k for u, k in _wp_calls if u.endswith("/wp/v2/posts")][-1]["json"]
+_up = [k for u, k in _wp_calls if u.endswith("/wp/v2/media")][-1]
+check("medie: WordPress får billedet som JPEG (Instagram kræver det)", _up["headers"]["Content-Type"] == "image/jpeg"
+      and _up["data"][:3] == b"\xff\xd8\xff" and _up["headers"]["Content-Disposition"].endswith('.jpg"'), _up["headers"])
 check("flow: kladden får billedet som udvalgt billede, med alt-tekst, og er stadig en kladde",
       _ok and _post["status"] == "draft" and _post["featured_media"] == 777
       and any("alt_text" in (k.get("json") or {}) for u, k in _wp_calls if "/wp/v2/media/777" in u), _post)

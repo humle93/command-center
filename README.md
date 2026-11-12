@@ -7,6 +7,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 
 ## Nyheder i v7.34
 
+- **v7.34.1:** billeder lægges i WordPress som JPEG (kvalitet 90). Instagram tager kun JPEG, og Steamgears Autopilot 7.84.0 kan nu poste direkte til Instagram og Pinterest (Publer udfases). Originalen ligger stadig som PNG i Command Center.
 - **Medier og kvalitetssikring (v7.34.0)** — kortet **🖼️ Medier** i fanen Vækst laver billeder til artikler (16:9), sociale opslag (1:1) og Pinterest (2:3) via OpenRouter (`IMAGE_MODEL`, standard `google/gemini-3.1-flash-lite-image`) og gemmer dem på serveren med prompt, model og pris. Hvert billede tjekkes i to trin:
   - **Faste regler:** kan åbnes, størrelse og format til formålet, ikke ensfarvet eller udvasket, ikke en dublet af et godkendt billede (dHash).
   - **Gratis AI-bedømmer** (`VISION_MODELS`): emne, forvrænget tekst, ekstra fingre, artefakter og steampunk-stil.

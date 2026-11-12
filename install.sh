@@ -276,10 +276,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.34.0"
+APP_VERSION = "7.34.1"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.34.1", "Billeder sendes til WordPress som JPEG (Instagram kraever det); originalen bliver i CC"),
     ("7.34.0", "Medier + kvalitetssikring: CC laver og gemmer billeder, alt bedoemmes af regler + en gratis AI-bedoemmer (min. 7/10) - intet svar = det venter paa dig"),
     ("7.33.0", "Broen til autopiloten: sider paa plads 4-20 faar sociale opslag foerst, med soegeordet - og soegeord og sider gemmer nu hele deres historik"),
     ("7.32.0", "Laengere historik: 1 aar oppetid/sundhed/soegeordsideer, 500 flow-koersler og indholdsmaalinger, 60 backups - crawleren er uaendret (fair use)"),
@@ -5036,10 +5037,17 @@ def wp_upload_media(media_id: int) -> int:
     if not path:
         raise ValueError("billedfilen mangler")
     slug = re.sub(r"[^a-z0-9]+", "-", (m["keyword"] or m["subject"] or "steamgears").lower()).strip("-")[:60] or "steamgears"
+    # WordPress faar en JPEG: Instagram tager kun JPEG (pluginnets preflight afviser andet), og
+    # filen bliver ogsaa mindre for besoegende. Originalen (PNG) bliver liggende i CC.
+    from PIL import Image
+    import io
     with open(path, "rb") as fh:
-        resp = HTTP.post(f"{WP_URL.rstrip('/')}/wp-json/wp/v2/media", auth=(WP_USER, WP_APP_PASSWORD), data=fh.read(),
-                         headers={"Content-Type": "image/png", "Content-Disposition": f'attachment; filename="{slug}-{media_id}.png"'},
-                         timeout=60)
+        img = Image.open(io.BytesIO(fh.read())).convert("RGB")
+    out = io.BytesIO()
+    img.save(out, "JPEG", quality=90, optimize=True)
+    resp = HTTP.post(f"{WP_URL.rstrip('/')}/wp-json/wp/v2/media", auth=(WP_USER, WP_APP_PASSWORD), data=out.getvalue(),
+                     headers={"Content-Type": "image/jpeg", "Content-Disposition": f'attachment; filename="{slug}-{media_id}.jpg"'},
+                     timeout=60)
     resp.raise_for_status()
     wp_id = int(resp.json().get("id"))
     HTTP.post(f"{WP_URL.rstrip('/')}/wp-json/wp/v2/media/{wp_id}", auth=(WP_USER, WP_APP_PASSWORD),
@@ -11334,6 +11342,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 
 ## Nyheder i v7.34
 
+- **v7.34.1:** billeder lægges i WordPress som JPEG (kvalitet 90). Instagram tager kun JPEG, og Steamgears Autopilot 7.84.0 kan nu poste direkte til Instagram og Pinterest (Publer udfases). Originalen ligger stadig som PNG i Command Center.
 - **Medier og kvalitetssikring (v7.34.0)** — kortet **🖼️ Medier** i fanen Vækst laver billeder til artikler (16:9), sociale opslag (1:1) og Pinterest (2:3) via OpenRouter (`IMAGE_MODEL`, standard `google/gemini-3.1-flash-lite-image`) og gemmer dem på serveren med prompt, model og pris. Hvert billede tjekkes i to trin:
   - **Faste regler:** kan åbnes, størrelse og format til formålet, ikke ensfarvet eller udvasket, ikke en dublet af et godkendt billede (dHash).
   - **Gratis AI-bedømmer** (`VISION_MODELS`): emne, forvrænget tekst, ekstra fingre, artefakter og steampunk-stil.

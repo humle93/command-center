@@ -1,9 +1,19 @@
-# Command Center v7.33 PRO
+# Command Center v7.34 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
+
+## Nyheder i v7.34
+
+- **Medier og kvalitetssikring (v7.34.0)** — kortet **🖼️ Medier** i fanen Vækst laver billeder til artikler (16:9), sociale opslag (1:1) og Pinterest (2:3) via OpenRouter (`IMAGE_MODEL`, standard `google/gemini-3.1-flash-lite-image`) og gemmer dem på serveren med prompt, model og pris. Hvert billede tjekkes i to trin:
+  - **Faste regler:** kan åbnes, størrelse og format til formålet, ikke ensfarvet eller udvasket, ikke en dublet af et godkendt billede (dHash).
+  - **Gratis AI-bedømmer** (`VISION_MODELS`): emne, forvrænget tekst, ekstra fingre, artefakter og steampunk-stil.
+
+  Under 7/10 (`QA_MIN_SCORE`) afvises billedet med grunden, og der laves ét nyt forsøg. Svarer ingen bedømmer, **venter** billedet. Det bliver aldrig godkendt af sig selv, og et job prøver igen hver time. Månedsloft `IMAGE_MONTHLY_LIMIT_USD=30` stopper før kaldet. OpenRouter kræver mindst $1 på kontoen for billeder.
+- **AI-redaktør på artikler** — oven på de faste regler (ord, søgeord, overskrifter) læser en gratis model artiklen. Den ser efter opdigtede priser, rabatter, løfter og påstande, klichéer, gentagelser og blandet sprog. Kun 7/10 eller mere går videre til WordPress (flow og growth-autopilot). Artikellisten viser dommen.
+- **Indholdsmaskinen** laver nu et godkendt billede til hver godkendt artikel. Kladden kommer i WordPress med billedet som udvalgt billede og en alt-tekst. Sociale opslag i Steamgears Autopilot 7.83+ får samme redaktør.
 
 ## Nyheder i v7.33
 

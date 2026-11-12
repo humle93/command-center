@@ -638,7 +638,9 @@
                 {% for art in articles %}
                 <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-4 text-xs space-y-2">
                     <div class="flex justify-between items-start gap-2">
-                        <div class="font-bold text-sm">{{ art.title }} <span class="text-[10px] font-normal text-zinc-500">({{ art.source }})</span></div>
+                        <div class="font-bold text-sm">{{ art.title }} <span class="text-[10px] font-normal text-zinc-500">({{ art.source }})</span>
+                            {% set rv = (art.review_json or '')|fromjson %}{% if rv %}<span class="ml-1 text-[10px] font-normal px-2 py-0.5 rounded {% if rv.status == 'godkendt' %}bg-emerald-500/10 text-emerald-400{% elif rv.status == 'venter' %}bg-amber-500/10 text-amber-400{% else %}bg-rose-500/10 text-rose-400{% endif %}" title="{{ (rv.reasons or [])|join(' · ') }}">Kvalitet: {{ rv.status }}{% if rv.score is not none %} {{ rv.score }}/10{% endif %}</span>{% endif %}
+                            {% if rv and rv.status != 'godkendt' and rv.reasons %}<div class="text-[11px] font-normal text-zinc-500 mt-1">{{ rv.reasons[:2]|join(' · ') }}</div>{% endif %}</div>
                         <div class="flex gap-2 items-center shrink-0">
                             {% if art.wp_link %}<a href="{{ art.wp_link }}" target="_blank" class="text-emerald-400">Åbn i WP ↗</a>
                             {% else %}
@@ -1018,6 +1020,44 @@
                     <p class="cc-note">Ingen linkmuligheder endnu. Tilføj den første side, du vil række ud til.</p>
                     {% endfor %}
                 </div>
+            </div>
+        </div>
+
+        <div id="medier" class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <div class="flex flex-wrap items-baseline justify-between gap-2 mb-1">
+                <h3 class="font-semibold">🖼️ Medier</h3>
+                <span class="text-xs text-zinc-500">Billedbudget: ${{ '%.2f'|format(media_spent) }} af ${{ '%.0f'|format(media_limit) }} denne måned</span>
+            </div>
+            <p class="cc-note mb-3">Billeder laves med AI og gemmes her. Hvert billede tjekkes først af faste regler (størrelse, format, kontrast, dubletter) og derefter af en gratis AI-bedømmer. Kun billeder med mindst {{ qa_min_score }}/10 bliver godkendt og kan sendes til WordPress. Svarer bedømmeren ikke, venter billedet på dig.</p>
+            {% if media_feedback %}
+            <div class="{% if media_feedback.ok %}bg-emerald-500/10 border-emerald-500/30 text-emerald-300{% else %}bg-rose-500/10 border-rose-500/30 text-rose-300{% endif %} border rounded-xl px-3 py-2 text-xs mb-3">{{ media_feedback.msg }}</div>
+            {% endif %}
+            <form action="/media/generate" method="POST" class="flex flex-wrap gap-2 mb-4">
+                <select name="purpose" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                    {% for p in media_purposes %}<option value="{{ p }}">{{ {'artikel': 'Artikel (16:9)', 'social': 'Socialt opslag (1:1)', 'pinterest': 'Pinterest (2:3)'}.get(p, p) }}</option>{% endfor %}
+                </select>
+                <input name="subject" required maxlength="300" placeholder="Hvad skal billedet vise? fx brass steampunk goggles på et værkstedsbord" class="flex-1 min-w-[16rem] bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <input name="keyword" maxlength="80" placeholder="Søgeord (valgfrit)" class="w-48 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-2 rounded-xl text-sm">Lav billede</button>
+            </form>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {% for m in media_items %}
+                <div class="bg-zinc-950 border {% if m.status == 'godkendt' %}border-emerald-500/30{% elif m.status == 'afvist' or m.status == 'fejl' %}border-rose-500/30{% else %}border-amber-500/30{% endif %} rounded-xl overflow-hidden text-xs">
+                    {% if m.file %}<a href="/media/file/{{ m.id }}" target="_blank"><img src="/media/file/{{ m.id }}" alt="{{ m.alt_text or m.subject }}" loading="lazy" class="w-full h-32 object-cover"></a>{% endif %}
+                    <div class="p-2 space-y-1">
+                        <div class="flex justify-between gap-1"><b>#{{ m.id }} {{ m.status }}</b><span class="text-zinc-500">{% if m.qa_score is not none %}{{ m.qa_score }}/10{% endif %}</span></div>
+                        <div class="text-zinc-400 truncate" title="{{ m.subject }}">{{ m.purpose }} · {{ m.subject }}</div>
+                        {% for r in (m.qa.reasons or [])[:2] %}<div class="text-zinc-500">· {{ r }}</div>{% endfor %}
+                        <div class="flex gap-2 pt-1">
+                            {% if m.status != 'godkendt' and m.file %}<form action="/media/status" method="POST"><input type="hidden" name="id" value="{{ m.id }}"><input type="hidden" name="status" value="godkendt"><button class="text-emerald-400">Godkend</button></form>{% endif %}
+                            {% if m.status == 'godkendt' %}<form action="/media/status" method="POST"><input type="hidden" name="id" value="{{ m.id }}"><input type="hidden" name="status" value="afvist"><button class="text-amber-400">Afvis</button></form>{% endif %}
+                            <form action="/media/delete" method="POST" class="ml-auto"><input type="hidden" name="id" value="{{ m.id }}"><button class="text-zinc-500 hover:text-rose-400">Slet</button></form>
+                        </div>
+                    </div>
+                </div>
+                {% else %}
+                <p class="cc-note col-span-full">Ingen billeder endnu.</p>
+                {% endfor %}
             </div>
         </div>
     </section>

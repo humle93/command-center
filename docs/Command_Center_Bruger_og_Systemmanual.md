@@ -311,6 +311,19 @@ Cockpit-panelet viser **installeret commit** og **seneste commit på `main`**:
 Opdateringen kører kontrollen automatisk, **før** den skriver noget: er `install.sh` på disken ældre end koden, stopper den med kode 7 og rører ingen filer. Beskeden siger hvad man gør i stedet (`git checkout -- install.sh` eller `git pull`), og at intet er ændret. Grunden er, at en gammel installatør ellers kan ligge klar og rulle koden tilbage, næste gang nogen kører den. `--check` og `--version` skriver intet og virker uanset. `bash scripts/restart.sh` genstarter uden at opdatere
 - Status som JSON: `GET /api/update` (inkl. `restart_mode`/`auto_restart`), `POST /api/update/check`, `POST /api/update/apply` (bruges af scriptet). `/self-update` er alias for `/update/apply`
 
+## Medier og kvalitetssikring (v7.34.0)
+
+Kortet **🖼️ Medier** ligger nederst i fanen **Vækst**. Vælg formål (artikel 16:9, socialt opslag 1:1, Pinterest 2:3), skriv hvad billedet skal vise, og tryk **Lav billede**. Alle billeder gemmes på serveren, også de afviste, så du kan se, hvad der blev stoppet og hvorfor.
+
+**Sådan bliver et billede godkendt:**
+1. **Faste regler:** billedet kan åbnes, har mindst 1200×630 (artikel), 1000×1000 (socialt) eller 800×1200 (Pinterest) og har det rigtige format. Det må ikke være ensfarvet, for mørkt eller for lyst og må ikke være næsten magen til et godkendt billede.
+2. **AI-bedømmer:** en gratis vision-model giver 0-10 for emne, forvrænget tekst, logoer, ekstra fingre, smeltede ting og steampunk-stil. Mindst 7/10 (`QA_MIN_SCORE`) giver godkendt.
+3. **Afvist:** grunden gemmes, og der laves ét nyt forsøg, hvor de første fejl skal undgås. **Svarer ingen bedømmer**, står billedet som *venter*. Det godkendes ikke af sig selv, og der prøves igen hver time. Du kan altid godkende eller afvise i hånden.
+
+**Budget:** `IMAGE_MONTHLY_LIMIT_USD` (standard $30) tjekkes før hvert kald. OpenRouter laver kun billeder, når der står mindst $1 på kontoen.
+
+**Tekster:** artikler fra flows og growth-autopiloten skal både bestå de faste regler og få mindst 7/10 af AI-redaktøren, før de sendes til WordPress. Artikellisten viser "Kvalitet: godkendt 8/10" eller grunden til, at artiklen er holdt tilbage. Den manuelle knap *Send til WP* er din egen beslutning og sender stadig.
+
 ## Historik og diskplads (v7.33.0)
 
 | Data | Gemmes |
@@ -393,6 +406,7 @@ svaret) — ingen går ned. Hvad hver funktion kræver:
 | Monitors (tekst, JSON, pris), noter, backup, moduler, API-nøgler, brugere (login/kode) | intet | virker (pris-monitor rettet i 7.28.1) |
 | 1-klik optimering (teknik, crawl, on-page, indhold, monitors) | intet (AI-forslag og placeringer kræver deres nøgle) | virker (v7.29.0) |
 | Flows (automatiske kæder) | blokkene kræver det samme som funktionerne ovenfor | virker (v7.30.0) |
+| Medier + kvalitetssikring | `OPENROUTER_API_KEY` (billeder: min. $1 på kontoen) | virker (v7.34.0); bedømmerne er målt live, billedkaldet ikke (saldo < $1) |
 | Prioriteter til autopiloten | WordPress-broen + Steamgears Autopilot 7.82.0 + målte søgeord | virker (v7.33.0); kaldet mod sitet er testet med en fake |
 | Konkurrent-søgning (Spy) | intet (DuckDuckGo) | virker, men DuckDuckGo kan blokere servere — så siger alarmen det |
 | Søgeordsidéer | intet (Google/DuckDuckGo-forslag) | virker |

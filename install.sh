@@ -19,6 +19,7 @@ Jinja2==3.1.5
 APScheduler==3.10.4
 python-dotenv==1.0.1
 python-multipart==0.0.20
+Pillow==12.3.0
 EOF_REQ
 
 echo "📄 .env.example..."
@@ -83,6 +84,12 @@ UPDATE_RESTART_CMD=
 OPENROUTER_API_KEY=
 AI_MODEL=google/gemini-3.8-flash
 # Gratis reserve ved manglende kredit (402), proeves i raekkefoelge. Tom = slaa reserven fra.
+# Billeder (v7.34.0): billedmodel paa OpenRouter og maanedsloft i dollar. OpenRouter kraever min. $1 paa kontoen.
+IMAGE_MODEL=google/gemini-3.1-flash-lite-image
+IMAGE_MONTHLY_LIMIT_USD=30
+# Gratis bedoemmere (hoejst 3 - OpenRouter afviser flere) og mindste score for godkendelse.
+VISION_MODELS=nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free,nvidia/nemotron-3.5-super-vl:free,dots-studio/dots-3-note-preview:free
+QA_MIN_SCORE=7
 # Antal backups der gemmes pr. type (daglig, pre-update ...). Standard 365.
 CC_BACKUP_KEEP=365
 AI_FREE_MODELS=nvidia/nemotron-3-ultra-550b-a55b:free,google/gemma-4-31b-it:free,openrouter/free
@@ -140,7 +147,7 @@ EOF_ENVDOT
 echo "📄 app/main.py..."
 cat << 'EOF_MAIN' > "$PROJECT_DIR/app/main.py"
 from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, PlainTextResponse, FileResponse
 from fastapi import Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -235,7 +242,7 @@ BACKUP_KEEP = max(1, int(os.environ.get("CC_BACKUP_KEEP", "365") or 365))
 # OpenRouters "models"-liste; openrouter/free er OpenRouters egen router over de gratis modeller.
 # Tom vaerdi slaar reserven fra.
 AI_FREE_MODELS = [m.strip() for m in os.environ.get(
-    "AI_FREE_MODELS", "nvidia/nemotron-3-ultra-550b-a55b:free,google/gemma-4-31b-it:free,openrouter/free").split(",") if m.strip()]
+    "AI_FREE_MODELS", "nvidia/nemotron-3-ultra-550b-a55b:free,google/gemma-4-31b-it:free,openrouter/free").split(",") if m.strip()][:3]
 # aimlapi er udfaset: en tilbagebleven noegle bruges ikke, men giver en advarsel ved opstart.
 LEGACY_AIMLAPI_KEY_SET = bool(os.environ.get("AIMLAPI_KEY", "").strip())
 WP_URL = os.environ.get("WP_URL", "").strip()                # fx https://steamgears.eu
@@ -269,10 +276,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.33.0"
+APP_VERSION = "7.34.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.34.0", "Medier + kvalitetssikring: CC laver og gemmer billeder, alt bedoemmes af regler + en gratis AI-bedoemmer (min. 7/10) - intet svar = det venter paa dig"),
     ("7.33.0", "Broen til autopiloten: sider paa plads 4-20 faar sociale opslag foerst, med soegeordet - og soegeord og sider gemmer nu hele deres historik"),
     ("7.32.0", "Laengere historik: 1 aar oppetid/sundhed/soegeordsideer, 500 flow-koersler og indholdsmaalinger, 60 backups - crawleren er uaendret (fair use)"),
     ("7.31.0", "Gratis reserve: mangler OpenRouter-kredit, svarer en gratis model (openrouter/free) i stedet for en fejl - og det bliver en alarm"),
@@ -308,7 +316,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Sider taet paa toppen sendes til autopiloten; placeringer gemmes over tid"
+NEWEST_LINE = "Billeder og tekster kvalitetssikres foer de sendes - fanen Vaekst, kortet Medier"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -339,6 +347,16 @@ app = FastAPI(title="Command Center Engine", version=APP_VERSION)
 os.makedirs(STATIC_DIR, exist_ok=True)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+
+
+def _from_json(value):
+    try:
+        return jsonlib.loads(value) if value else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+templates.env.filters["fromjson"] = _from_json
 scheduler = AsyncIOScheduler(timezone="Europe/Copenhagen")
 executor = ThreadPoolExecutor(max_workers=8)
 
@@ -454,6 +472,12 @@ def init_db():
             score INTEGER,
             issues TEXT,
             crawled_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS media (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, purpose TEXT, subject TEXT, keyword TEXT, prompt TEXT,
+            model TEXT, file TEXT, width INTEGER, height INTEGER, bytes INTEGER, sha256 TEXT, dhash TEXT,
+            cost REAL DEFAULT 0, qa_score REAL, qa_json TEXT, status TEXT, alt_text TEXT, article_id INTEGER,
+            wp_media_id TEXT, created_at TEXT
         );
         CREATE TABLE IF NOT EXISTS keyword_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT, keyword TEXT NOT NULL, position INTEGER,
@@ -642,7 +666,7 @@ _safe(init_db)
 def migrate_db():
     with get_db() as db:
         for table, want in {
-            "articles": ["meta_title", "meta_desc"],
+            "articles": ["meta_title", "meta_desc", "media_id", "review_json"],
             "seopages": ["content_hash", "redirects"],
             "crawl_runs": ["sitemap_broken", "sitemap_missing"],
             "monitors": ["last_value"],
@@ -729,6 +753,12 @@ def migrate_db():
             words INTEGER, target_words INTEGER, terms_json TEXT, checks_json TEXT, created_at TEXT
         )""")
         # Historik over tid (v7.33.0): én raekke pr. maaling, ryddes aldrig automatisk.
+        db.execute("""CREATE TABLE IF NOT EXISTS media (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, purpose TEXT, subject TEXT, keyword TEXT, prompt TEXT,
+            model TEXT, file TEXT, width INTEGER, height INTEGER, bytes INTEGER, sha256 TEXT, dhash TEXT,
+            cost REAL DEFAULT 0, qa_score REAL, qa_json TEXT, status TEXT, alt_text TEXT, article_id INTEGER,
+            wp_media_id TEXT, created_at TEXT
+        )""")
         db.execute("""CREATE TABLE IF NOT EXISTS keyword_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT, keyword TEXT NOT NULL, position INTEGER,
             url TEXT, checked_at TEXT NOT NULL
@@ -2601,6 +2631,7 @@ TASK_ESTIMATES = {
     "/connectors/add": {"label": "Forbinder til MCP-server", "seconds": 8},
     "/connectors/refresh": {"label": "Henter vaerktoejer", "seconds": 8},
     "/growth/optimize": {"label": "Indholdsoptimering", "seconds": 12},
+    "/media/generate": {"label": "Laver og kvalitetssikrer billede", "seconds": 60},
     "/growth/compare": {"label": "Konkurrent-sammenligning", "seconds": 20},
     "/growth/brief": {"label": "Indholds-brief", "seconds": 15},
     "/seo/rewrite": {"label": "AI titel/meta-forslag", "seconds": 25},
@@ -3113,7 +3144,13 @@ async def push_article(id: int = Form(...)):
         with get_db() as db:
             add_alarm(db, "kvalitet", f"Artikel #{id} sendt manuelt trods kvalitetsgate: " + "; ".join(gate["errors"]), "info")
     try:
-        wp_id = wp_push_draft(art["title"], art["content"])
+        featured = None
+        if art["media_id"]:
+            try:
+                featured = wp_upload_media(int(art["media_id"]))
+            except (ValueError, requests.RequestException):
+                featured = None
+        wp_id = wp_push_draft(art["title"], art["content"], featured)
         link = f"{WP_URL.rstrip('/')}/wp-admin/post.php?post={wp_id}&action=edit"
         with get_db() as db:
             db.execute("UPDATE articles SET status='Sendt til WP (kladde)', wp_link=? WHERE id=?", (link, id))
@@ -3170,11 +3207,14 @@ def quality_check(content: str, keyword: str) -> dict:
 
 
 # ---------- Growth Pack (v7.7): autopilot + backlink-prospector ----------
-def wp_push_draft(title: str, content: str):
+def wp_push_draft(title: str, content: str, featured_media: int | None = None):
+    payload = {"title": title, "content": content, "status": "draft"}
+    if featured_media:
+        payload["featured_media"] = int(featured_media)
     resp = HTTP.post(
         f"{WP_URL.rstrip('/')}/wp-json/wp/v2/posts",
         auth=(WP_USER, WP_APP_PASSWORD),
-        json={"title": title, "content": content, "status": "draft"},
+        json=payload,
         timeout=30,
     )
     resp.raise_for_status()
@@ -3249,11 +3289,11 @@ def autopilot_sync():
         )
         art_id = cur.lastrowid
         db.execute("DELETE FROM keyword_ideas WHERE id=?", (row["id"],))
-    gate = quality_check(content, idea)
+    gate = review_article(art_id)      # regler + AI-redaktoer (v7.34.0)
     if not gate["passed"]:
         with get_db() as db:
-            db.execute("UPDATE articles SET status=? WHERE id=?", ("Stoppet af kvalitetsgate: " + "; ".join(gate["errors"]), art_id))
-            add_alarm(db, "kvalitet", f"Autopilot-artikel #{art_id} ('{idea}') blev ikke sendt til WP: " + "; ".join(gate["errors"]), "advarsel")
+            db.execute("UPDATE articles SET status=? WHERE id=?", ("Stoppet af kvalitetsgate: " + "; ".join(gate["reasons"][:3]), art_id))
+            add_alarm(db, "kvalitet", f"Autopilot-artikel #{art_id} ('{idea}') blev ikke sendt til WP: " + "; ".join(gate["reasons"][:3]), "advarsel")
         return f"quality-blocked:{art_id}"
     if WP_URL and WP_USER and WP_APP_PASSWORD and module_on("wp_push"):
         try:
@@ -4653,6 +4693,413 @@ def ai_chat(prompt: str, max_tokens: int = 1500, timeout: int = 120) -> str:
     return content
 
 
+# ============================================================================
+# Medier + kvalitetssikring (v7.34.0)
+# Billeder laves via OpenRouter (betalt, med maanedsloft) og bedoemmes af gratis vision-modeller.
+# Tekster faar samme AI-redaktoer oven paa quality_check(). Intet godkendes, hvis reglerne fejler,
+# scoren er under QA_MIN_SCORE, eller ingen bedoemmer svarede: saa holdes det tilbage ("venter").
+# ============================================================================
+IMAGE_MODEL = os.environ.get("IMAGE_MODEL", "google/gemini-3.1-flash-lite-image")
+IMAGE_MONTHLY_LIMIT_USD = float(os.environ.get("IMAGE_MONTHLY_LIMIT_USD", "30") or 30)
+IMAGE_RESERVE_USD = 0.10          # regnes som pris foer svaret, saa loftet aldrig overskrides
+# Maalt fra steamgears.eu 12/11: nano-omni 3,5 s (9/10), super-vl 7 s, dots 12,5 s; gemma ofte 429;
+# inkling-2-small er 403 i regionen. OpenRouter afviser mere end 3 modeller i "models" (maalt live).
+OPENROUTER_MAX_MODELS = 3
+VISION_MODELS = [m.strip() for m in os.environ.get(
+    "VISION_MODELS", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free,nvidia/nemotron-3.5-super-vl:free,"
+    "dots-studio/dots-3-note-preview:free").split(",") if m.strip()][:OPENROUTER_MAX_MODELS]
+QA_MIN_SCORE = int(os.environ.get("QA_MIN_SCORE", "7") or 7)
+MEDIA_DIR = os.path.join(BASE_DIR, "data", "media")
+# formaal: (min bredde, min hoejde, billedformat til modellen)
+MEDIA_PURPOSES = {
+    "artikel": (1200, 630, "16:9"),
+    "social": (1000, 1000, "1:1"),
+    "pinterest": (800, 1200, "2:3"),
+}
+MEDIA_STYLE = ("Photographic product-style image for steamgears.eu, a steampunk shop: warm brass, copper, leather "
+               "and dark wood, Victorian workshop light, sharp focus, no text, no letters, no logos, no watermark, "
+               "no people's faces in close-up.")
+
+
+def _ratio(spec: str) -> float:
+    a, b = spec.split(":")
+    return int(a) / int(b)
+
+
+def media_month_spend() -> float:
+    start = datetime.now().strftime("%Y-%m-01")
+    with get_db() as db:
+        row = db.execute("SELECT COALESCE(SUM(cost), 0) AS s FROM media WHERE created_at >= ?", (start,)).fetchone()
+    return round(float(row["s"] or 0), 4)
+
+
+def image_dhash(img) -> int:
+    """64-bit difference-hash: ens billeder (ogsaa skaleret/komprimeret) faar naesten samme tal."""
+    small = img.convert("L").resize((9, 8))
+    px = list(small.getdata())
+    bits = 0
+    for row in range(8):
+        for col in range(8):
+            bits = (bits << 1) | (1 if px[row * 9 + col] > px[row * 9 + col + 1] else 0)
+    return bits
+
+
+def image_rules(data: bytes, purpose: str, exclude_id: int | None = None) -> dict:
+    """Faste regler foer AI'en ser billedet: kan aabnes, stoerrelse, format, ikke tomt, ikke en dublet."""
+    from PIL import Image, ImageStat
+    import io
+    errors, info = [], {}
+    try:
+        img = Image.open(io.BytesIO(data))
+        img.load()
+    except Exception as e:
+        return {"passed": False, "errors": [f"billedet kan ikke aabnes ({str(e)[:60]})"], "info": {}}
+    w, h = img.size
+    info.update(width=w, height=h, format=img.format or "", bytes=len(data))
+    min_w, min_h, spec = MEDIA_PURPOSES.get(purpose, MEDIA_PURPOSES["artikel"])
+    if w < min_w or h < min_h:
+        errors.append(f"for lille: {w}x{h}, kræver mindst {min_w}x{min_h} til {purpose}")
+    want = _ratio(spec)
+    if abs((w / h) - want) / want > 0.08:
+        errors.append(f"forkert format: {w}x{h} er ikke {spec}")
+    stat = ImageStat.Stat(img.convert("L"))
+    mean, std = stat.mean[0], stat.stddev[0]
+    info.update(mean=round(mean, 1), std=round(std, 1))
+    if std < 15:
+        errors.append(f"næsten ensfarvet (kontrast {std:.0f}) - tomt eller udvasket billede")
+    if mean < 15 or mean > 240:
+        errors.append(f"for mørkt eller lyst (gennemsnit {mean:.0f} af 255)")
+    dh = image_dhash(img)
+    info["dhash"] = format(dh, "016x")
+    with get_db() as db:
+        rows = db.execute("SELECT id, dhash FROM media WHERE status='godkendt' AND dhash IS NOT NULL AND id != ?",
+                          (exclude_id or 0,)).fetchall()
+    for r in rows:
+        try:
+            if bin(int(r["dhash"], 16) ^ dh).count("1") <= 5:
+                errors.append(f"næsten magen til billede #{r['id']}")
+                break
+        except ValueError:
+            continue
+    return {"passed": not errors, "errors": errors, "info": info}
+
+
+def _review_json(text: str) -> dict:
+    """Finder JSON-objektet i et modelsvar (ogsaa i ```-blokke)."""
+    text = (text or "").strip()
+    m = re.search(r"\{.*\}", text, re.S)
+    if not m:
+        raise ValueError("intet JSON i svaret")
+    data = jsonlib.loads(m.group(0))
+    score = data.get("score")
+    if not isinstance(score, (int, float)) or not 0 <= score <= 10:
+        raise ValueError("score mangler eller er uden for 0-10")
+    probs = data.get("problems") or []
+    return {"score": round(float(score), 1), "problems": [str(p)[:200] for p in probs][:8],
+            "alt_text": str(data.get("alt_text") or "")[:200]}
+
+
+def _review_call(models: list, content, max_tokens: int = 4000) -> dict:
+    """Ét bedoemmelseskald paa de gratis modeller. Returnerer {"ok", "score", "problems", "alt_text", "model", "error"}."""
+    if not OPENROUTER_API_KEY:
+        return {"ok": False, "error": "OPENROUTER_API_KEY mangler"}
+    if not models:
+        return {"ok": False, "error": "ingen bedømmelsesmodeller sat"}
+    # De gratis modeller raesonnerer foerst: 1 200 tokens gik alle til det (finish_reason=length,
+    # maalt live 12/11), saa loftet er 4 000. Gratis modeller koster intet pr. token.
+    models = list(models)[:OPENROUTER_MAX_MODELS]
+    body = {"model": models[0], "models": models, "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": content}]}
+    try:
+        resp, data, err = _openrouter_post(body, 120)
+        if err:
+            return {"ok": False, "error": f"bedømmeren svarede ikke: {err[:150]}"}
+        msg = (data.get("choices") or [{}])[0].get("message") or {}
+        out = _review_json(msg.get("content") or "")
+        return {"ok": True, "model": str(data.get("model") or models[0]), **out}
+    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError) as e:
+        return {"ok": False, "error": f"bedømmelsen kunne ikke læses: {str(e)[:150]}"}
+
+
+def _review_jpeg(data: bytes) -> bytes:
+    """Bedoemmeren faar en udgave paa hoejst 1024 px som JPEG: et 340 KB-billede fik den gratis model
+    til at give op (504), mens 35 KB blev bedoemt paa 3,5 s (maalt 12/11)."""
+    from PIL import Image
+    import io
+    img = Image.open(io.BytesIO(data)).convert("RGB")
+    img.thumbnail((1024, 1024))
+    out = io.BytesIO()
+    img.save(out, "JPEG", quality=85)
+    return out.getvalue()
+
+
+def review_image(data: bytes, subject: str, purpose: str) -> dict:
+    import base64
+    try:
+        small = _review_jpeg(data)
+    except Exception as e:
+        return {"ok": False, "error": f"billedet kunne ikke forberedes: {str(e)[:80]}"}
+    url = "data:image/jpeg;base64," + base64.b64encode(small).decode()
+    prompt = ("You are a strict art director for steamgears.eu, a steampunk shop. Judge this image for use as a "
+              f"{purpose} image about: \"{subject}\". Score 0-10. Deduct hard for: garbled or fake text/letters, "
+              "logos or watermarks, extra or malformed fingers/limbs, melted or nonsensical objects, wrong subject, "
+              "off-brand style (not steampunk/brass/Victorian), blur, low quality, anything offensive. "
+              "8+ only if you would publish it on a shop's front page. Answer JSON only: "
+              '{"score": <0-10>, "problems": ["..."], "alt_text": "<one sentence describing the image>"}')
+    return _review_call(VISION_MODELS, [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": url}}])
+
+
+def review_text(text: str, kind: str, keyword: str = "", source: str = "") -> dict:
+    """AI-redaktoer for artikler og opslag: faktapaastande uden grundlag, klicheer, gentagelser, sprog."""
+    body = BeautifulSoup(text or "", "html.parser").get_text(" ", strip=True)[:12000]
+    prompt = (f"You are a strict editor for steamgears.eu, a steampunk shop. Review this {kind}"
+              + (f" targeting the search phrase \"{keyword}\"" if keyword else "") + ". Score 0-10. Deduct hard for: "
+              "invented facts, prices, discounts, guarantees or claims not supported"
+              + (" by the source below" if source else "") + "; generic filler and AI cliches "
+              "(\"in today's world\", \"delve\", \"unlock\", \"elevate\"); repetition; broken or mixed language; "
+              "keyword stuffing; anything misleading or offensive. 8+ only if it is ready to publish as is. "
+              'Answer JSON only: {"score": <0-10>, "problems": ["..."]}\n\n'
+              + (f"SOURCE:\n{source[:3000]}\n\n" if source else "") + f"TEXT:\n{body}")
+    return _review_call(AI_FREE_MODELS or VISION_MODELS, prompt)
+
+
+def qa_verdict(rules: dict, review: dict) -> tuple:
+    """(status, grunde). Regler foerst; derefter skal en bedoemmer have svaret med score >= QA_MIN_SCORE."""
+    if not rules.get("passed", True):
+        return "afvist", list(rules.get("errors") or [])
+    if not review.get("ok"):
+        return "venter", [review.get("error") or "ingen bedømmelse"]
+    if review["score"] < QA_MIN_SCORE:
+        return "afvist", [f"score {review['score']}/10 (min. {QA_MIN_SCORE})"] + review.get("problems", [])
+    return "godkendt", review.get("problems", [])
+
+
+def _openrouter_image(prompt: str, aspect: str) -> tuple:
+    """(png-bytes, pris i USD, model). Kaster AIError ved fejl."""
+    import base64
+    body = {"model": IMAGE_MODEL, "messages": [{"role": "user", "content": prompt}],
+            "modalities": ["image", "text"], "image_config": {"aspect_ratio": aspect}, "usage": {"include": True}}
+    resp, data, err = _openrouter_post(body, 180)
+    if err:
+        raise AIError(f"OpenRouter ({resp.status_code}): {err[:200]}")
+    msg = (data.get("choices") or [{}])[0].get("message") or {}
+    imgs = msg.get("images") or []
+    url = ((imgs[0] or {}).get("image_url") or {}).get("url", "") if imgs else ""
+    if not url.startswith("data:image/"):
+        raise AIError("billedmodellen svarede uden billede")
+    raw = base64.b64decode(url.split(",", 1)[1])
+    cost = float(((data.get("usage") or {}).get("cost")) or IMAGE_RESERVE_USD)
+    return raw, cost, str(data.get("model") or IMAGE_MODEL)
+
+
+def _store_media_file(media_id: int, data: bytes) -> str:
+    sub = datetime.now().strftime("%Y/%m")
+    folder = os.path.join(MEDIA_DIR, sub)
+    os.makedirs(folder, exist_ok=True)
+    name = f"{media_id}-{hashlib.sha256(data).hexdigest()[:12]}.png"
+    with open(os.path.join(folder, name), "wb") as fh:
+        fh.write(data)
+    return f"{sub}/{name}"
+
+
+def make_image(purpose: str, subject: str, keyword: str = "", article_id: int | None = None, attempts: int = 2) -> dict:
+    """Laver et billede og kvalitetssikrer det. Proever igen én gang ved afvisning. Alle forsoeg gemmes."""
+    if purpose not in MEDIA_PURPOSES:
+        return {"ok": False, "error": f"ukendt formål: {purpose}"}
+    if not OPENROUTER_API_KEY:
+        return {"ok": False, "error": "OPENROUTER_API_KEY mangler i .env"}
+    subject = (subject or keyword or "").strip()[:300]
+    if not subject:
+        return {"ok": False, "error": "skriv hvad billedet skal vise"}
+    _, _, aspect = MEDIA_PURPOSES[purpose]
+    last = None
+    for attempt in range(1, attempts + 1):
+        spent = media_month_spend()
+        if spent + IMAGE_RESERVE_USD > IMAGE_MONTHLY_LIMIT_USD:
+            return {"ok": False, "error": f"månedens billedbudget er brugt (${spent:.2f} af ${IMAGE_MONTHLY_LIMIT_USD:.0f})",
+                    "last": last}
+        prompt = f"{subject}. {MEDIA_STYLE}" + (f" Theme: {keyword}." if keyword and keyword not in subject else "")
+        if last and last.get("reasons"):
+            prompt += " Avoid: " + "; ".join(last["reasons"][:3])
+        with get_db() as db:
+            mid = db.execute("INSERT INTO media (purpose, subject, keyword, prompt, model, status, article_id, created_at) "
+                             "VALUES (?,?,?,?,?,?,?,?)", (purpose, subject, keyword, prompt, IMAGE_MODEL, "laves",
+                                                          article_id, now_iso())).lastrowid
+        try:
+            data, cost, model = _openrouter_image(prompt, aspect)
+        except requests.RequestException as e:
+            with get_db() as db:
+                db.execute("UPDATE media SET status='fejl', cost=?, qa_json=? WHERE id=?",
+                           (0, jsonlib.dumps({"reasons": [str(e)[:200]]}), mid))
+            return {"ok": False, "error": f"billedmodellen fejlede: {str(e)[:150]}", "media_id": mid}
+        path = _store_media_file(mid, data)
+        rules = image_rules(data, purpose, exclude_id=mid)
+        review = review_image(data, subject, purpose) if rules["passed"] else {"ok": False, "error": "springet over (reglerne fejlede)"}
+        status, reasons = qa_verdict(rules, review)
+        info = rules["info"]
+        with get_db() as db:
+            db.execute("UPDATE media SET file=?, model=?, cost=?, width=?, height=?, bytes=?, sha256=?, dhash=?, "
+                       "qa_score=?, qa_json=?, status=?, alt_text=? WHERE id=?",
+                       (path, model, cost, info.get("width"), info.get("height"), info.get("bytes"),
+                        hashlib.sha256(data).hexdigest(), info.get("dhash"), review.get("score"),
+                        jsonlib.dumps({"rules": rules["errors"], "review": review, "reasons": reasons}),
+                        status, (review.get("alt_text") or subject)[:200], mid))
+        last = {"media_id": mid, "status": status, "reasons": reasons, "score": review.get("score"), "cost": cost}
+        if status == "godkendt":
+            return {"ok": True, **last}
+        if status == "venter":
+            break            # bedoemmeren svarede ikke: et nyt billede ville faa samme skaebne
+    return {"ok": False, "error": f"billedet blev ikke godkendt: {'; '.join((last or {}).get('reasons', [])[:3])}", **(last or {})}
+
+
+def rereview_pending(limit: int = 10) -> dict:
+    """Det, der venter fordi ingen bedoemmer svarede, faar en ny chance (job hver time)."""
+    done = {"media": 0, "articles": 0}
+    with get_db() as db:
+        media = db.execute("SELECT id, purpose, subject, file FROM media WHERE status='venter' ORDER BY id LIMIT ?",
+                           (limit,)).fetchall()
+        arts = db.execute("SELECT id, review_json FROM articles WHERE review_json LIKE '%\"status\": \"venter\"%' "
+                          "ORDER BY id LIMIT ?", (limit,)).fetchall()
+    for m in media:
+        path = media_file_path(m["id"])
+        if not path:
+            continue
+        with open(path, "rb") as fh:
+            data = fh.read()
+        rules = image_rules(data, m["purpose"], exclude_id=m["id"])
+        review = review_image(data, m["subject"] or "", m["purpose"]) if rules["passed"] else {"ok": False, "error": "reglerne fejlede"}
+        status, reasons = qa_verdict(rules, review)
+        if status == "venter":
+            continue
+        with get_db() as db:
+            db.execute("UPDATE media SET status=?, qa_score=?, alt_text=COALESCE(NULLIF(?, ''), alt_text), qa_json=? WHERE id=?",
+                       (status, review.get("score"), review.get("alt_text") or "",
+                        jsonlib.dumps({"rules": rules["errors"], "review": review, "reasons": reasons, "rereviewed": now_iso()}), m["id"]))
+        done["media"] += 1
+    for a in arts:
+        if review_article(a["id"])["status"] != "venter":
+            done["articles"] += 1
+    return done
+
+
+async def job_rereview():
+    await asyncio.get_running_loop().run_in_executor(executor, rereview_pending)
+
+
+def media_rows(limit: int = 24) -> list:
+    with get_db() as db:
+        rows = [dict(r) for r in db.execute("SELECT * FROM media ORDER BY id DESC LIMIT ?", (limit,)).fetchall()]
+    for r in rows:
+        try:
+            r["qa"] = jsonlib.loads(r.get("qa_json") or "{}")
+        except ValueError:
+            r["qa"] = {}
+    return rows
+
+
+def media_file_path(media_id: int) -> str:
+    with get_db() as db:
+        row = db.execute("SELECT file FROM media WHERE id=?", (media_id,)).fetchone()
+    if not row or not row["file"]:
+        return ""
+    path = os.path.realpath(os.path.join(MEDIA_DIR, row["file"]))
+    return path if path.startswith(os.path.realpath(MEDIA_DIR) + os.sep) and os.path.isfile(path) else ""
+
+
+def review_article(article_id: int) -> dict:
+    """quality_check (regler) + AI-redaktoer. Gemmer resultatet paa artiklen og returnerer {"passed", "reasons", ...}."""
+    with get_db() as db:
+        art = db.execute("SELECT * FROM articles WHERE id=?", (article_id,)).fetchone()
+    if not art:
+        return {"passed": False, "reasons": ["artiklen findes ikke"]}
+    gate = quality_check(art["content"] or "", art["keyword"] or "")
+    rules = {"passed": gate["passed"], "errors": gate["errors"]}
+    review = review_text(art["content"] or "", "blog article", art["keyword"] or "") if gate["passed"] else \
+        {"ok": False, "error": "springet over (reglerne fejlede)"}
+    status, reasons = qa_verdict(rules, review)
+    out = {"passed": status == "godkendt", "status": status, "reasons": reasons, "score": review.get("score"),
+           "warnings": gate.get("warnings", [])}
+    with get_db() as db:
+        db.execute("UPDATE articles SET review_json=? WHERE id=?", (jsonlib.dumps(out), article_id))
+    return out
+
+
+def wp_upload_media(media_id: int) -> int:
+    """Lægger et godkendt billede i WordPress' mediebibliotek med alt-tekst. Returnerer WP's id."""
+    with get_db() as db:
+        m = db.execute("SELECT * FROM media WHERE id=?", (media_id,)).fetchone()
+    if not m or m["status"] != "godkendt":
+        raise ValueError("kun godkendte billeder sendes til WordPress")
+    if m["wp_media_id"]:
+        return int(m["wp_media_id"])
+    path = media_file_path(media_id)
+    if not path:
+        raise ValueError("billedfilen mangler")
+    slug = re.sub(r"[^a-z0-9]+", "-", (m["keyword"] or m["subject"] or "steamgears").lower()).strip("-")[:60] or "steamgears"
+    with open(path, "rb") as fh:
+        resp = HTTP.post(f"{WP_URL.rstrip('/')}/wp-json/wp/v2/media", auth=(WP_USER, WP_APP_PASSWORD), data=fh.read(),
+                         headers={"Content-Type": "image/png", "Content-Disposition": f'attachment; filename="{slug}-{media_id}.png"'},
+                         timeout=60)
+    resp.raise_for_status()
+    wp_id = int(resp.json().get("id"))
+    HTTP.post(f"{WP_URL.rstrip('/')}/wp-json/wp/v2/media/{wp_id}", auth=(WP_USER, WP_APP_PASSWORD),
+              json={"alt_text": m["alt_text"] or m["subject"] or "", "title": m["subject"] or ""}, timeout=30)
+    with get_db() as db:
+        db.execute("UPDATE media SET wp_media_id=? WHERE id=?", (str(wp_id), media_id))
+    return wp_id
+
+
+@app.post("/media/generate")
+async def media_generate(purpose: str = Form("artikel"), subject: str = Form(""), keyword: str = Form("")):
+    loop = asyncio.get_running_loop()
+    res = await loop.run_in_executor(executor, make_image, purpose, subject, keyword)
+    msg = "Billedet er godkendt" if res.get("ok") else res.get("error", "fejl")
+    return RedirectResponse(f"/?tab=vaekst&media={'ok' if res.get('ok') else 'fejl'}&media_msg={urllib.parse.quote_plus(msg[:200])}#medier",
+                            status_code=303)
+
+
+@app.post("/media/status")
+async def media_set_status(id: int = Form(...), status: str = Form(...)):
+    """Manuel overstyring: du kan godkende et 'venter'-billede eller afvise et godkendt."""
+    if status not in ("godkendt", "afvist"):
+        return RedirectResponse("/?tab=vaekst#medier", status_code=303)
+    with get_db() as db:
+        row = db.execute("SELECT qa_json FROM media WHERE id=?", (id,)).fetchone()
+        if row:
+            qa = jsonlib.loads(row["qa_json"] or "{}")
+            qa["manual"] = {"status": status, "at": now_iso()}
+            db.execute("UPDATE media SET status=?, qa_json=? WHERE id=?", (status, jsonlib.dumps(qa), id))
+    return RedirectResponse("/?tab=vaekst#medier", status_code=303)
+
+
+@app.post("/media/delete")
+async def media_delete(id: int = Form(...)):
+    path = media_file_path(id)
+    if path:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    with get_db() as db:
+        db.execute("DELETE FROM media WHERE id=?", (id,))
+    return RedirectResponse("/?tab=vaekst#medier", status_code=303)
+
+
+@app.get("/media/file/{media_id}")
+async def media_file(media_id: int):
+    path = media_file_path(media_id)
+    if not path:
+        return JSONResponse({"error": "findes ikke"}, status_code=404)
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "private, max-age=86400"})
+
+
+@app.get("/api/media")
+async def api_media():
+    return {"spent_usd": media_month_spend(), "limit_usd": IMAGE_MONTHLY_LIMIT_USD, "min_score": QA_MIN_SCORE,
+            "items": [{k: r.get(k) for k in ("id", "purpose", "subject", "status", "qa_score", "cost", "width",
+                                               "height", "alt_text", "created_at")} for r in media_rows(100)]}
+
+
 def warn_legacy_aimlapi() -> str:
     """Advarer ved opstart, naar .env stadig kun har AIMLAPI_KEY (bruges ikke efter v7.25.0)."""
     if not LEGACY_AIMLAPI_KEY_SET or OPENROUTER_API_KEY:
@@ -5712,6 +6159,10 @@ async def dashboard(request: Request):
     except Exception:
         sgap_state = {}
     return templates.TemplateResponse("dashboard.html", {
+        "media_feedback": ({"ok": request.query_params.get("media") == "ok", "msg": (request.query_params.get("media_msg") or "")[:200]}
+                           if request.query_params.get("media") in ("ok", "fejl") else None),
+        "media_items": media_rows(), "media_spent": media_month_spend(), "media_limit": IMAGE_MONTHLY_LIMIT_USD,
+        "media_purposes": list(MEDIA_PURPOSES), "qa_min_score": QA_MIN_SCORE,
         "kw_trends": kw_trends,
         "request": request,
         "domains": domains,
@@ -6296,7 +6747,7 @@ async def api_keys_revoke(client_id: int = Form(...)):
 JOB_MAX_AGE_HOURS = {
     "domain_checks": 7, "keyword_checks": 26, "growth_autopilot": 26, "cleanup": 26,
     "db_backup": 26, "update_check": 26, "sgap_sync": 1.5, "wp_cron": 0.5,
-    "alert_outbox": 0.1, "flows": 0.5,
+    "alert_outbox": 0.1, "flows": 0.5, "rereview": 2,
 }
 JOB_LABELS = {
     "domain_checks": "Domæne-tjek", "keyword_checks": "Keyword-tjek", "growth_autopilot": "Vækst-autopilot",
@@ -7133,6 +7584,7 @@ async def lifespan(app_: FastAPI):
         scheduler.add_job(job_heartbeat("wp_cron", job_wp_cron), IntervalTrigger(minutes=5), id="wp_cron", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat("alert_outbox", job_drain_alerts), IntervalTrigger(minutes=1), id="alert_outbox", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat("flows", job_flows), IntervalTrigger(minutes=5), id="flows", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("rereview", job_rereview), IntervalTrigger(hours=1), id="rereview", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat_check, IntervalTrigger(minutes=15), id="job_heartbeat", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.start()
         try:
@@ -7629,14 +8081,40 @@ def _flow_article(ctx, params):
             content = generate_article_ai(kw, get_active_strategy())
         except requests.RequestException as e:
             return False, f"AI-fejl: {str(e)[:150]}", len(made)
-        gate = quality_check(content, kw)
         with get_db() as db:
             cur = db.execute("INSERT INTO articles (title, keyword, content, source, created_at) VALUES (?,?,?,?,?)",
                              (f"Guide: {kw}", kw, content, f"Flow ({AI_MODEL})", now_iso()))
-            made.append({"id": cur.lastrowid, "keyword": kw, "passed": gate["passed"], "errors": gate["errors"]})
+            aid = cur.lastrowid
+        # v7.34.0: regler + AI-redaktoer; uden en score >= QA_MIN_SCORE sendes artiklen ikke videre.
+        verdict = review_article(aid)
+        made.append({"id": aid, "keyword": kw, "passed": verdict["passed"], "errors": verdict["reasons"],
+                     "status": verdict["status"]})
     ctx.setdefault("articles", []).extend(made)
     ok_n = sum(1 for a in made if a["passed"])
-    return True, f"{len(made)} artikel(er) skrevet, {ok_n} består kvalitetstjekket", len(made)
+    held = [f"#{a['id']}: {a['errors'][0]}" for a in made if not a["passed"] and a["errors"]]
+    return True, (f"{len(made)} artikel(er) skrevet, {ok_n} godkendt af kvalitetstjekket"
+                  + (f"; holdt tilbage: {', '.join(held[:2])}" if held else "")), len(made)
+
+
+def _flow_image(ctx, params):
+    if not OPENROUTER_API_KEY:
+        return None, "sprunget over: OPENROUTER_API_KEY mangler i .env", 0
+    arts = [a for a in ctx.get("articles", []) if a.get("passed")]
+    if not arts:
+        return True, "ingen godkendte artikler at lave billeder til", 0
+    ok, notes = 0, []
+    for a in arts[:FLOW_MAX_ARTICLES]:
+        res = make_image("artikel", f"Header image for a guide about {a['keyword']}", a["keyword"], article_id=a["id"])
+        if res.get("ok"):
+            with get_db() as db:
+                db.execute("UPDATE articles SET media_id=? WHERE id=?", (str(res["media_id"]), a["id"]))
+            ok += 1
+        else:
+            notes.append(res.get("error", "fejl")[:120])
+            if "budget" in res.get("error", ""):
+                break
+    note = f"{ok} billede(r) godkendt" + (f"; {notes[0]}" if notes else "")
+    return (True if ok or not notes else False), note, ok
 
 
 def _flow_wp_draft(ctx, params):
@@ -7644,6 +8122,13 @@ def _flow_wp_draft(ctx, params):
         return None, "sprunget over: WP_URL/WP_USER/WP_APP_PASSWORD mangler i .env", 0
     arts = [a for a in ctx.get("articles", []) if a.get("passed")]
     skipped = [a for a in ctx.get("articles", []) if not a.get("passed")]
+    # Artikler der ventede paa en bedoemmer og siden er godkendt (rereview), kommer med nu.
+    seen = {a["id"] for a in ctx.get("articles", [])}
+    with get_db() as db:
+        late = [r["id"] for r in db.execute("SELECT id FROM articles WHERE status='Kladde' AND source LIKE 'Flow%' "
+                                            "AND review_json LIKE '%\"status\": \"godkendt\"%' ORDER BY id LIMIT ?",
+                                            (FLOW_MAX_ARTICLES,)).fetchall()]
+    arts += [{"id": i, "passed": True} for i in late if i not in seen]
     if not arts:
         return True, ("ingen nye artikler bestod kvalitetstjekket" if skipped else "ingen nye artikler at sende"), 0
     sent = 0
@@ -7651,7 +8136,13 @@ def _flow_wp_draft(ctx, params):
         with get_db() as db:
             art = db.execute("SELECT * FROM articles WHERE id=?", (a["id"],)).fetchone()
         try:
-            wp_id = wp_push_draft(art["title"], art["content"])   # altid status=draft
+            featured = None
+            if art["media_id"]:
+                try:
+                    featured = wp_upload_media(int(art["media_id"]))
+                except (ValueError, requests.RequestException):
+                    featured = None   # artiklen sendes alligevel; billedet kan laegges paa i WordPress
+            wp_id = wp_push_draft(art["title"], art["content"], featured)   # altid status=draft
             link = f"{WP_URL.rstrip('/')}/wp-admin/post.php?post={wp_id}&action=edit"
             with get_db() as db:
                 db.execute("UPDATE articles SET status='Sendt til WP (kladde)', wp_link=? WHERE id=?", (link, a["id"]))
@@ -7828,6 +8319,7 @@ FLOW_BLOCKS = {
     "ai_meta": ("AI-forslag til titel og meta", "Generér", "OPENROUTER_API_KEY", _flow_opt("meta"), []),
     "brief": ("Indholdsplan pr. søgeord", "Generér", "", _flow_brief, ["keyword", "max"]),
     "artikel": ("Skriv artikel (AI)", "Generér", "OPENROUTER_API_KEY", _flow_article, ["keyword", "max"]),
+    "billede": ("Lav og kvalitetssikr billede til nye artikler", "Generér", "OPENROUTER_API_KEY", _flow_image, []),
     "wp_kladde": ("Send nye artikler til WordPress som kladde", "Handling", "WP_URL", _flow_wp_draft, []),
     "autopilot": ("Growth-autopilot (idé → artikel → kladde)", "Handling", "OPENROUTER_API_KEY", _flow_autopilot, []),
     "prioriteter": ("Send sider tæt på toppen til autopiloten (sociale opslag)", "Handling", "WP_URL", _flow_priorities, []),
@@ -7850,7 +8342,8 @@ FLOW_TEMPLATES = {
                         "hint": "Onsdag: søgeord tæt på toppen → plan → AI-artikel → WordPress-kladde (aldrig udgivet).",
                         "steps": [{"block": "soegeord"}, {"block": "brief", "when": "hvis_fund", "params": {"max": "2"}},
                                   {"block": "artikel", "when": "hvis_fund", "params": {"max": "1"}},
-                                  {"block": "wp_kladde", "when": "hvis_fund"}, {"block": "rapport"}]},
+                                  {"block": "billede", "when": "hvis_fund"},
+                                  {"block": "wp_kladde"}, {"block": "rapport"}]},
     "konkurrenter": {"name": "Konkurrent-overvågning", "schedule": "weekly@5@06",
                      "hint": "Fredag: konkurrenter, content gap og backlink-muligheder for dit første søgeord.",
                      "steps": [{"block": "konkurrenter"}, {"block": "content_gap"}, {"block": "backlinks"},
@@ -8870,7 +9363,9 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                 {% for art in articles %}
                 <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-4 text-xs space-y-2">
                     <div class="flex justify-between items-start gap-2">
-                        <div class="font-bold text-sm">{{ art.title }} <span class="text-[10px] font-normal text-zinc-500">({{ art.source }})</span></div>
+                        <div class="font-bold text-sm">{{ art.title }} <span class="text-[10px] font-normal text-zinc-500">({{ art.source }})</span>
+                            {% set rv = (art.review_json or '')|fromjson %}{% if rv %}<span class="ml-1 text-[10px] font-normal px-2 py-0.5 rounded {% if rv.status == 'godkendt' %}bg-emerald-500/10 text-emerald-400{% elif rv.status == 'venter' %}bg-amber-500/10 text-amber-400{% else %}bg-rose-500/10 text-rose-400{% endif %}" title="{{ (rv.reasons or [])|join(' · ') }}">Kvalitet: {{ rv.status }}{% if rv.score is not none %} {{ rv.score }}/10{% endif %}</span>{% endif %}
+                            {% if rv and rv.status != 'godkendt' and rv.reasons %}<div class="text-[11px] font-normal text-zinc-500 mt-1">{{ rv.reasons[:2]|join(' · ') }}</div>{% endif %}</div>
                         <div class="flex gap-2 items-center shrink-0">
                             {% if art.wp_link %}<a href="{{ art.wp_link }}" target="_blank" class="text-emerald-400">Åbn i WP ↗</a>
                             {% else %}
@@ -9250,6 +9745,44 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                     <p class="cc-note">Ingen linkmuligheder endnu. Tilføj den første side, du vil række ud til.</p>
                     {% endfor %}
                 </div>
+            </div>
+        </div>
+
+        <div id="medier" class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <div class="flex flex-wrap items-baseline justify-between gap-2 mb-1">
+                <h3 class="font-semibold">🖼️ Medier</h3>
+                <span class="text-xs text-zinc-500">Billedbudget: ${{ '%.2f'|format(media_spent) }} af ${{ '%.0f'|format(media_limit) }} denne måned</span>
+            </div>
+            <p class="cc-note mb-3">Billeder laves med AI og gemmes her. Hvert billede tjekkes først af faste regler (størrelse, format, kontrast, dubletter) og derefter af en gratis AI-bedømmer. Kun billeder med mindst {{ qa_min_score }}/10 bliver godkendt og kan sendes til WordPress. Svarer bedømmeren ikke, venter billedet på dig.</p>
+            {% if media_feedback %}
+            <div class="{% if media_feedback.ok %}bg-emerald-500/10 border-emerald-500/30 text-emerald-300{% else %}bg-rose-500/10 border-rose-500/30 text-rose-300{% endif %} border rounded-xl px-3 py-2 text-xs mb-3">{{ media_feedback.msg }}</div>
+            {% endif %}
+            <form action="/media/generate" method="POST" class="flex flex-wrap gap-2 mb-4">
+                <select name="purpose" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                    {% for p in media_purposes %}<option value="{{ p }}">{{ {'artikel': 'Artikel (16:9)', 'social': 'Socialt opslag (1:1)', 'pinterest': 'Pinterest (2:3)'}.get(p, p) }}</option>{% endfor %}
+                </select>
+                <input name="subject" required maxlength="300" placeholder="Hvad skal billedet vise? fx brass steampunk goggles på et værkstedsbord" class="flex-1 min-w-[16rem] bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <input name="keyword" maxlength="80" placeholder="Søgeord (valgfrit)" class="w-48 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-2 rounded-xl text-sm">Lav billede</button>
+            </form>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {% for m in media_items %}
+                <div class="bg-zinc-950 border {% if m.status == 'godkendt' %}border-emerald-500/30{% elif m.status == 'afvist' or m.status == 'fejl' %}border-rose-500/30{% else %}border-amber-500/30{% endif %} rounded-xl overflow-hidden text-xs">
+                    {% if m.file %}<a href="/media/file/{{ m.id }}" target="_blank"><img src="/media/file/{{ m.id }}" alt="{{ m.alt_text or m.subject }}" loading="lazy" class="w-full h-32 object-cover"></a>{% endif %}
+                    <div class="p-2 space-y-1">
+                        <div class="flex justify-between gap-1"><b>#{{ m.id }} {{ m.status }}</b><span class="text-zinc-500">{% if m.qa_score is not none %}{{ m.qa_score }}/10{% endif %}</span></div>
+                        <div class="text-zinc-400 truncate" title="{{ m.subject }}">{{ m.purpose }} · {{ m.subject }}</div>
+                        {% for r in (m.qa.reasons or [])[:2] %}<div class="text-zinc-500">· {{ r }}</div>{% endfor %}
+                        <div class="flex gap-2 pt-1">
+                            {% if m.status != 'godkendt' and m.file %}<form action="/media/status" method="POST"><input type="hidden" name="id" value="{{ m.id }}"><input type="hidden" name="status" value="godkendt"><button class="text-emerald-400">Godkend</button></form>{% endif %}
+                            {% if m.status == 'godkendt' %}<form action="/media/status" method="POST"><input type="hidden" name="id" value="{{ m.id }}"><input type="hidden" name="status" value="afvist"><button class="text-amber-400">Afvis</button></form>{% endif %}
+                            <form action="/media/delete" method="POST" class="ml-auto"><input type="hidden" name="id" value="{{ m.id }}"><button class="text-zinc-500 hover:text-rose-400">Slet</button></form>
+                        </div>
+                    </div>
+                </div>
+                {% else %}
+                <p class="cc-note col-span-full">Ingen billeder endnu.</p>
+                {% endfor %}
             </div>
         </div>
     </section>
@@ -10792,12 +11325,22 @@ EOF_USERSVC
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.33 PRO
+# Command Center v7.34 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
+
+## Nyheder i v7.34
+
+- **Medier og kvalitetssikring (v7.34.0)** — kortet **🖼️ Medier** i fanen Vækst laver billeder til artikler (16:9), sociale opslag (1:1) og Pinterest (2:3) via OpenRouter (`IMAGE_MODEL`, standard `google/gemini-3.1-flash-lite-image`) og gemmer dem på serveren med prompt, model og pris. Hvert billede tjekkes i to trin:
+  - **Faste regler:** kan åbnes, størrelse og format til formålet, ikke ensfarvet eller udvasket, ikke en dublet af et godkendt billede (dHash).
+  - **Gratis AI-bedømmer** (`VISION_MODELS`): emne, forvrænget tekst, ekstra fingre, artefakter og steampunk-stil.
+
+  Under 7/10 (`QA_MIN_SCORE`) afvises billedet med grunden, og der laves ét nyt forsøg. Svarer ingen bedømmer, **venter** billedet. Det bliver aldrig godkendt af sig selv, og et job prøver igen hver time. Månedsloft `IMAGE_MONTHLY_LIMIT_USD=30` stopper før kaldet. OpenRouter kræver mindst $1 på kontoen for billeder.
+- **AI-redaktør på artikler** — oven på de faste regler (ord, søgeord, overskrifter) læser en gratis model artiklen. Den ser efter opdigtede priser, rabatter, løfter og påstande, klichéer, gentagelser og blandet sprog. Kun 7/10 eller mere går videre til WordPress (flow og growth-autopilot). Artikellisten viser dommen.
+- **Indholdsmaskinen** laver nu et godkendt billede til hver godkendt artikel. Kladden kommer i WordPress med billedet som udvalgt billede og en alt-tekst. Sociale opslag i Steamgears Autopilot 7.83+ får samme redaktør.
 
 ## Nyheder i v7.33
 

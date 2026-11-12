@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 11. november 2026 · **Version:** 7.33.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 11. november 2026 · **Version:** 7.34.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,14 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Medier + kvalitetssikring (v7.34.0, 12. november)
+- **Baggrund:** "kan command center ik os lave og gemme [billeder] … kvalitetssikre materialer så den ik bare sender lort afsted". Budget: $30/md. Formål: artikler + sociale opslag nu, produkt-mockups venter på Printful.
+- **Kode:** `make_image` → `_openrouter_image` (modalities image) → `image_rules` (Pillow) → `review_image` (nedskaleret JPEG til gratis vision-modeller) → `qa_verdict`. Tekst: `review_text`/`review_article` oven på `quality_check`. `rereview_pending` + job `rereview`. Flow-blok `billede` (19 blokke) i Indholdsmaskinen. `wp_upload_media` + `featured_media`.
+- **Princip:** fail closed. Intet svar fra en bedømmer = `venter`, aldrig godkendt.
+- **Målt live fra steamgears.eu:** (1) OpenRouter afviser > 3 modeller i `models`. (2) Billeder kræver ≥ $1 saldo (402). (3) De gratis modeller ræsonnerer: 1 200 tokens gav tomt svar, så loftet er 4 000. (4) Et 340 KB-billede gav 504, 35 KB blev bedømt på 3,5 s, derfor nedskaleres billedet. (5) `inkling-2-small:free` er 403 i regionen.
+- **Plugin:** Steamgears Autopilot 7.83.2 (`SGAP_Editor`) bedømmer sociale opslag live: rigtige opslag 8/5/9, et opdigtet tilbud 1-2/10.
+- **Test:** 34 `medie`/`tekst-qa`/`qa`-checks. Billedkaldet er ikke lavet mod det rigtige OpenRouter (saldo < $1).
 
 ### Prioritetsbro + historik for altid (v7.33.0, 12. november)
 - **Baggrund:** brugeren spurgte, om det ikke var en god idé at bruge CC's data i pluginnet. Det var det, men til *hvilke sider* pluginnet laver sociale opslag om, ikke til artikler: CC skriver selv artiklerne, og pluginnets `articles_per_week` er 0 (målt live). Og: "de 8 terabyte er alle sammen mine. Så vi gemmer som vi har lyst til".

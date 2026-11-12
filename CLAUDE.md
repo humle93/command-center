@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 11. november 2026 · **Version:** 7.34.1 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 11. november 2026 · **Version:** 7.35.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,16 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Flere projekter (v7.35.0, 12. november)
+- **Baggrund:** affiliate-nichesiden (kaffe, se steamgears-site `docs/library/affiliate-niche-plan-2026-11-12.md`) skal køre i samme CC. Brugeren valgte fler-projekt frem for en ekstra installation.
+- **Valg:** én database pr. projekt i stedet for `project_id` på 40 tabeller og 260 kald. Fælles tabeller nås via `ATTACH center.db AS g` (SQLite slår ukvalificerede navne op i main → g). Projekt 1 = `.env` + center.db, uændret.
+- **Faldgruber:**
+  - `run_in_executor` kopierer ikke contextvars, så `executor` er en `_ContextExecutor`.
+  - Konfigurationen blev skiftet med `tokenize` (63 steder), så strenge og beskeder er urørte.
+  - Testene sætter stadig `main.WP_URL` (projekt 1 læser modul-globalerne).
+  - `settings` og `alarms` er pr. projekt, `alert_outbox` er fælles.
+- **Test:** 28 `projekt:`-checks. Browser: oprettelse, skift, 17 faner uden JS-fejl.
 
 ### JPEG til WordPress (v7.34.1, 12. november)
 - Instagram tager kun JPEG, og pluginnet (7.84.0) poster nu selv til Instagram/Pinterest, så Publer kan opsiges. `wp_upload_media()` konverterer derfor PNG → JPEG q90. 1 nyt check.

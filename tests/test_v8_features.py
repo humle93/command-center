@@ -2393,6 +2393,107 @@ main.OPENROUTER_API_KEY = _pk2
 _html = _fc.get("/?tab=articles").text
 check("tekst-qa: artikellisten viser kvalitetsdommen", "Kvalitet: godkendt" in _html, "Kvalitet" in _html)
 
+# ---------- projekter (v7.35.0) ----------
+import asyncio as _aio
+_pid, _err = main.project_create("", "x.dk")
+check("projekt: navn kraeves", _pid is None and "navn" in _err)
+check("projekt: ugyldigt domaene afvises", main.project_create("Test", "ikke et domæne")[0] is None)
+check("projekt: halv WordPress-opsaetning afvises", "alle tre" in main.project_create("Test", "test.dk", "https://test.dk", "", "")[1] or "både" in main.project_create("Test", "test.dk", "https://test.dk", "", "")[1])
+check("projekt: WordPress skal vaere https", "https" in main.project_create("Test", "test.dk", "http://test.dk", "u", "p")[1])
+_pid, _err = main.project_create("Kaffeguiden", "https://www.Kaffeguiden.dk/", media_style="lyse skandinaviske køkkener")
+_p2 = main.load_project(_pid)
+check("projekt: oprettes som nr. 2 med rent domaene og egen database", _pid == 2 and not _err and _p2["domain"] == "kaffeguiden.dk"
+      and os.path.isfile(os.path.join(main.PROJECTS_DIR, "p2.db")), (_pid, _err))
+check("projekt: samme domaene to gange afvises", "allerede" in main.project_create("Igen", "kaffeguiden.dk")[1])
+import sqlite3 as _sq
+_c = _sq.connect(os.path.join(main.PROJECTS_DIR, "p2.db"))
+_tabs = {r[0] for r in _c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+_c.close()
+check("projekt: projektets database har site-tabellerne, men ingen faelles tabeller (de laeses fra center.db)",
+      {"keywords", "articles", "media", "flows", "settings", "alarms", "seopages"} <= _tabs and not (_tabs & main.GLOBAL_TABLES), sorted(_tabs & main.GLOBAL_TABLES))
+with main.get_db() as db:
+    db.execute("DELETE FROM keywords WHERE keyword='kun-i-kaffe'")
+_wp_before = (main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD)
+main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD = "https://steamgears.eu", "admin", "hemmelig"
+with main.use_project(_p2):
+    with main.get_db() as db:
+        db.execute("INSERT INTO keywords (keyword) VALUES ('kun-i-kaffe')")
+        _users2 = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        _dom2 = [r[0] for r in db.execute("SELECT url FROM domains")]
+    _wp2 = (main._wp_url(), main._wp_user(), main._wp_pass(), main.sgap_ready())
+    _style2 = main._media_style()
+    _path2 = _aio.run(_aio.get_running_loop().run_in_executor(main.executor, main.current_db_path)) if False else \
+        main.executor.submit(main.current_db_path).result()
+with main.get_db() as db:
+    _in1 = db.execute("SELECT COUNT(*) FROM keywords WHERE keyword='kun-i-kaffe'").fetchone()[0]
+    _users1 = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+check("projekt: data er adskilt (soegeord i projekt 2 findes ikke i projekt 1)", _in1 == 0)
+check("projekt: brugere er faelles (samme antal set fra begge projekter)", _users2 == _users1 and _users1 > 0, (_users1, _users2))
+check("projekt: domaenet er lagt i projektets domaeneliste", _dom2 == ["https://kaffeguiden.dk"], _dom2)
+check("projekt: et nyt projekt arver ALDRIG hovedprojektets WordPress-noegler", _wp2 == ("", "", "", False), _wp2)
+check("projekt: egen billedstil, og projekt 1 beholder steampunk-stilen", _style2 == "lyse skandinaviske køkkener" and "steampunk" in main._media_style())
+check("projekt: baggrundsarbejde (executor) koerer i det aktive projekts database", _path2.endswith("p2.db"), _path2)
+main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD = _wp_before
+# jobs koerer pr. projekt
+_seen = []
+main.for_each_project(lambda: _seen.append(os.path.basename(main.current_db_path())))()
+check("projekt: planlagte jobs koerer én gang i hvert projekt", _seen == ["center.db", "p2.db"], _seen)
+async def _aj():
+    _seen.append("async:" + os.path.basename(main.current_db_path()))
+_aio.run(main.for_each_project(_aj)())
+check("projekt: ogsaa asynkrone jobs", _seen[-2:] == ["async:center.db", "async:p2.db"], _seen)
+# alarmer, backup, restore
+with main.use_project(_p2):
+    _ob = []
+    _eq = main.enqueue_alert
+    main.enqueue_alert = lambda db, t, msg, sev, **k: _ob.append(msg) or []
+    with main.get_db() as db:
+        main.add_alarm(db, "test", "projektalarm", "kritisk")
+    main.enqueue_alert = _eq
+    _bk = main.backup_db_sync("test")
+    _rs = main.restore_backup_sync("cc-test-20260101-0000.db")
+check("projekt: alarmer leveres med projektets navn foran", _ob and all(m.startswith("[Kaffeguiden] ") for m in _ob), _ob)
+check("projekt: backup af et projekt faar projektets navn i filen", bool(_bk) and any(f.startswith("cc-p2-test-") for f in os.listdir(os.path.join(ROOT, "app", "backups"))) if os.path.isdir(os.path.join(ROOT, "app", "backups")) else bool(_bk), _bk)
+check("projekt: gendannelse afvises uden for hovedprojektet", _rs[0] is False and "hovedprojektet" in _rs[1], _rs)
+# skemaet foelger med nye kolonner
+with main.get_db() as db:
+    db.execute("ALTER TABLE articles ADD COLUMN test_col TEXT DEFAULT 'x'")
+main.sync_project_dbs()
+_c = _sq.connect(os.path.join(main.PROJECTS_DIR, "p2.db"))
+_cols = [r[1] for r in _c.execute("PRAGMA table_info(articles)")]
+_c.close()
+check("projekt: en ny kolonne i hovedskemaet kommer med i projektets database", "test_col" in _cols)
+# HTTP: vaelg projekt, se det, arbejd i det
+_r = _fc.post("/projects/switch", data={"pid": "2"}, follow_redirects=False)
+_ck = _r.headers.get("set-cookie", "")
+check("projekt: skift saetter en HttpOnly-cookie", _r.status_code == 303 and "cc_project=2" in _ck and "httponly" in _ck.lower(), _ck)
+_fc.cookies.set("cc_project", "2")
+_html = _fc.get("/?tab=moduler").text
+check("projekt: dashboardet viser vaelgeren med projekt 2 valgt og projektkortet", 'id="cc-project"' in _html
+      and '<option value="2" selected>Kaffeguiden</option>' in _html and 'id="projekter"' in _html)
+check("projekt: ingen adgangskode i siden", "hemmelig" not in _html)
+_fc.post("/keywords/add", data={"keyword": "bedste kaffevægt"}, follow_redirects=False)
+with main.use_project(_p2), main.get_db() as db:
+    _k2 = db.execute("SELECT COUNT(*) FROM keywords WHERE keyword='bedste kaffevægt'").fetchone()[0]
+with main.get_db() as db:
+    _k1 = db.execute("SELECT COUNT(*) FROM keywords WHERE keyword='bedste kaffevægt'").fetchone()[0]
+check("projekt: en formular gemmer i det valgte projekt", _k2 == 1 and _k1 == 0, (_k1, _k2))
+_fc.cookies.set("cc_project", "999")
+check("projekt: et ukendt projekt-id falder tilbage til hovedprojektet", "Kaffeguiden</option>" in _fc.get("/").text
+      and '<option value="1" selected>' in _fc.get("/").text)
+_fc.cookies.set("cc_project", "1")
+_r = _fc.post("/projects/wp", data={"id": "2", "wp_url": "https://kaffeguiden.dk", "wp_user": "red", "wp_app_password": "abcd efgh"}, follow_redirects=False)
+check("projekt: WordPress kan forbindes bagefter", "proj=ok" in _r.headers["location"] and main.load_project(2)["wp_set"])
+_fc.post("/projects/wp", data={"id": "2", "wp_url": "https://kaffeguiden.dk", "wp_user": "red", "wp_app_password": ""}, follow_redirects=False)
+check("projekt: et tomt kodeordsfelt beholder det gemte", main.load_project(2)["wp_app_password"] == "abcd efgh")
+check("projekt: hovedprojektet kan ikke slettes, og sletning kraever SLET",
+      "proj=fejl" in _fc.post("/projects/delete", data={"id": "1", "confirm": "SLET"}, follow_redirects=False).headers["location"]
+      and "proj=fejl" in _fc.post("/projects/delete", data={"id": "2", "confirm": "nej"}, follow_redirects=False).headers["location"])
+_r = _fc.post("/projects/delete", data={"id": "2", "confirm": "SLET"}, follow_redirects=False)
+check("projekt: sletning fjerner projektet men gemmer databasen", "proj=ok" in _r.headers["location"] and main.load_project(2) is None
+      and not os.path.exists(os.path.join(main.PROJECTS_DIR, "p2.db"))
+      and any(f.startswith("p2.db.") and f.endswith(".slettet") for f in os.listdir(main.PROJECTS_DIR)))
+
 # ---------- lang historik (v7.32.0) ----------
 _old = lambda d: (main.datetime.now() - main.timedelta(days=d)).isoformat(timespec="seconds")
 with main.get_db() as db:

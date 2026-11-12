@@ -1,9 +1,19 @@
-# Command Center v7.34 PRO
+# Command Center v7.35 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
+
+## Nyheder i v7.35
+
+- **Flere projekter (v7.35.0)** — ét Command Center kan nu styre flere sites. Opret et projekt under **Moduler → 🗂️ Projekter** (navn, domæne, valgfrit WordPress og billedstil), og skift i vælgeren øverst.
+  - **Hvad hvert projekt har for sig selv:** søgeord og historik, crawl, artikler, medier, flows, alarmer, noter, moduler, indstillinger og WordPress-forbindelse, i sin egen databasefil (`app/data/projects/p<id>.db`).
+  - **Hvad der er fælles:** brugere, logins, MCP-nøgler og chat.
+  - **Hovedprojektet** er det oprindelige site med `.env`. Ingen data flyttes, og navnet sættes med `CC_PROJECT_NAME`.
+  - **Sikkerhed:** et nyt projekt bruger aldrig hovedprojektets WordPress-nøgler.
+  - **Jobs og alarmer:** planlagte jobs kører for alle projekter, og alarmer har projektets navn foran.
+  - **Backups og sletning:** backups navngives pr. projekt, og gendannelse virker kun i hovedprojektet. Sletning gemmer databasen som `.slettet`-fil.
 
 ## Nyheder i v7.34
 

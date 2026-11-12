@@ -311,6 +311,24 @@ Cockpit-panelet viser **installeret commit** og **seneste commit på `main`**:
 Opdateringen kører kontrollen automatisk, **før** den skriver noget: er `install.sh` på disken ældre end koden, stopper den med kode 7 og rører ingen filer. Beskeden siger hvad man gør i stedet (`git checkout -- install.sh` eller `git pull`), og at intet er ændret. Grunden er, at en gammel installatør ellers kan ligge klar og rulle koden tilbage, næste gang nogen kører den. `--check` og `--version` skriver intet og virker uanset. `bash scripts/restart.sh` genstarter uden at opdatere
 - Status som JSON: `GET /api/update` (inkl. `restart_mode`/`auto_restart`), `POST /api/update/check`, `POST /api/update/apply` (bruges af scriptet). `/self-update` er alias for `/update/apply`
 
+## Flere projekter (v7.35.0)
+
+Command Center kan styre flere sites. Hvert site er et **projekt** med egne søgeord og historik, crawl, artikler, medier, flows, alarmer, noter, moduler og WordPress-forbindelse. Brugere, logins, MCP-nøgler og chat er fælles.
+
+**Opret:** fanen **Moduler → 🗂️ Projekter**. Udfyld navn og domæne. WordPress-adresse, bruger og applikationsadgangskode er valgfri (alle tre eller ingen) og kan tilføjes senere. Billedstil er valgfri. Uden den bruges en neutral fotostil i stedet for steamgears' steampunk-stil.
+
+**Skift:** vælgeren øverst ved siden af versionsnummeret. Alt, hvad du gør bagefter (formularer, crawl, flows, medier), sker i det valgte projekt.
+
+**Hovedprojektet** er det oprindelige site. Det bruger `.env` og den gamle database, så intet er flyttet. Navnet i vælgeren sættes med `CC_PROJECT_NAME`.
+
+**Godt at vide:**
+- Planlagte jobs (oppetid, søgeord, flows, backup osv.) kører for alle projekter.
+- Alarmer til Telegram, e-mail m.fl. har projektets navn foran.
+- Backups hedder `cc-p<id>-…` for projekter. Gendannelse virker kun i hovedprojektet.
+- Et nyt projekt bruger aldrig hovedprojektets WordPress-nøgler.
+- WordPress-adgangskoden gemmes i klartekst i `center.db` (som connector-nøgler) og vises aldrig i siden. Et tomt kodeordsfelt beholder den gemte.
+- **Fjern projekt** kræver, at du skriver `SLET`. Databasen bliver liggende som `.slettet`-fil i `app/data/projects/`.
+
 ## Medier og kvalitetssikring (v7.34.0)
 
 Kortet **🖼️ Medier** ligger nederst i fanen **Vækst**. Vælg formål (artikel 16:9, socialt opslag 1:1, Pinterest 2:3), skriv hvad billedet skal vise, og tryk **Lav billede**. Alle billeder gemmes på serveren, også de afviste, så du kan se, hvad der blev stoppet og hvorfor.
@@ -406,6 +424,7 @@ svaret) — ingen går ned. Hvad hver funktion kræver:
 | Monitors (tekst, JSON, pris), noter, backup, moduler, API-nøgler, brugere (login/kode) | intet | virker (pris-monitor rettet i 7.28.1) |
 | 1-klik optimering (teknik, crawl, on-page, indhold, monitors) | intet (AI-forslag og placeringer kræver deres nøgle) | virker (v7.29.0) |
 | Flows (automatiske kæder) | blokkene kræver det samme som funktionerne ovenfor | virker (v7.30.0) |
+| Flere projekter | intet (WordPress pr. projekt valgfrit) | virker (v7.35.0) |
 | Medier + kvalitetssikring | `OPENROUTER_API_KEY` (billeder: min. $1 på kontoen) | virker (v7.34.0); bedømmerne er målt live, billedkaldet ikke (saldo < $1) |
 | Prioriteter til autopiloten | WordPress-broen + Steamgears Autopilot 7.82.0 + målte søgeord | virker (v7.33.0); kaldet mod sitet er testet med en fake |
 | Konkurrent-søgning (Spy) | intet (DuckDuckGo) | virker, men DuckDuckGo kan blokere servere — så siger alarmen det |

@@ -146,6 +146,13 @@
                 <h1 class="font-semibold text-[13px] tracking-wide whitespace-nowrap">Command Center <span class="text-emerald-400">v{{ app_version }}</span></h1>
                 <p class="hidden sm:block text-[11px] text-zinc-500 truncate">SEO, indhold og drift</p>
             </div>
+            {% if projects and projects|length > 1 %}
+            <form id="cc-project" action="/projects/switch" method="POST" class="ml-2">
+                <select name="pid" onchange="this.form.submit()" title="Aktivt projekt" class="bg-zinc-900 border border-emerald-500/30 rounded-lg px-2 py-1 text-[12px] text-emerald-300 max-w-[11rem]">
+                    {% for p in projects %}<option value="{{ p.id }}"{{ ' selected' if p.id == project_id else '' }}>{{ p.name }}</option>{% endfor %}
+                </select>
+            </form>
+            {% endif %}
         </div>
         <div class="flex items-center gap-2 text-[11px] shrink-0">
             <form action="/update/apply" method="POST" onsubmit="return confirm('Hent og installér nyeste version fra GitHub? Der laves en DB-backup først, og appen skal genstartes bagefter.')"><button class="text-[11px] text-zinc-400 hover:text-emerald-400" title="Opdatér fra GitHub">⬆️<span class="hidden sm:inline"> Opdatér</span></button></form>
@@ -1454,6 +1461,50 @@
 
     <!-- MODULER -->
     <section x-show="tab === 'moduler'" class="space-y-4" style="display: none;">
+        <div id="projekter" class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">🗂️ Projekter</h2>
+            <p class="text-xs text-zinc-500 mb-3">Hvert projekt er et site med egne søgeord, crawl, artikler, medier, flows, alarmer og WordPress-forbindelse. Brugere, logins, MCP-nøgler og chat er fælles. Du arbejder nu i <b class="text-emerald-300">{{ project_name }}</b> - skift i vælgeren øverst. Planlagte jobs kører for alle projekter.</p>
+            {% if proj_feedback %}
+            <div class="{% if proj_feedback.ok %}bg-emerald-500/10 border-emerald-500/30 text-emerald-300{% else %}bg-rose-500/10 border-rose-500/30 text-rose-300{% endif %} border rounded-xl px-3 py-2 text-xs mb-3">{{ proj_feedback.msg }}</div>
+            {% endif %}
+            <div class="space-y-2 mb-4">
+                {% for p in projects %}
+                <div class="bg-zinc-950 border {% if p.id == project_id %}border-emerald-500/40{% else %}border-zinc-800{% endif %} rounded-xl p-3 text-xs">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <b>{{ p.name }}</b><span class="text-zinc-500">{{ p.domain }}</span>
+                        {% if p.main %}<span class="cc-pill">hovedprojekt (.env)</span>{% endif %}
+                        <span class="{% if p.wp_set %}text-emerald-400{% else %}text-amber-400{% endif %}">{% if p.wp_set %}WordPress forbundet{% else %}WordPress ikke forbundet{% endif %}</span>
+                        {% if p.id != project_id %}<form action="/projects/switch" method="POST" class="ml-auto"><input type="hidden" name="pid" value="{{ p.id }}"><button class="text-emerald-400">Arbejd i dette projekt</button></form>{% endif %}
+                    </div>
+                    {% if not p.main %}
+                    <details class="mt-2"><summary class="text-zinc-500 cursor-pointer">WordPress og sletning</summary>
+                        <form action="/projects/wp" method="POST" class="flex flex-wrap gap-2 mt-2">
+                            <input type="hidden" name="id" value="{{ p.id }}">
+                            <input name="wp_url" value="{{ p.wp_url }}" placeholder="https://site.dk" class="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 w-56">
+                            <input name="wp_user" value="{{ p.wp_user }}" placeholder="WordPress-bruger" class="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 w-40">
+                            <input name="wp_app_password" type="password" placeholder="{% if p.wp_set %}gemt - skriv for at skifte{% else %}applikationsadgangskode{% endif %}" autocomplete="new-password" class="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 w-56">
+                            <button class="text-emerald-400">Gem</button>
+                        </form>
+                        <form action="/projects/delete" method="POST" class="flex gap-2 mt-2">
+                            <input type="hidden" name="id" value="{{ p.id }}">
+                            <input name="confirm" placeholder="skriv SLET" class="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 w-28">
+                            <button class="text-rose-400">Fjern projekt</button>
+                        </form>
+                    </details>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+            <form action="/projects/add" method="POST" class="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
+                <input name="name" required maxlength="60" placeholder="Navn, fx Kaffeguiden" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                <input name="domain" required placeholder="Domæne, fx kaffeguiden.dk" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                <input name="wp_url" placeholder="WordPress-adresse (valgfri), https://…" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                <input name="wp_user" placeholder="WordPress-bruger (valgfri)" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                <input name="wp_app_password" type="password" autocomplete="new-password" placeholder="Applikationsadgangskode (valgfri)" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                <input name="media_style" maxlength="600" placeholder="Billedstil (valgfri), fx lyse skandinaviske køkkenmiljøer" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                <button class="md:col-span-2 bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-4 py-2 rounded-xl">➕ Opret projekt</button>
+            </form>
+        </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
             <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-1">Moduler</h2>
             <p class="text-xs text-zinc-500 mb-4">Slå funktioner til/fra. Slukkede moduler kører ikke automatisk og viser ikke knapper i API-kald.</p>

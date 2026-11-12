@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 11. november 2026 · **Version:** 7.29.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 11. november 2026 · **Version:** 7.30.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,13 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Flows (v7.30.0, 12. november) — implementeret
+- **Baggrund:** ønsket var "flow-system … udvid alle funktioner, så de kan kædes sammen til auto-optimering".
+- **Valg:** alt til WordPress er kladder (`wp_push_draft`, aldrig publish) og kun efter `quality_check`; AI loftet (2 artikler, 3 meta pr. blok); én kørsel ad gangen, delt lås med 1-klik optimeringen.
+- **Kode:** `FLOW_BLOCKS` (17), `FLOW_TEMPLATES` (4), `run_flow_sync()` med delt `ctx`, `flow_next_run()`, `run_due_flows_sync()` + job `flows` (5 min). Analyseblokkene genbruger `_optimize_step()`. Tabeller `flows`, `flow_runs`. Fane `flows` (nav-gruppe med Cockpit/Chat), poller `ccPollFlow`.
+- **Faldgrube:** CSS-klassen `border-sky-500/40` bruges af testene til at finde env-bjælken — brug ikke den klasse andre steder (flows bruger `/50`).
+- **Test:** 40 `flow:`-checks (plan, validering, betingelser, ctx-deling, fejlende blok, kun kladder, kvalitetstjek, AI-loft, scheduler, toggle-genberegning, lås, ruter, fane, fjernet blok). Browser: skabelon → egen flow → Kør nu → log, alle 17 faner uden JS-fejl.
 
 ### 1-klik optimering (v7.29.0, 12. november) — implementeret
 - **Baggrund:** ønsket var "en form for 1-kliks optimering af et helt projekt eller enkelte dele".

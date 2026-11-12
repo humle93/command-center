@@ -161,6 +161,7 @@
         <div class="cc-nav-group">
             <button @click="tab='cockpit'" class="cc-nav-link" :class="tab==='cockpit' && 'is-active'">🧭 Cockpit</button>
             <button @click="tab='chat'" class="cc-nav-link" :class="tab==='chat' && 'is-active'">💬 Chat</button>
+            <button @click="tab='flows'" class="cc-nav-link" :class="tab==='flows' && 'is-active'">🔁 Flows</button>
         </div>
         <div class="cc-nav-group">
             <button @click="tab='seo'" class="cc-nav-link" :class="tab==='seo' && 'is-active'">🔍 SEO &amp; audit</button>
@@ -1657,6 +1658,139 @@
             </div>
         </div>
     </section>
+    <section x-show="tab === 'flows'" class="space-y-4" style="display: none;">
+        {% if flow_feedback %}
+        <div class="{% if flow_feedback.ok %}bg-emerald-500/10 border-emerald-500/30 text-emerald-300{% else %}bg-rose-500/10 border-rose-500/30 text-rose-300{% endif %} border rounded-2xl px-4 py-3 text-sm">{{ flow_feedback.msg }}</div>
+        {% endif %}
+        <div id="cc-flow" class="{% if not flow_state.running %}hidden {% endif %}bg-zinc-900/60 border border-sky-500/30 rounded-2xl p-4 text-xs">
+            <div class="flex justify-between mb-1"><span id="cc-flow-label" class="text-zinc-300">{{ flow_state.name }} · {{ flow_state.label }}</span><span id="cc-flow-pct" class="text-zinc-500">0 %</span></div>
+            <div class="h-1.5 bg-zinc-800 rounded-full overflow-hidden"><div id="cc-flow-bar" class="h-full bg-sky-500 transition-all duration-500" style="width: 0%"></div></div>
+            <div id="cc-flow-step" class="text-zinc-600 mt-1"></div>
+        </div>
+
+        <div class="bg-sky-500/5 border border-sky-500/20 rounded-2xl p-4">
+            <h2 class="text-xs uppercase tracking-wider text-sky-300 mb-1">🔁 Færdige flows</h2>
+            <p class="text-[11px] text-zinc-500 mb-3">En flow kæder funktionerne sammen og kører dem automatisk. Alt, der sendes til WordPress, bliver en <b>kladde</b> - intet udgives af sig selv.</p>
+            <div class="grid md:grid-cols-2 gap-2">
+                {% for key, t in flow_templates.items() %}
+                <form action="/flows/template" method="POST" class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs flex flex-col gap-2">
+                    <input type="hidden" name="key" value="{{ key }}">
+                    <div class="flex justify-between gap-2"><b class="text-zinc-200">{{ t.name }}</b><span class="text-zinc-500 whitespace-nowrap">{{ t.label }}</span></div>
+                    <p class="text-zinc-400">{{ t.hint }}</p>
+                    <div class="flex flex-wrap gap-1">{% for s in t.steps %}<span class="bg-zinc-800/70 text-zinc-300 px-2 py-0.5 rounded-full">{{ loop.index }}. {{ flow_block_labels.get(s.block, s.block) }}</span>{% endfor %}</div>
+                    <button class="self-start border border-sky-500/50 text-sky-300 hover:bg-sky-500/10 px-3 py-1.5 rounded-lg">{% if key in flow_template_names %}➕ Opret én til{% else %}➕ Opret flow{% endif %}</button>
+                </form>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Dine flows ({{ flows|length }})</h2>
+            {% if not flows %}<p class="text-xs text-zinc-500">Ingen flows endnu - opret en fra en skabelon ovenfor, eller byg din egen nedenfor.</p>{% endif %}
+            <div class="space-y-2">
+                {% for f in flows %}
+                <div class="bg-zinc-950 border {% if f.enabled %}border-zinc-800{% else %}border-zinc-800 opacity-60{% endif %} rounded-xl p-3 text-xs">
+                    <div class="flex flex-wrap items-start justify-between gap-2">
+                        <div class="min-w-0">
+                            <b class="text-zinc-100">{{ f.name }}</b>
+                            <span class="ml-2 {% if f.enabled %}text-emerald-400{% else %}text-zinc-500{% endif %}">{% if f.enabled %}● aktiv{% else %}○ slået fra{% endif %}</span>
+                            <span class="text-zinc-500">· {{ f.schedule_label }}</span>
+                            <div class="text-zinc-500 mt-1">
+                                {% if f.last_run_at %}Sidst: {{ f.last_run_at[:16]|replace('T', ' ') }} ({{ f.last_status }}){% else %}Ikke kørt endnu{% endif %}
+                                {% if f.enabled and f.next_run_at %} · Næste: {{ f.next_run_at[:16]|replace('T', ' ') }}{% endif %}
+                            </div>
+                            {% if f.missing %}<div class="text-amber-400 mt-1">⚠️ Mangler i .env: {{ f.missing|join(', ') }} - de blokke springes over.</div>{% endif %}
+                        </div>
+                        <div class="flex flex-wrap gap-1">
+                            <form action="/flows/run" method="POST"><input type="hidden" name="id" value="{{ f.id }}"><button {% if flow_state.running %}disabled{% endif %} class="bg-sky-500/15 text-sky-300 border border-sky-500/50 px-3 py-1.5 rounded-lg disabled:opacity-40">▶ Kør nu</button></form>
+                            <form action="/flows/toggle" method="POST"><input type="hidden" name="id" value="{{ f.id }}"><button class="border border-zinc-700 px-3 py-1.5 rounded-lg">{% if f.enabled %}Slå fra{% else %}Slå til{% endif %}</button></form>
+                            <a href="/?tab=flows&edit={{ f.id }}#flow-builder" class="border border-zinc-700 px-3 py-1.5 rounded-lg">Redigér</a>
+                            <form action="/flows/delete" method="POST" onsubmit="return confirm('Slet flowen?')"><input type="hidden" name="id" value="{{ f.id }}"><button class="border border-rose-500/30 text-rose-300 px-3 py-1.5 rounded-lg">Slet</button></form>
+                        </div>
+                    </div>
+                    <div class="flex flex-wrap gap-1 mt-2">
+                        {% for s in f.steps %}
+                        <span class="bg-zinc-800/70 text-zinc-300 px-2 py-0.5 rounded-full">{{ loop.index }}. {{ flow_block_labels.get(s.block, s.block) }}{% if s.when != 'altid' %} <span class="text-zinc-500">({{ 'hvis fund' if s.when == 'hvis_fund' else 'hvis høj' }})</span>{% endif %}{% if s.params.keyword %} <span class="text-zinc-500">'{{ s.params.keyword }}'</span>{% endif %}</span>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        {% set fe = flow_edit %}
+        {% set sched = fe.schedule if fe else 'manual' %}
+        {% set kind = sched.split('@')[0] %}
+        <form id="flow-builder" action="/flows/save" method="POST" class="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4 space-y-3">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400">{% if fe %}✏️ Redigér '{{ fe.name }}'{% else %}🧩 Byg din egen flow{% endif %}</h2>
+            {% if fe %}<input type="hidden" name="id" value="{{ fe.id }}">{% endif %}
+            <div class="grid md:grid-cols-4 gap-2 text-sm">
+                <input type="text" name="name" value="{{ fe.name if fe else '' }}" placeholder="Navn, fx 'Hver morgen'" required maxlength="80" class="md:col-span-2 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                <select name="schedule" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                    <option value="manual" {% if kind == 'manual' %}selected{% endif %}>Kun manuelt</option>
+                    <option value="hourly" {% if kind == 'hourly' %}selected{% endif %}>Hver time</option>
+                    <option value="daily" {% if kind == 'daily' %}selected{% endif %}>Dagligt</option>
+                    <option value="weekly" {% if kind == 'weekly' %}selected{% endif %}>Ugentligt</option>
+                </select>
+                <div class="flex gap-2">
+                    <select name="weekday" class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-2 py-2" aria-label="Ugedag">
+                        {% for d in flow_weekdays %}<option value="{{ loop.index }}" {% if kind == 'weekly' and sched.split('@')[1] == loop.index|string %}selected{% endif %}>{{ d }}</option>{% endfor %}
+                    </select>
+                    <select name="hour" class="w-20 bg-zinc-950 border border-zinc-800 rounded-xl px-2 py-2" aria-label="Klokkeslæt">
+                        {% for h in range(24) %}{% set hh = '%02d'|format(h) %}<option value="{{ hh }}" {% if ('@' in sched and sched.split('@')[-1] == hh) or ('@' not in sched and h == 6) %}selected{% endif %}>{{ hh }}:00</option>{% endfor %}
+                    </select>
+                </div>
+            </div>
+            <p class="text-[11px] text-zinc-500">Ugedag bruges kun ved "Ugentligt", klokkeslæt ved "Dagligt" og "Ugentligt". Tomme rækker springes over.</p>
+            <div class="space-y-1.5">
+                {% for i in range(flow_max_steps) %}
+                {% set st = fe.steps[i] if fe and i < fe.steps|length else none %}
+                <div class="grid grid-cols-12 gap-1.5 text-xs items-center">
+                    <span class="col-span-1 text-zinc-500 text-right pr-1">{{ i + 1 }}.</span>
+                    <select name="block_{{ i }}" class="col-span-11 md:col-span-5 bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1.5">
+                        <option value="">—</option>
+                        {% for group in ['Analyse', 'Generér', 'Handling'] %}
+                        <optgroup label="{{ group }}">
+                            {% for b in flow_blocks if b.group == group %}<option value="{{ b.key }}" {% if st and st.block == b.key %}selected{% endif %}>{{ b.label }}{% if not b.ready %} (kræver {{ b.needs }}){% endif %}</option>{% endfor %}
+                        </optgroup>
+                        {% endfor %}
+                    </select>
+                    <select name="when_{{ i }}" class="col-span-12 md:col-span-3 bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1.5">
+                        {% for k, label in flow_conditions.items() %}<option value="{{ k }}" {% if st and st.when == k %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                    </select>
+                    <input type="text" name="keyword_{{ i }}" value="{{ st.params.keyword if st and st.params.keyword else '' }}" placeholder="søgeord (valgfrit)" class="col-span-8 md:col-span-2 bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1.5">
+                    <input type="number" name="max_{{ i }}" min="1" max="5" value="{{ st.params.max if st and st.params.max else '' }}" placeholder="maks" class="col-span-4 md:col-span-1 bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1.5">
+                    {% if st and st.params.level %}<input type="hidden" name="level_{{ i }}" value="{{ st.params.level }}">{% endif %}
+                </div>
+                {% endfor %}
+            </div>
+            <div class="flex gap-2">
+                <button class="bg-sky-500/15 text-sky-300 border border-sky-500/50 px-5 py-2 rounded-xl text-sm">{% if fe %}Gem ændringer{% else %}Gem flow{% endif %}</button>
+                {% if fe %}<a href="/?tab=flows" class="border border-zinc-700 px-5 py-2 rounded-xl text-sm">Annullér</a>{% endif %}
+            </div>
+            <p class="text-[11px] text-zinc-500">Blokkene deler resultater: "Søgeord" finder ord tæt på toppen, og "Indholdsplan" og "Skriv artikel" bruger dem, hvis du ikke skriver et søgeord. "Skriv artikel" laver højst 2 pr. kørsel, og kun artikler der består kvalitetstjekket sendes til WordPress - som kladde.</p>
+        </form>
+
+        <div class="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Seneste kørsler</h2>
+            {% if not flow_runs %}<p class="text-xs text-zinc-500">Ingen kørsler endnu.</p>{% endif %}
+            <div class="space-y-2">
+                {% for r in flow_runs %}
+                <details class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs">
+                    <summary class="cursor-pointer"><b class="text-zinc-200">{{ r.flow_name }}</b> <span class="{% if r.status == 'ok' %}text-emerald-400{% else %}text-amber-400{% endif %}">{{ r.status }}</span> <span class="text-zinc-500">· {{ r.trigger }} · {{ (r.finished_at or '')[:16]|replace('T', ' ') }}</span><div class="text-zinc-400 mt-1">{{ r.log.summary }}</div></summary>
+                    <ul class="mt-2 space-y-1">
+                        {% for s in r.log.steps %}
+                        <li>{% if s.ok %}✅{% elif s.ok is none %}⏭️{% else %}❌{% endif %} <span class="text-zinc-300">{{ s.label }}</span> <span class="text-zinc-500">- {{ s.note }}{% if s.secs %} ({{ s.secs }} s){% endif %}</span></li>
+                        {% endfor %}
+                    </ul>
+                    {% if r.log.actions %}
+                    <div class="mt-2 text-zinc-400">Fund: {% for a in r.log.actions[:8] %}<div>· [{{ a.priority }}] {{ a.area }}: {{ a.problem }}</div>{% endfor %}</div>
+                    {% endif %}
+                </details>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
     <section x-show="tab === 'chat'" class="space-y-4" style="display: none;"
              x-init="if (tab === 'chat') ccChatLoad(); $watch('tab', function (t) { if (t === 'chat') ccChatLoad(); })">
         {% if not ai_enabled %}
@@ -1947,6 +2081,24 @@
         }).catch(function () {});
     }
     ccPollOptimize(false);
+    // Flows: fremdrift fra /api/flows/status; genindlaes fanen, naar koerslen er faerdig.
+    function ccPollFlow(wasRunning) {
+        fetch('/api/flows/status').then(function (r) { return r.json(); }).then(function (s) {
+            const box = ccEl('cc-flow');
+            if (!box) return;
+            if (s.running) {
+                box.classList.remove('hidden');
+                ccEl('cc-flow-label').textContent = (s.name || 'Flow') + ' · ' + (s.label || 'arbejder');
+                ccEl('cc-flow-pct').textContent = (s.percent || 0) + ' %';
+                ccEl('cc-flow-bar').style.width = (s.percent || 0) + '%';
+                ccEl('cc-flow-step').textContent = s.steps ? 'trin ' + (s.step + 1) + ' af ' + s.steps : '';
+                setTimeout(function () { ccPollFlow(true); }, 2000);
+            } else if (wasRunning) {
+                location.replace('/?tab=flows&flow=ok&flow_msg=' + encodeURIComponent('Kørslen er færdig - se resultatet nederst'));
+            }
+        }).catch(function () {});
+    }
+    ccPollFlow(false);
 
 function showHistory(domainId, url) {
     const s = Alpine.$data(document.body);
@@ -2027,7 +2179,8 @@ if (document.getElementById('vischart')) loadVis();
         brugere: { title: 'Brugere', hint: 'Adgang, invitationer og MCP-nøgler' },
         alarms: { title: 'Alarmer', hint: 'Hvad der kræver din opmærksomhed' },
         notes: { title: 'Noter', hint: 'Hurtige noter til arbejdsflowet' },
-        chat: { title: 'Chat', hint: 'Tal med AI\'en og giv den værktøjer fra GitHub, WordPress, Gmail, Drive m.fl.' }
+        chat: { title: 'Chat', hint: 'Tal med AI\'en og giv den værktøjer fra GitHub, WordPress, Gmail, Drive m.fl.' },
+        flows: { title: 'Flows', hint: 'Kæd funktionerne sammen og lad dem køre automatisk - kladder, aldrig udgivet' }
     };
 
     // Den aktive fane skal altid vaere synlig i den vandrette navigation - ogsaa paa mobil.

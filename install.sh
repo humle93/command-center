@@ -253,10 +253,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.29.0"
+APP_VERSION = "7.30.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.30.0", "Flows: kaed funktionerne sammen og lad dem koere automatisk (time/dag/uge) - 17 blokke, 4 faerdige flows, betingelser, og alt til WordPress bliver kladder"),
     ("7.29.0", "1-klik optimering i Cockpit: hele projektet eller en enkelt del (teknik, on-page, indhold, soegeord, monitors) giver én prioriteret liste med faerdige forslag - intet aendres paa sitet"),
     ("7.28.1", "Funktionsrevision: AI-omskrivning af titel/meta gik ned med en AI-noegle, og en pris-monitor kunne ikke oprettes uden et meningsloest felt - begge rettet"),
     ("7.28.0", "Login uden Cloudflare: direkte paa serverens IP (http://ip:port, CC_HOST=0.0.0.0) eller paa en understi bag Ultra.cc's nginx - login-laasen kan ikke laengere snydes med X-Forwarded-For"),
@@ -287,7 +288,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "1-klik optimering af hele projektet eller enkelte dele - Cockpit, oeverst"
+NEWEST_LINE = "Flows: automatiske kaeder af analyser, AI og WordPress-kladder - fanen Flows"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -698,6 +699,16 @@ def migrate_db():
         db.execute("""CREATE TABLE IF NOT EXISTS content_audits (
             id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, keyword TEXT, score INTEGER,
             words INTEGER, target_words INTEGER, terms_json TEXT, checks_json TEXT, created_at TEXT
+        )""")
+        # Flows (v7.30.0): kaedede blokke med plan; en koersel = én raekke med log pr. trin.
+        db.execute("""CREATE TABLE IF NOT EXISTS flows (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, enabled INTEGER DEFAULT 1,
+            schedule TEXT DEFAULT 'manual', steps_json TEXT NOT NULL, template TEXT,
+            created_at TEXT, last_run_at TEXT, last_status TEXT, next_run_at TEXT
+        )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS flow_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, flow_id INTEGER, flow_name TEXT, trigger TEXT,
+            status TEXT, started_at TEXT, finished_at TEXT, log_json TEXT
         )""")
         # 1-klik optimering (v7.29.0): én raekke pr. koersel, rapporten (trin + handlinger) som JSON.
         db.execute("""CREATE TABLE IF NOT EXISTS optimize_runs (
@@ -1228,7 +1239,7 @@ def invite_user(email: str, base_url: str = "", deliver=None, allow_example: boo
 
 # Fanerne i dashboardet - bruges naar en handling skal lande i den rigtige fane efter et POST.
 DASHBOARD_TABS = ("cockpit", "seo", "keywords", "articles", "vaekst", "links", "spy", "social",
-                  "monitors", "ai", "pro", "moduler", "brugere", "alarms", "notes", "chat")
+                  "monitors", "ai", "pro", "moduler", "brugere", "alarms", "notes", "chat", "flows")
 
 
 def invite_redirect(ok: bool, text: str, email: str = "", kind: str = "") -> str:
@@ -5641,6 +5652,7 @@ async def dashboard(request: Request):
         "optimize_url": (_opt_latest or {}).get("url") or optimize_project_url(),
         "optimize_parts": [(k, v[0]) for k, v in OPTIMIZE_PARTS.items()],
         "optimize_ai_pages": OPTIMIZE_AI_PAGES,
+        **flow_context(request),
         "ai_enabled": bool(OPENROUTER_API_KEY),
         "wp_enabled": bool(WP_URL and WP_USER and WP_APP_PASSWORD),
         "serpapi_enabled": bool(SERPAPI_KEY),
@@ -6203,12 +6215,13 @@ async def api_keys_revoke(client_id: int = Form(...)):
 JOB_MAX_AGE_HOURS = {
     "domain_checks": 7, "keyword_checks": 26, "growth_autopilot": 26, "cleanup": 26,
     "db_backup": 26, "update_check": 26, "sgap_sync": 1.5, "wp_cron": 0.5,
-    "alert_outbox": 0.1,
+    "alert_outbox": 0.1, "flows": 0.5,
 }
 JOB_LABELS = {
     "domain_checks": "Domæne-tjek", "keyword_checks": "Keyword-tjek", "growth_autopilot": "Vækst-autopilot",
     "cleanup": "Oprydning", "db_backup": "DB-backup", "update_check": "Opdateringstjek",
     "sgap_sync": "WordPress-synk", "wp_cron": "WP-Cron-ping", "alert_outbox": "Alarm-udsendelse",
+    "flows": "Flows (planlagte kørsler)",
 }
 
 
@@ -7038,6 +7051,7 @@ async def lifespan(app_: FastAPI):
         scheduler.add_job(job_heartbeat("sgap_sync", job_sgap_sync), IntervalTrigger(minutes=30), id="sgap_sync", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat("wp_cron", job_wp_cron), IntervalTrigger(minutes=5), id="wp_cron", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat("alert_outbox", job_drain_alerts), IntervalTrigger(minutes=1), id="alert_outbox", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(job_heartbeat("flows", job_flows), IntervalTrigger(minutes=5), id="flows", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(job_heartbeat_check, IntervalTrigger(minutes=15), id="job_heartbeat", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.start()
         try:
@@ -7369,7 +7383,7 @@ async def optimize_run(request: Request):
             add_alarm(db, "optimering", f"1-klik optimering blev ikke startet: {e}", "advarsel")
         return RedirectResponse("/?tab=cockpit&opt=fejl", status_code=303)
     with _OPTIMIZE_LOCK:                  # dobbeltklik = én koersel
-        if OPTIMIZE_STATE["running"]:
+        if OPTIMIZE_STATE["running"] or globals().get("FLOW_STATE", {}).get("running"):
             return RedirectResponse("/?tab=cockpit&opt=koerer", status_code=303)
         with get_db() as db:
             cur = db.execute("INSERT INTO optimize_runs (scope, url, status, started_at) VALUES (?,?,?,?)",
@@ -7405,6 +7419,523 @@ async def optimize_done(run_id: str = Form(""), action_id: str = Form("")):
             db.execute("UPDATE optimize_runs SET summary_json=? WHERE id=?",
                        (jsonlib.dumps(data, ensure_ascii=False), int(run_id)))
     return RedirectResponse("/?tab=cockpit#optimering", status_code=303)
+
+
+# ---------- Flows: kaedede funktioner til auto-optimering (v7.30.0) ----------
+# En flow er en raekke blokke, der koeres i orden og deler én kontekst (ctx): crawlede sider, soegeord
+# taet paa toppen, nye artikler, handlinger. Hver blok kan have en betingelse (altid / kun hvis forrige
+# fandt noget / kun hvis der er hoej prioritet), og flowen kan koere manuelt, hver time, dagligt eller
+# ugentligt. Sikkerhed: alt der skrives til WordPress er KLADDER (wp_push_draft - aldrig publish), AI er
+# loftet pr. koersel, og kun én flow koerer ad gangen.
+FLOW_MAX_STEPS = 10
+FLOW_MAX_ARTICLES = 2
+FLOW_CONDITIONS = {"altid": "Altid", "hvis_fund": "Kun hvis forrige trin fandt noget",
+                   "hvis_hoej": "Kun hvis der er noget med høj prioritet"}
+FLOW_STATE = {"running": False, "flow_id": None, "run_id": None, "name": "", "step": 0, "steps": 0,
+              "label": "", "started_at": None}
+_FLOW_LOCK = threading.Lock()
+
+
+def _flow_kw(ctx: dict, params: dict) -> list:
+    """Soegeord til en blok: parameteren, ellers dem flowen har fundet, ellers de gemte soegeord."""
+    if (params.get("keyword") or "").strip():
+        return [params["keyword"].strip()]
+    found = ctx.get("striking") or ctx.get("missing_kw") or []
+    if found:
+        return found
+    with get_db() as db:
+        return [r["keyword"] for r in db.execute("SELECT keyword FROM keywords ORDER BY id LIMIT 5").fetchall()]
+
+
+def _flow_opt(key):
+    """Genbruger et trin fra 1-klik optimeringen som blok."""
+    def run(ctx, params):
+        before = len(ctx["actions"])
+        ok, note = _optimize_step(key, ctx["url"], ctx["actions"], ctx)
+        if key == "soegeord":
+            with get_db() as db:
+                rows = db.execute("SELECT keyword, position, checked_at FROM keywords").fetchall()
+            ctx["striking"] = [r["keyword"] for r in rows if r["position"] and 4 <= r["position"] <= 20]
+            ctx["missing_kw"] = [r["keyword"] for r in rows if r["checked_at"] and r["position"] is None]
+            return ok, note, len(ctx["striking"]) + len(ctx["missing_kw"])
+        return ok, note, len(ctx["actions"]) - before
+    return run
+
+
+def _flow_competitors(ctx, params):
+    kws = _flow_kw(ctx, params)[:1]
+    if not kws:
+        return None, "intet søgeord - tilføj et under Keywords eller i blokken", 0
+    res = discover_competitors_sync(kws[0])
+    return (res.get("ok") or False), (f"{res.get('count', 0)} konkurrenter for '{kws[0]}'" if res.get("ok")
+                                      else f"'{kws[0]}': {res.get('error')}"), res.get("count", 0)
+
+
+def _flow_gap(ctx, params):
+    if not SERPAPI_KEY:
+        return None, "sprunget over: SERPAPI_KEY mangler i .env", 0
+    kws = _flow_kw(ctx, params)[:1]
+    if not kws:
+        return None, "intet søgeord", 0
+    res = serp_gap_sync(kws[0])
+    if res.get("error"):
+        return False, res["error"], 0
+    return True, f"content gap for '{kws[0]}' gemt (fanen Pro)", 1
+
+
+def _flow_backlinks(ctx, params):
+    if not SERPAPI_KEY:
+        return None, "sprunget over: SERPAPI_KEY mangler i .env", 0
+    kws = _flow_kw(ctx, params)[:1]
+    if not kws:
+        return None, "intet søgeord", 0
+    res = prospect_sync(kws[0])
+    return (res.get("ok") or False), (res.get("text") or res.get("error") or "")[:160], 1 if res.get("ok") else 0
+
+
+def _flow_ideas(ctx, params):
+    kws = _flow_kw(ctx, params)[:3]
+    if not kws:
+        return None, "intet søgeord at finde idéer til", 0
+    n = 0
+    for kw in kws:
+        try:
+            ideas = autocomplete_sources(kw)
+        except Exception as e:
+            return False, f"idéer fejlede: {str(e)[:120]}", n
+        with get_db() as db:
+            for idea, source in ideas:
+                cur = db.execute("INSERT OR IGNORE INTO keyword_ideas (keyword, idea, source, created_at) VALUES (?,?,?,?)",
+                                 (kw, idea, source, now_iso()))
+                n += cur.rowcount
+    return True, f"{n} nye idéer fra {len(kws)} søgeord", n
+
+
+def _flow_brief(ctx, params):
+    kws = _flow_kw(ctx, params)[:int(params.get("max") or 2)]
+    if not kws:
+        return None, "intet søgeord at planlægge", 0
+    made = 0
+    for kw in kws:
+        with get_db() as db:
+            if db.execute("SELECT 1 FROM content_briefs WHERE keyword=?", (kw[:120],)).fetchone():
+                continue
+        brief = brief_from_keyword(kw)
+        if not brief.get("ok"):
+            continue
+        with get_db() as db:
+            db.execute(
+                "INSERT INTO content_briefs (keyword, intent, title, words, headings, terms, notes, planned_for, status, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (kw[:120], brief["intent"], brief["title"][:200], brief["words"], "\n".join(brief["headings"]),
+                 ", ".join(brief["terms"]), "\n".join(brief["notes"]), "", BRIEF_STATUS[0], now_iso()))
+        made += 1
+    return True, f"{made} ny(e) indholdsplan(er) (fanen Vækst)", made
+
+
+def _flow_article(ctx, params):
+    if not OPENROUTER_API_KEY:
+        return None, "sprunget over: OPENROUTER_API_KEY mangler i .env", 0
+    limit = max(1, min(int(params.get("max") or 1), FLOW_MAX_ARTICLES))
+    with get_db() as db:
+        done = {r["keyword"] for r in db.execute("SELECT keyword FROM articles").fetchall()}
+    kws = [k for k in _flow_kw(ctx, params) if k not in done][:limit]
+    if not kws:
+        return True, "ingen søgeord uden artikel", 0
+    made = []
+    for kw in kws:
+        try:
+            content = generate_article_ai(kw, get_active_strategy())
+        except requests.RequestException as e:
+            return False, f"AI-fejl: {str(e)[:150]}", len(made)
+        gate = quality_check(content, kw)
+        with get_db() as db:
+            cur = db.execute("INSERT INTO articles (title, keyword, content, source, created_at) VALUES (?,?,?,?,?)",
+                             (f"Guide: {kw}", kw, content, f"Flow ({AI_MODEL})", now_iso()))
+            made.append({"id": cur.lastrowid, "keyword": kw, "passed": gate["passed"], "errors": gate["errors"]})
+    ctx.setdefault("articles", []).extend(made)
+    ok_n = sum(1 for a in made if a["passed"])
+    return True, f"{len(made)} artikel(er) skrevet, {ok_n} består kvalitetstjekket", len(made)
+
+
+def _flow_wp_draft(ctx, params):
+    if not (WP_URL and WP_USER and WP_APP_PASSWORD):
+        return None, "sprunget over: WP_URL/WP_USER/WP_APP_PASSWORD mangler i .env", 0
+    arts = [a for a in ctx.get("articles", []) if a.get("passed")]
+    skipped = [a for a in ctx.get("articles", []) if not a.get("passed")]
+    if not arts:
+        return True, ("ingen nye artikler bestod kvalitetstjekket" if skipped else "ingen nye artikler at sende"), 0
+    sent = 0
+    for a in arts:
+        with get_db() as db:
+            art = db.execute("SELECT * FROM articles WHERE id=?", (a["id"],)).fetchone()
+        try:
+            wp_id = wp_push_draft(art["title"], art["content"])   # altid status=draft
+            link = f"{WP_URL.rstrip('/')}/wp-admin/post.php?post={wp_id}&action=edit"
+            with get_db() as db:
+                db.execute("UPDATE articles SET status='Sendt til WP (kladde)', wp_link=? WHERE id=?", (link, a["id"]))
+            sent += 1
+        except Exception as e:
+            return False, f"WordPress afviste: {str(e)[:150]}", sent
+    return True, f"{sent} kladde(r) i WordPress - intet er udgivet" + (f"; {len(skipped)} holdt tilbage af kvalitetstjekket" if skipped else ""), sent
+
+
+def _flow_autopilot(ctx, params):
+    res = str(autopilot_sync())
+    if res == "no-ai":
+        return None, "sprunget over: OPENROUTER_API_KEY mangler i .env", 0
+    if res.startswith("ok"):
+        return True, f"autopilot skrev artikel #{res.split(':')[-1]}", 1
+    if res.startswith("quality-blocked"):
+        return True, f"autopilot-artikel #{res.split(':')[-1]} holdt tilbage af kvalitetstjekket", 0
+    return False, f"autopilot: {res}", 0
+
+
+def _flow_sorted(actions: list) -> list:
+    return sorted(actions, key=lambda a: (OPTIMIZE_PRIORITY.get(a.get("priority"), 9), a.get("score", 100)))
+
+
+def _flow_summary(ctx) -> str:
+    acts = ctx.get("actions", [])
+    hi = sum(1 for a in acts if a.get("priority") == "høj")
+    parts = [f"{len(acts)} forbedringer ({hi} høj)"] if acts else ["ingen nye forbedringer"]
+    if ctx.get("striking"):
+        parts.append("tæt på toppen: " + ", ".join(ctx["striking"][:5]))
+    if ctx.get("articles"):
+        parts.append(f"{len(ctx['articles'])} nye artikler")
+    return "; ".join(parts)
+
+
+def _flow_report(ctx, params):
+    level = params.get("level") if params.get("level") in ("info", "advarsel") else "info"
+    with get_db() as db:
+        add_alarm(db, "flow", f"Flow '{ctx['flow_name']}': {_flow_summary(ctx)}", level)
+    return True, "rapport sendt til Alarmer (og dine alarmkanaler)", 1
+
+
+def _flow_note(ctx, params):
+    lines = [f"Flow '{ctx['flow_name']}' {danish_time(now_iso())}: {_flow_summary(ctx)}"]
+    for a in _flow_sorted(ctx.get("actions", []))[:10]:
+        lines.append(f"- [{a['priority']}] {a['area']}: {a['problem']} {a.get('url', '')}".rstrip())
+    with get_db() as db:
+        db.execute("INSERT INTO notes (content, created_at) VALUES (?,?)", ("\n".join(lines), now_iso()))
+    return True, "note skrevet (fanen Noter)", 1
+
+
+# key: (label, gruppe, kraever, funktion, parametre)
+FLOW_BLOCKS = {
+    "teknik": ("Teknik: oppetid, svartid og SSL", "Analyse", "", _flow_opt("teknik"), []),
+    "crawl": ("Crawl af sitet", "Analyse", "", _flow_opt("crawl"), []),
+    "onpage": ("On-page pr. side", "Analyse", "", _flow_opt("onpage"), []),
+    "indhold": ("Indholdsscore pr. side", "Analyse", "", _flow_opt("indhold"), []),
+    "soegeord": ("Søgeord: placeringer (finder dem tæt på toppen)", "Analyse", "SERPAPI_KEY", _flow_opt("soegeord"), []),
+    "monitors": ("Monitors", "Analyse", "", _flow_opt("monitors"), []),
+    "konkurrenter": ("Find konkurrenter", "Analyse", "", _flow_competitors, ["keyword"]),
+    "content_gap": ("Content gap", "Analyse", "SERPAPI_KEY", _flow_gap, ["keyword"]),
+    "backlinks": ("Backlink-muligheder", "Analyse", "SERPAPI_KEY", _flow_backlinks, ["keyword"]),
+    "ideer": ("Søgeordsidéer", "Generér", "", _flow_ideas, ["keyword"]),
+    "ai_meta": ("AI-forslag til titel og meta", "Generér", "OPENROUTER_API_KEY", _flow_opt("meta"), []),
+    "brief": ("Indholdsplan pr. søgeord", "Generér", "", _flow_brief, ["keyword", "max"]),
+    "artikel": ("Skriv artikel (AI)", "Generér", "OPENROUTER_API_KEY", _flow_article, ["keyword", "max"]),
+    "wp_kladde": ("Send nye artikler til WordPress som kladde", "Handling", "WP_URL", _flow_wp_draft, []),
+    "autopilot": ("Growth-autopilot (idé → artikel → kladde)", "Handling", "OPENROUTER_API_KEY", _flow_autopilot, []),
+    "rapport": ("Send rapport (Alarmer + kanaler)", "Handling", "", _flow_report, ["level"]),
+    "note": ("Skriv note med resultatet", "Handling", "", _flow_note, []),
+}
+
+FLOW_TEMPLATES = {
+    "daglig_sundhed": {"name": "Daglig sundhed", "schedule": "daily@07",
+                       "hint": "Oppetid, SSL og monitors hver morgen - rapport kun når noget er galt.",
+                       "steps": [{"block": "teknik"}, {"block": "monitors"},
+                                 {"block": "rapport", "when": "hvis_fund", "params": {"level": "advarsel"}}]},
+    "ugentlig_optimering": {"name": "Ugentlig optimering", "schedule": "weekly@1@06",
+                            "hint": "Mandag: crawl, on-page, indhold, AI-titler og placeringer - samlet i én note.",
+                            "steps": [{"block": "crawl"}, {"block": "onpage"}, {"block": "indhold"},
+                                      {"block": "ai_meta", "when": "hvis_fund"}, {"block": "soegeord"},
+                                      {"block": "note"}, {"block": "rapport"}]},
+    "indholdsmaskine": {"name": "Indholdsmaskine", "schedule": "weekly@3@06",
+                        "hint": "Onsdag: søgeord tæt på toppen → plan → AI-artikel → WordPress-kladde (aldrig udgivet).",
+                        "steps": [{"block": "soegeord"}, {"block": "brief", "when": "hvis_fund", "params": {"max": "2"}},
+                                  {"block": "artikel", "when": "hvis_fund", "params": {"max": "1"}},
+                                  {"block": "wp_kladde", "when": "hvis_fund"}, {"block": "rapport"}]},
+    "konkurrenter": {"name": "Konkurrent-overvågning", "schedule": "weekly@5@06",
+                     "hint": "Fredag: konkurrenter, content gap og backlink-muligheder for dit første søgeord.",
+                     "steps": [{"block": "konkurrenter"}, {"block": "content_gap"}, {"block": "backlinks"},
+                               {"block": "ideer"}, {"block": "note"}]},
+}
+FLOW_WEEKDAYS = ["mandag", "tirsdag", "onsdag", "torsdag", "fredag", "lørdag", "søndag"]
+
+
+def flow_schedule_valid(s: str) -> bool:
+    return bool(re.fullmatch(r"manual|hourly|daily@([01]\d|2[0-3])|weekly@[1-7]@([01]\d|2[0-3])", s or ""))
+
+
+def flow_schedule_label(s: str) -> str:
+    if s == "hourly":
+        return "hver time"
+    if s.startswith("daily@"):
+        return f"dagligt kl. {s[6:]}:00"
+    if s.startswith("weekly@"):
+        _, d, h = s.split("@")
+        return f"hver {FLOW_WEEKDAYS[int(d) - 1]} kl. {h}:00"
+    return "kun manuelt"
+
+
+def flow_next_run(schedule: str, now: datetime | None = None) -> str | None:
+    """Naeste koerselstidspunkt (lokal tid, ISO) - None for manuelle flows."""
+    now = (now or datetime.now()).replace(second=0, microsecond=0)
+    if schedule == "hourly":
+        return (now.replace(minute=0) + timedelta(hours=1)).isoformat(timespec="seconds")
+    if schedule.startswith("daily@"):
+        t = now.replace(hour=int(schedule[6:]), minute=0)
+        return (t if t > now else t + timedelta(days=1)).isoformat(timespec="seconds")
+    if schedule.startswith("weekly@"):
+        _, d, h = schedule.split("@")
+        t = now.replace(hour=int(h), minute=0) + timedelta(days=(int(d) - 1 - now.weekday()) % 7)
+        return (t if t > now else t + timedelta(days=7)).isoformat(timespec="seconds")
+    return None
+
+
+def flow_clean_steps(steps) -> list:
+    """Validerer en trinliste fra formularen/skabelonen: kendte blokke, kendte betingelser, korte parametre."""
+    out = []
+    for s in steps or []:
+        block = str(s.get("block") or "").strip()
+        if block not in FLOW_BLOCKS:
+            continue
+        when = s.get("when") if s.get("when") in FLOW_CONDITIONS else "altid"
+        allowed = FLOW_BLOCKS[block][4]
+        params = {k: str(v).strip()[:120] for k, v in (s.get("params") or {}).items() if k in allowed and str(v).strip()}
+        if "max" in params and not params["max"].isdigit():
+            params.pop("max")
+        out.append({"block": block, "when": when, "params": params})
+    return out[:FLOW_MAX_STEPS]
+
+
+def flow_save(name: str, schedule: str, steps: list, flow_id: int | None = None, template: str = "") -> tuple:
+    name = (name or "").strip()[:80]
+    steps = flow_clean_steps(steps)
+    if not name:
+        return None, "Giv flowen et navn"
+    if not steps:
+        return None, "Vælg mindst én blok"
+    if not flow_schedule_valid(schedule):
+        return None, "Ukendt plan"
+    nxt = flow_next_run(schedule)
+    with get_db() as db:
+        if flow_id:
+            cur = db.execute("UPDATE flows SET name=?, schedule=?, steps_json=?, next_run_at=? WHERE id=?",
+                             (name, schedule, jsonlib.dumps(steps, ensure_ascii=False), nxt, flow_id))
+            return (flow_id if cur.rowcount else None), (None if cur.rowcount else "Flowen findes ikke")
+        cur = db.execute("INSERT INTO flows (name, enabled, schedule, steps_json, template, created_at, next_run_at) "
+                         "VALUES (?,1,?,?,?,?,?)", (name, schedule, jsonlib.dumps(steps, ensure_ascii=False),
+                                                     template, now_iso(), nxt))
+        return cur.lastrowid, None
+
+
+def flow_rows() -> list:
+    with get_db() as db:
+        rows = [dict(r) for r in db.execute("SELECT * FROM flows ORDER BY id").fetchall()]
+    for r in rows:
+        r["steps"] = jsonlib.loads(r["steps_json"] or "[]")
+        r["schedule_label"] = flow_schedule_label(r["schedule"])
+        r["missing"] = sorted({FLOW_BLOCKS[s["block"]][2] for s in r["steps"]
+                               if s["block"] in FLOW_BLOCKS and FLOW_BLOCKS[s["block"]][2]
+                               and not globals().get(FLOW_BLOCKS[s["block"]][2])})
+    return rows
+
+
+def run_flow_sync(flow_id: int, trigger: str = "manuel", run_id: int | None = None) -> dict:
+    """Koerer én flow. Hver blok faar ctx og sine parametre og returnerer (ok, note, fund)."""
+    with get_db() as db:
+        f = db.execute("SELECT * FROM flows WHERE id=?", (flow_id,)).fetchone()
+        if not f:
+            return {"ok": False, "error": "flowen findes ikke"}
+        if run_id is None:
+            run_id = db.execute("INSERT INTO flow_runs (flow_id, flow_name, trigger, status, started_at) VALUES (?,?,?,?,?)",
+                                (flow_id, f["name"], trigger, "koerer", now_iso())).lastrowid
+    steps = jsonlib.loads(f["steps_json"] or "[]")
+    ctx = {"url": optimize_project_url(), "actions": [], "flow_name": f["name"]}
+    FLOW_STATE.update({"flow_id": flow_id, "run_id": run_id, "name": f["name"], "steps": len(steps), "step": 0})
+    log, last_found, status = [], None, "ok"
+    for i, s in enumerate(steps):
+        label = FLOW_BLOCKS.get(s["block"], (s["block"],))[0]
+        FLOW_STATE.update({"step": i, "label": label})
+        t0 = time.time()
+        when = s.get("when", "altid")
+        skip = None
+        if s["block"] not in FLOW_BLOCKS:
+            skip = "ukendt blok"
+        elif when == "hvis_fund" and not last_found:
+            skip = "sprunget over: forrige trin fandt intet"
+        elif when == "hvis_hoej" and not any(a.get("priority") == "høj" for a in ctx["actions"]):
+            skip = "sprunget over: intet med høj prioritet"
+        if skip:
+            log.append({"block": s["block"], "label": label, "ok": None, "note": skip, "found": 0, "secs": 0})
+            continue
+        try:
+            ok, note, found = FLOW_BLOCKS[s["block"]][3](ctx, s.get("params") or {})
+        except Exception as e:    # én blok maa ikke vaelte flowen
+            ok, note, found = False, f"fejl: {str(e)[:160]}", 0
+        log.append({"block": s["block"], "label": label, "ok": ok, "note": note, "found": found,
+                    "secs": round(time.time() - t0, 1)})
+        if ok is not None:          # en sprunget blok (manglende noegle) aendrer ikke "forrige fund"
+            last_found = found
+        if ok is False:
+            status = "delvist"
+    summary = _flow_summary(ctx)
+    with get_db() as db:
+        db.execute("UPDATE flow_runs SET status=?, finished_at=?, log_json=? WHERE id=?",
+                   (status, now_iso(), jsonlib.dumps({"steps": log, "summary": summary,
+                                                      "actions": _flow_sorted(ctx["actions"])[:40]}, ensure_ascii=False), run_id))
+        db.execute("UPDATE flows SET last_run_at=?, last_status=?, next_run_at=? WHERE id=?",
+                   (now_iso(), status, flow_next_run(f["schedule"]), flow_id))
+        db.execute("DELETE FROM flow_runs WHERE id NOT IN (SELECT id FROM flow_runs ORDER BY id DESC LIMIT 50)")
+    return {"ok": True, "run_id": run_id, "status": status, "steps": log, "summary": summary}
+
+
+def flow_context(request: Request) -> dict:
+    """Det fanen Flows skal bruge: flows, seneste koersler, blokkatalog, skabeloner og evt. en flow i redigering."""
+    flows = flow_rows()
+    with get_db() as db:
+        runs = [dict(r) for r in db.execute("SELECT * FROM flow_runs WHERE log_json IS NOT NULL ORDER BY id DESC LIMIT 10").fetchall()]
+    for r in runs:
+        r["log"] = jsonlib.loads(r["log_json"] or "{}")
+    edit_raw = (request.query_params.get("edit") or "").strip()
+    edit = next((f for f in flows if edit_raw.isdigit() and f["id"] == int(edit_raw)), None)
+    msg = (request.query_params.get("flow_msg") or "").strip()[:180]
+    return {
+        "flows": flows, "flow_runs": runs, "flow_edit": edit,
+        "flow_blocks": [{"key": k, "label": v[0], "group": v[1], "needs": v[2], "params": v[4],
+                         "ready": not v[2] or bool(globals().get(v[2]))} for k, v in FLOW_BLOCKS.items()],
+        "flow_templates": {k: {**v, "label": flow_schedule_label(v["schedule"])} for k, v in FLOW_TEMPLATES.items()},
+        "flow_block_labels": {k: v[0] for k, v in FLOW_BLOCKS.items()},
+        "flow_conditions": FLOW_CONDITIONS, "flow_max_steps": FLOW_MAX_STEPS,
+        "flow_weekdays": FLOW_WEEKDAYS, "flow_state": dict(FLOW_STATE),
+        "flow_feedback": {"ok": request.query_params.get("flow") == "ok", "msg": msg} if msg else None,
+        "flow_template_names": {f["template"] for f in flows if f.get("template")},
+    }
+
+
+def flow_claim() -> bool:
+    with _FLOW_LOCK:
+        if FLOW_STATE["running"] or OPTIMIZE_STATE["running"]:
+            return False
+        FLOW_STATE.update({"running": True, "started_at": datetime.now().isoformat(timespec="seconds"),
+                           "step": 0, "steps": 0, "label": "Starter"})
+        return True
+
+
+def flow_release():
+    FLOW_STATE.update({"running": False, "label": ""})
+
+
+def run_flow_claimed(flow_id: int, trigger: str, run_id: int | None = None):
+    try:
+        return run_flow_sync(flow_id, trigger, run_id)
+    finally:
+        flow_release()
+
+
+def run_due_flows_sync(now: datetime | None = None) -> int:
+    """Kaldes af scheduleren: koerer de flows, hvis tid er kommet - én ad gangen."""
+    stamp = (now or datetime.now()).isoformat(timespec="seconds")
+    with get_db() as db:
+        due = [r["id"] for r in db.execute(
+            "SELECT id FROM flows WHERE enabled=1 AND schedule!='manual' AND next_run_at IS NOT NULL "
+            "AND next_run_at<=? ORDER BY next_run_at", (stamp,)).fetchall()]
+    ran = 0
+    for fid in due:
+        if not flow_claim():
+            break
+        run_flow_claimed(fid, "plan")
+        ran += 1
+    return ran
+
+
+async def job_flows():
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(executor, run_due_flows_sync)
+
+
+def _flow_redirect(msg: str = "", ok: bool = True, extra: str = "") -> RedirectResponse:
+    q = "/?tab=flows" + (f"&flow={'ok' if ok else 'fejl'}&flow_msg=" + urllib.parse.quote(msg[:160]) if msg else "") + extra
+    return RedirectResponse(q, status_code=303)
+
+
+@app.post("/flows/template")
+async def flows_template(key: str = Form("")):
+    t = FLOW_TEMPLATES.get(key)
+    if not t:
+        return _flow_redirect("Ukendt skabelon", False)
+    fid, err = flow_save(t["name"], t["schedule"], t["steps"], template=key)
+    return _flow_redirect(err or f"'{t['name']}' er oprettet og kører {flow_schedule_label(t['schedule'])}", not err)
+
+
+@app.post("/flows/save")
+async def flows_save(request: Request):
+    form = await request.form()
+    steps = []
+    for i in range(FLOW_MAX_STEPS):
+        block = str(form.get(f"block_{i}", "")).strip()
+        if not block:
+            continue
+        steps.append({"block": block, "when": str(form.get(f"when_{i}", "altid")),
+                      "params": {k: str(form.get(f"{k}_{i}", "")) for k in ("keyword", "max", "level")}})
+    schedule = str(form.get("schedule", "manual"))
+    if schedule in ("daily", "weekly"):
+        hour = str(form.get("hour", "06")).zfill(2)[:2]
+        schedule = f"daily@{hour}" if schedule == "daily" else f"weekly@{str(form.get('weekday', '1'))[:1]}@{hour}"
+    fid_raw = str(form.get("id", "")).strip()
+    fid, err = flow_save(str(form.get("name", "")), schedule, steps, int(fid_raw) if fid_raw.isdigit() else None)
+    return _flow_redirect(err or "Flowen er gemt", not err)
+
+
+@app.post("/flows/toggle")
+async def flows_toggle(id: str = Form("")):
+    if id.isdigit():
+        with get_db() as db:
+            row = db.execute("SELECT enabled, schedule FROM flows WHERE id=?", (int(id),)).fetchone()
+            if row:
+                # Slaas den til igen, regnes naeste koersel fra nu - ellers koerer den med det samme.
+                db.execute("UPDATE flows SET enabled=?, next_run_at=? WHERE id=?",
+                           (0 if row["enabled"] else 1, flow_next_run(row["schedule"]), int(id)))
+    return _flow_redirect()
+
+
+@app.post("/flows/delete")
+async def flows_delete(id: str = Form("")):
+    if id.isdigit():
+        with get_db() as db:
+            db.execute("DELETE FROM flows WHERE id=?", (int(id),))
+    return _flow_redirect("Flowen er slettet")
+
+
+@app.post("/flows/run")
+async def flows_run(id: str = Form("")):
+    if not id.isdigit():
+        return _flow_redirect("Ukendt flow", False)
+    if not flow_claim():
+        return _flow_redirect("En flow eller optimering kører allerede - vent til den er færdig", False)
+    with get_db() as db:
+        f = db.execute("SELECT name FROM flows WHERE id=?", (int(id),)).fetchone()
+        if not f:
+            flow_release()
+            return _flow_redirect("Flowen findes ikke", False)
+        run_id = db.execute("INSERT INTO flow_runs (flow_id, flow_name, trigger, status, started_at) VALUES (?,?,?,?,?)",
+                            (int(id), f["name"], "manuel", "koerer", now_iso())).lastrowid
+    FLOW_STATE.update({"flow_id": int(id), "run_id": run_id, "name": f["name"]})
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(executor, run_flow_claimed, int(id), "manuel", run_id)
+    return _flow_redirect(f"'{f['name']}' er startet", True, "&running=1")
+
+
+@app.get("/api/flows/status")
+async def flows_status():
+    s = dict(FLOW_STATE)
+    pct = round(s["step"] / s["steps"] * 100) if s.get("steps") else 0
+    return JSONResponse({"running": s["running"], "name": s["name"], "label": s["label"], "step": s["step"],
+                         "steps": s["steps"], "percent": min(pct, 99) if s["running"] else 100, "run_id": s["run_id"]})
 
 
 # ---------- Understi bag nginx (v7.28): Ultra.cc uden Cloudflare-tunnel ----------
@@ -7669,6 +8200,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
         <div class="cc-nav-group">
             <button @click="tab='cockpit'" class="cc-nav-link" :class="tab==='cockpit' && 'is-active'">🧭 Cockpit</button>
             <button @click="tab='chat'" class="cc-nav-link" :class="tab==='chat' && 'is-active'">💬 Chat</button>
+            <button @click="tab='flows'" class="cc-nav-link" :class="tab==='flows' && 'is-active'">🔁 Flows</button>
         </div>
         <div class="cc-nav-group">
             <button @click="tab='seo'" class="cc-nav-link" :class="tab==='seo' && 'is-active'">🔍 SEO &amp; audit</button>
@@ -9165,6 +9697,139 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
             </div>
         </div>
     </section>
+    <section x-show="tab === 'flows'" class="space-y-4" style="display: none;">
+        {% if flow_feedback %}
+        <div class="{% if flow_feedback.ok %}bg-emerald-500/10 border-emerald-500/30 text-emerald-300{% else %}bg-rose-500/10 border-rose-500/30 text-rose-300{% endif %} border rounded-2xl px-4 py-3 text-sm">{{ flow_feedback.msg }}</div>
+        {% endif %}
+        <div id="cc-flow" class="{% if not flow_state.running %}hidden {% endif %}bg-zinc-900/60 border border-sky-500/30 rounded-2xl p-4 text-xs">
+            <div class="flex justify-between mb-1"><span id="cc-flow-label" class="text-zinc-300">{{ flow_state.name }} · {{ flow_state.label }}</span><span id="cc-flow-pct" class="text-zinc-500">0 %</span></div>
+            <div class="h-1.5 bg-zinc-800 rounded-full overflow-hidden"><div id="cc-flow-bar" class="h-full bg-sky-500 transition-all duration-500" style="width: 0%"></div></div>
+            <div id="cc-flow-step" class="text-zinc-600 mt-1"></div>
+        </div>
+
+        <div class="bg-sky-500/5 border border-sky-500/20 rounded-2xl p-4">
+            <h2 class="text-xs uppercase tracking-wider text-sky-300 mb-1">🔁 Færdige flows</h2>
+            <p class="text-[11px] text-zinc-500 mb-3">En flow kæder funktionerne sammen og kører dem automatisk. Alt, der sendes til WordPress, bliver en <b>kladde</b> - intet udgives af sig selv.</p>
+            <div class="grid md:grid-cols-2 gap-2">
+                {% for key, t in flow_templates.items() %}
+                <form action="/flows/template" method="POST" class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs flex flex-col gap-2">
+                    <input type="hidden" name="key" value="{{ key }}">
+                    <div class="flex justify-between gap-2"><b class="text-zinc-200">{{ t.name }}</b><span class="text-zinc-500 whitespace-nowrap">{{ t.label }}</span></div>
+                    <p class="text-zinc-400">{{ t.hint }}</p>
+                    <div class="flex flex-wrap gap-1">{% for s in t.steps %}<span class="bg-zinc-800/70 text-zinc-300 px-2 py-0.5 rounded-full">{{ loop.index }}. {{ flow_block_labels.get(s.block, s.block) }}</span>{% endfor %}</div>
+                    <button class="self-start border border-sky-500/50 text-sky-300 hover:bg-sky-500/10 px-3 py-1.5 rounded-lg">{% if key in flow_template_names %}➕ Opret én til{% else %}➕ Opret flow{% endif %}</button>
+                </form>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Dine flows ({{ flows|length }})</h2>
+            {% if not flows %}<p class="text-xs text-zinc-500">Ingen flows endnu - opret en fra en skabelon ovenfor, eller byg din egen nedenfor.</p>{% endif %}
+            <div class="space-y-2">
+                {% for f in flows %}
+                <div class="bg-zinc-950 border {% if f.enabled %}border-zinc-800{% else %}border-zinc-800 opacity-60{% endif %} rounded-xl p-3 text-xs">
+                    <div class="flex flex-wrap items-start justify-between gap-2">
+                        <div class="min-w-0">
+                            <b class="text-zinc-100">{{ f.name }}</b>
+                            <span class="ml-2 {% if f.enabled %}text-emerald-400{% else %}text-zinc-500{% endif %}">{% if f.enabled %}● aktiv{% else %}○ slået fra{% endif %}</span>
+                            <span class="text-zinc-500">· {{ f.schedule_label }}</span>
+                            <div class="text-zinc-500 mt-1">
+                                {% if f.last_run_at %}Sidst: {{ f.last_run_at[:16]|replace('T', ' ') }} ({{ f.last_status }}){% else %}Ikke kørt endnu{% endif %}
+                                {% if f.enabled and f.next_run_at %} · Næste: {{ f.next_run_at[:16]|replace('T', ' ') }}{% endif %}
+                            </div>
+                            {% if f.missing %}<div class="text-amber-400 mt-1">⚠️ Mangler i .env: {{ f.missing|join(', ') }} - de blokke springes over.</div>{% endif %}
+                        </div>
+                        <div class="flex flex-wrap gap-1">
+                            <form action="/flows/run" method="POST"><input type="hidden" name="id" value="{{ f.id }}"><button {% if flow_state.running %}disabled{% endif %} class="bg-sky-500/15 text-sky-300 border border-sky-500/50 px-3 py-1.5 rounded-lg disabled:opacity-40">▶ Kør nu</button></form>
+                            <form action="/flows/toggle" method="POST"><input type="hidden" name="id" value="{{ f.id }}"><button class="border border-zinc-700 px-3 py-1.5 rounded-lg">{% if f.enabled %}Slå fra{% else %}Slå til{% endif %}</button></form>
+                            <a href="/?tab=flows&edit={{ f.id }}#flow-builder" class="border border-zinc-700 px-3 py-1.5 rounded-lg">Redigér</a>
+                            <form action="/flows/delete" method="POST" onsubmit="return confirm('Slet flowen?')"><input type="hidden" name="id" value="{{ f.id }}"><button class="border border-rose-500/30 text-rose-300 px-3 py-1.5 rounded-lg">Slet</button></form>
+                        </div>
+                    </div>
+                    <div class="flex flex-wrap gap-1 mt-2">
+                        {% for s in f.steps %}
+                        <span class="bg-zinc-800/70 text-zinc-300 px-2 py-0.5 rounded-full">{{ loop.index }}. {{ flow_block_labels.get(s.block, s.block) }}{% if s.when != 'altid' %} <span class="text-zinc-500">({{ 'hvis fund' if s.when == 'hvis_fund' else 'hvis høj' }})</span>{% endif %}{% if s.params.keyword %} <span class="text-zinc-500">'{{ s.params.keyword }}'</span>{% endif %}</span>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        {% set fe = flow_edit %}
+        {% set sched = fe.schedule if fe else 'manual' %}
+        {% set kind = sched.split('@')[0] %}
+        <form id="flow-builder" action="/flows/save" method="POST" class="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4 space-y-3">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400">{% if fe %}✏️ Redigér '{{ fe.name }}'{% else %}🧩 Byg din egen flow{% endif %}</h2>
+            {% if fe %}<input type="hidden" name="id" value="{{ fe.id }}">{% endif %}
+            <div class="grid md:grid-cols-4 gap-2 text-sm">
+                <input type="text" name="name" value="{{ fe.name if fe else '' }}" placeholder="Navn, fx 'Hver morgen'" required maxlength="80" class="md:col-span-2 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                <select name="schedule" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2">
+                    <option value="manual" {% if kind == 'manual' %}selected{% endif %}>Kun manuelt</option>
+                    <option value="hourly" {% if kind == 'hourly' %}selected{% endif %}>Hver time</option>
+                    <option value="daily" {% if kind == 'daily' %}selected{% endif %}>Dagligt</option>
+                    <option value="weekly" {% if kind == 'weekly' %}selected{% endif %}>Ugentligt</option>
+                </select>
+                <div class="flex gap-2">
+                    <select name="weekday" class="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-2 py-2" aria-label="Ugedag">
+                        {% for d in flow_weekdays %}<option value="{{ loop.index }}" {% if kind == 'weekly' and sched.split('@')[1] == loop.index|string %}selected{% endif %}>{{ d }}</option>{% endfor %}
+                    </select>
+                    <select name="hour" class="w-20 bg-zinc-950 border border-zinc-800 rounded-xl px-2 py-2" aria-label="Klokkeslæt">
+                        {% for h in range(24) %}{% set hh = '%02d'|format(h) %}<option value="{{ hh }}" {% if ('@' in sched and sched.split('@')[-1] == hh) or ('@' not in sched and h == 6) %}selected{% endif %}>{{ hh }}:00</option>{% endfor %}
+                    </select>
+                </div>
+            </div>
+            <p class="text-[11px] text-zinc-500">Ugedag bruges kun ved "Ugentligt", klokkeslæt ved "Dagligt" og "Ugentligt". Tomme rækker springes over.</p>
+            <div class="space-y-1.5">
+                {% for i in range(flow_max_steps) %}
+                {% set st = fe.steps[i] if fe and i < fe.steps|length else none %}
+                <div class="grid grid-cols-12 gap-1.5 text-xs items-center">
+                    <span class="col-span-1 text-zinc-500 text-right pr-1">{{ i + 1 }}.</span>
+                    <select name="block_{{ i }}" class="col-span-11 md:col-span-5 bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1.5">
+                        <option value="">—</option>
+                        {% for group in ['Analyse', 'Generér', 'Handling'] %}
+                        <optgroup label="{{ group }}">
+                            {% for b in flow_blocks if b.group == group %}<option value="{{ b.key }}" {% if st and st.block == b.key %}selected{% endif %}>{{ b.label }}{% if not b.ready %} (kræver {{ b.needs }}){% endif %}</option>{% endfor %}
+                        </optgroup>
+                        {% endfor %}
+                    </select>
+                    <select name="when_{{ i }}" class="col-span-12 md:col-span-3 bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1.5">
+                        {% for k, label in flow_conditions.items() %}<option value="{{ k }}" {% if st and st.when == k %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                    </select>
+                    <input type="text" name="keyword_{{ i }}" value="{{ st.params.keyword if st and st.params.keyword else '' }}" placeholder="søgeord (valgfrit)" class="col-span-8 md:col-span-2 bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1.5">
+                    <input type="number" name="max_{{ i }}" min="1" max="5" value="{{ st.params.max if st and st.params.max else '' }}" placeholder="maks" class="col-span-4 md:col-span-1 bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1.5">
+                    {% if st and st.params.level %}<input type="hidden" name="level_{{ i }}" value="{{ st.params.level }}">{% endif %}
+                </div>
+                {% endfor %}
+            </div>
+            <div class="flex gap-2">
+                <button class="bg-sky-500/15 text-sky-300 border border-sky-500/50 px-5 py-2 rounded-xl text-sm">{% if fe %}Gem ændringer{% else %}Gem flow{% endif %}</button>
+                {% if fe %}<a href="/?tab=flows" class="border border-zinc-700 px-5 py-2 rounded-xl text-sm">Annullér</a>{% endif %}
+            </div>
+            <p class="text-[11px] text-zinc-500">Blokkene deler resultater: "Søgeord" finder ord tæt på toppen, og "Indholdsplan" og "Skriv artikel" bruger dem, hvis du ikke skriver et søgeord. "Skriv artikel" laver højst 2 pr. kørsel, og kun artikler der består kvalitetstjekket sendes til WordPress - som kladde.</p>
+        </form>
+
+        <div class="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4">
+            <h2 class="text-xs uppercase tracking-wider text-zinc-400 mb-3">Seneste kørsler</h2>
+            {% if not flow_runs %}<p class="text-xs text-zinc-500">Ingen kørsler endnu.</p>{% endif %}
+            <div class="space-y-2">
+                {% for r in flow_runs %}
+                <details class="bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs">
+                    <summary class="cursor-pointer"><b class="text-zinc-200">{{ r.flow_name }}</b> <span class="{% if r.status == 'ok' %}text-emerald-400{% else %}text-amber-400{% endif %}">{{ r.status }}</span> <span class="text-zinc-500">· {{ r.trigger }} · {{ (r.finished_at or '')[:16]|replace('T', ' ') }}</span><div class="text-zinc-400 mt-1">{{ r.log.summary }}</div></summary>
+                    <ul class="mt-2 space-y-1">
+                        {% for s in r.log.steps %}
+                        <li>{% if s.ok %}✅{% elif s.ok is none %}⏭️{% else %}❌{% endif %} <span class="text-zinc-300">{{ s.label }}</span> <span class="text-zinc-500">- {{ s.note }}{% if s.secs %} ({{ s.secs }} s){% endif %}</span></li>
+                        {% endfor %}
+                    </ul>
+                    {% if r.log.actions %}
+                    <div class="mt-2 text-zinc-400">Fund: {% for a in r.log.actions[:8] %}<div>· [{{ a.priority }}] {{ a.area }}: {{ a.problem }}</div>{% endfor %}</div>
+                    {% endif %}
+                </details>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
     <section x-show="tab === 'chat'" class="space-y-4" style="display: none;"
              x-init="if (tab === 'chat') ccChatLoad(); $watch('tab', function (t) { if (t === 'chat') ccChatLoad(); })">
         {% if not ai_enabled %}
@@ -9455,6 +10120,24 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
         }).catch(function () {});
     }
     ccPollOptimize(false);
+    // Flows: fremdrift fra /api/flows/status; genindlaes fanen, naar koerslen er faerdig.
+    function ccPollFlow(wasRunning) {
+        fetch('/api/flows/status').then(function (r) { return r.json(); }).then(function (s) {
+            const box = ccEl('cc-flow');
+            if (!box) return;
+            if (s.running) {
+                box.classList.remove('hidden');
+                ccEl('cc-flow-label').textContent = (s.name || 'Flow') + ' · ' + (s.label || 'arbejder');
+                ccEl('cc-flow-pct').textContent = (s.percent || 0) + ' %';
+                ccEl('cc-flow-bar').style.width = (s.percent || 0) + '%';
+                ccEl('cc-flow-step').textContent = s.steps ? 'trin ' + (s.step + 1) + ' af ' + s.steps : '';
+                setTimeout(function () { ccPollFlow(true); }, 2000);
+            } else if (wasRunning) {
+                location.replace('/?tab=flows&flow=ok&flow_msg=' + encodeURIComponent('Kørslen er færdig - se resultatet nederst'));
+            }
+        }).catch(function () {});
+    }
+    ccPollFlow(false);
 
 function showHistory(domainId, url) {
     const s = Alpine.$data(document.body);
@@ -9535,7 +10218,8 @@ if (document.getElementById('vischart')) loadVis();
         brugere: { title: 'Brugere', hint: 'Adgang, invitationer og MCP-nøgler' },
         alarms: { title: 'Alarmer', hint: 'Hvad der kræver din opmærksomhed' },
         notes: { title: 'Noter', hint: 'Hurtige noter til arbejdsflowet' },
-        chat: { title: 'Chat', hint: 'Tal med AI\'en og giv den værktøjer fra GitHub, WordPress, Gmail, Drive m.fl.' }
+        chat: { title: 'Chat', hint: 'Tal med AI\'en og giv den værktøjer fra GitHub, WordPress, Gmail, Drive m.fl.' },
+        flows: { title: 'Flows', hint: 'Kæd funktionerne sammen og lad dem køre automatisk - kladder, aldrig udgivet' }
     };
 
     // Den aktive fane skal altid vaere synlig i den vandrette navigation - ogsaa paa mobil.
@@ -9914,12 +10598,16 @@ EOF_USERSVC
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.29 PRO
+# Command Center v7.30 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
+
+## Nyheder i v7.30
+
+- **Flows — kæd funktionerne sammen til auto-optimering (v7.30.0)** — ny fane **🔁 Flows**. En flow er en kæde af op til 10 **blokke**, der kører i rækkefølge og deler resultater: *Analyse* (teknik, crawl, on-page, indholdsscore, søgeord, monitors, konkurrenter, content gap, backlinks), *Generér* (søgeordsidéer, AI-titler/meta, indholdsplan, AI-artikel) og *Handling* (WordPress-kladde, growth-autopilot, rapport til Alarmer/kanaler, note). "Søgeord" finder ord på plads 4-20, og "Indholdsplan"/"Skriv artikel" bruger dem automatisk. Hver blok kan have en betingelse (*altid*, *kun hvis forrige trin fandt noget*, *kun hvis der er høj prioritet*), og flowen kører **manuelt, hver time, dagligt eller ugentligt**. Fire færdige flows: **Daglig sundhed**, **Ugentlig optimering**, **Indholdsmaskine** (søgeord tæt på toppen → plan → AI-artikel → WordPress-kladde) og **Konkurrent-overvågning**. Sikkerhed: alt til WordPress er **kladder** (aldrig udgivet), kun artikler der består kvalitetstjekket sendes, højst 2 AI-artikler pr. blok, én kørsel ad gangen (også mod 1-klik optimeringen), og en blok uden nøgle springes over med en forklaring. Hver kørsel logges trin for trin
 
 ## Nyheder i v7.29
 

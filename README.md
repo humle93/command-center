@@ -1,9 +1,13 @@
-# Command Center v7.29 PRO
+# Command Center v7.30 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
+
+## Nyheder i v7.30
+
+- **Flows — kæd funktionerne sammen til auto-optimering (v7.30.0)** — ny fane **🔁 Flows**. En flow er en kæde af op til 10 **blokke**, der kører i rækkefølge og deler resultater: *Analyse* (teknik, crawl, on-page, indholdsscore, søgeord, monitors, konkurrenter, content gap, backlinks), *Generér* (søgeordsidéer, AI-titler/meta, indholdsplan, AI-artikel) og *Handling* (WordPress-kladde, growth-autopilot, rapport til Alarmer/kanaler, note). "Søgeord" finder ord på plads 4-20, og "Indholdsplan"/"Skriv artikel" bruger dem automatisk. Hver blok kan have en betingelse (*altid*, *kun hvis forrige trin fandt noget*, *kun hvis der er høj prioritet*), og flowen kører **manuelt, hver time, dagligt eller ugentligt**. Fire færdige flows: **Daglig sundhed**, **Ugentlig optimering**, **Indholdsmaskine** (søgeord tæt på toppen → plan → AI-artikel → WordPress-kladde) og **Konkurrent-overvågning**. Sikkerhed: alt til WordPress er **kladder** (aldrig udgivet), kun artikler der består kvalitetstjekket sendes, højst 2 AI-artikler pr. blok, én kørsel ad gangen (også mod 1-klik optimeringen), og en blok uden nøgle springes over med en forklaring. Hver kørsel logges trin for trin
 
 ## Nyheder i v7.29
 

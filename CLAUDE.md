@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 11. november 2026 · **Version:** 7.28.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 11. november 2026 · **Version:** 7.30.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,28 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Flows (v7.30.0, 12. november) — implementeret
+- **Baggrund:** ønsket var "flow-system … udvid alle funktioner, så de kan kædes sammen til auto-optimering".
+- **Valg:** alt til WordPress er kladder (`wp_push_draft`, aldrig publish) og kun efter `quality_check`; AI loftet (2 artikler, 3 meta pr. blok); én kørsel ad gangen, delt lås med 1-klik optimeringen.
+- **Kode:** `FLOW_BLOCKS` (17), `FLOW_TEMPLATES` (4), `run_flow_sync()` med delt `ctx`, `flow_next_run()`, `run_due_flows_sync()` + job `flows` (5 min). Analyseblokkene genbruger `_optimize_step()`. Tabeller `flows`, `flow_runs`. Fane `flows` (nav-gruppe med Cockpit/Chat), poller `ccPollFlow`.
+- **Faldgrube:** CSS-klassen `border-sky-500/40` bruges af testene til at finde env-bjælken — brug ikke den klasse andre steder (flows bruger `/50`).
+- **Test:** 40 `flow:`-checks (plan, validering, betingelser, ctx-deling, fejlende blok, kun kladder, kvalitetstjek, AI-loft, scheduler, toggle-genberegning, lås, ruter, fane, fjernet blok). Browser: skabelon → egen flow → Kør nu → log, alle 17 faner uden JS-fejl.
+
+### 1-klik optimering (v7.29.0, 12. november) — implementeret
+- **Baggrund:** ønsket var "en form for 1-kliks optimering af et helt projekt eller enkelte dele".
+- **Valg:** analyser + forslag, **ingen automatisk skrivning** til WordPress/sitet (brugeren kopierer/markerer "Løst"). Et "Anvend"-trin, der skriver godkendte titler/meta til WordPress, står i roadmappen som næste skridt.
+- **Kode:** `OPTIMIZE_PARTS` (alt, teknik, onpage, indhold, soegeord, monitors), `optimize_project_sync()` + `_optimize_step()` genbruger de eksisterende funktioner; `ONPAGE_FIXES` oversætter `analyze_page`-tjek til dansk rettelse + prioritet (vægt 3/2/1 = høj/middel/lav). Tabel `optimize_runs`, ruter `POST /optimize/run`, `GET /api/optimize/status`, `POST /optimize/done`. Kortet ligger øverst i Cockpit (`#optimering`) med live fremdrift (`ccPollOptimize`).
+- **Fundet undervejs:** tomt `:class=""` i SEO-fanens "Seneste crawl" gav en Alpine-JS-fejl, hver gang der fandtes et crawl (revisionens browsertjek ramte en frisk DB uden crawl). Rettet + test mod tomme Alpine-udtryk. Crawleren gemmer forsiden både med og uden `/` — optimeringen fjerner dubletten.
+- **Test:** 21 `optimering:`-checks; browserforløb i Chromium: klik → fremdrift → rapport (11 handlinger på en testside) → "Løst", ingen JS-fejl; alle 16 faner fejlfri med crawl-data.
+
+### Funktionsrevision (v7.28.1, 12. november) — gennemført
+- **Baggrund:** brugeren kan nu logge ind på `laser` (direkte på IP'en, port fra `app-ports free`) og bad om at få "kigget på funktionerne på siden og om de overhovedet virker".
+- **Metode:** et revisionsscript (ikke i repoet; ligger i sessionens scratchpad) loggede ind og kørte alle 63 formularer/knapper i to faser: A = ingen nøgler, B = SerpAPI/OpenRouter/PageSpeed/DuckDuckGo/Google Suggest/Telegram/GitHub fra lokale fakes og WordPress fra `tests/fake_wp.py`. Derudover blev alle 16 faner åbnet i Chromium (Node-Playwright) for JS-fejl, fejlede kald og tomme knapper.
+- **Fundet og rettet:** (1) `rewrite_meta_sync()` kaldte `ai_chat(..., temperature=0.7)` — argumentet forsvandt i v7.25, så "✨ AI-rewrite titel/meta" gav altid 500 med en nøgle, og svaret blev aldrig parset til `{titles, descriptions}`. (2) `/monitors/add` krævede `expected` også for `price`, som ikke bruger det; tomt felt = tavs 303 uden monitor. Begge har `revision:`-checks, der fejler på den gamle kode.
+- **Ikke fejl (forventet):** fase A forklarer alle manglende nøgler; autopilotens kvalitetsgate afviste en artikel uden fokus-keyword; `fake_wp.py` har ikke `/wp/v2/posts`, så artikel-push mod WordPress er kun verificeret til og med kaldet.
+- **Browser:** 16/16 faner uden JS-fejl, fejlede kald eller tomme knapper.
+- **Statustabel** pr. funktion (hvad den kræver) står i manualen under "Funktionsstatus".
 
 ### Ultra.cc uden Cloudflare (v7.28.0) — implementeret
 - **Baggrund:** ønsket var "Fjern Cloudflare og lav almindelig login via Ultra cc serveren". Koden havde ingen Cloudflare-afhængighed; tunnellen (`trycloudflare`, ny URL ved hver genstart) fandtes kun fordi appen ikke kunne ligge på en understi, og Ultra.cc's nginx kun giver `location /<app>/` på `https://<bruger>.<server>.usbx.me` (filerne i `~/.apps/nginx/proxy.d/` er location-blokke, ikke `server { }` — den gamle vejledning var forkert der).

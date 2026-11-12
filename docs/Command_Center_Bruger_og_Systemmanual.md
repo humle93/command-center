@@ -311,6 +311,79 @@ Cockpit-panelet viser **installeret commit** og **seneste commit på `main`**:
 Opdateringen kører kontrollen automatisk, **før** den skriver noget: er `install.sh` på disken ældre end koden, stopper den med kode 7 og rører ingen filer. Beskeden siger hvad man gør i stedet (`git checkout -- install.sh` eller `git pull`), og at intet er ændret. Grunden er, at en gammel installatør ellers kan ligge klar og rulle koden tilbage, næste gang nogen kører den. `--check` og `--version` skriver intet og virker uanset. `bash scripts/restart.sh` genstarter uden at opdatere
 - Status som JSON: `GET /api/update` (inkl. `restart_mode`/`auto_restart`), `POST /api/update/check`, `POST /api/update/apply` (bruges af scriptet). `/self-update` er alias for `/update/apply`
 
+## Flows (v7.30.0)
+
+Fanen **🔁 Flows** kæder funktionerne sammen, så de kører af sig selv.
+
+**Kom i gang:** tryk **➕ Opret flow** på en af de færdige flows. Den er aktiv med det samme og kører efter planen.
+
+| Færdig flow | Plan | Blokke |
+|---|---|---|
+| Daglig sundhed | dagligt kl. 07 | teknik → monitors → rapport (kun hvis noget er galt) |
+| Ugentlig optimering | mandag kl. 06 | crawl → on-page → indhold → AI-titler (hvis fund) → søgeord → note → rapport |
+| Indholdsmaskine | onsdag kl. 06 | søgeord → indholdsplan → AI-artikel → WordPress-kladde → rapport |
+| Konkurrent-overvågning | fredag kl. 06 | konkurrenter → content gap → backlinks → søgeordsidéer → note |
+
+**Byg din egen:** navn, plan (manuelt, hver time, dagligt, ugentligt + klokkeslæt) og op til 10 blokke. Pr. blok vælger du en
+betingelse og evt. et søgeord og et maksimum. Skriver du intet søgeord, bruger blokken dem, flowen har fundet (ord på plads
+4-20 fra "Søgeord"), ellers dine gemte søgeord. **Redigér**, **Slå fra/til**, **▶ Kør nu** og **Slet** står på hver flow.
+
+**Blokke:**
+
+| Gruppe | Blok | Kræver |
+|---|---|---|
+| Analyse | Teknik, Crawl, On-page, Indholdsscore, Monitors, Find konkurrenter | intet |
+| Analyse | Søgeord (placeringer), Content gap, Backlink-muligheder | `SERPAPI_KEY` |
+| Generér | Søgeordsidéer, Indholdsplan | intet |
+| Generér | AI-titler/meta (højst 3 sider), Skriv artikel (højst 2) | `OPENROUTER_API_KEY` |
+| Handling | Send nye artikler til WordPress som **kladde** | `WP_URL` + `WP_USER` + `WP_APP_PASSWORD` |
+| Handling | Growth-autopilot | `OPENROUTER_API_KEY` |
+| Handling | Rapport (Alarmer + dine kanaler), Note | intet |
+
+**Sikkerhed:** intet udgives på sitet — WordPress får kun kladder, og kun artikler der består kvalitetstjekket. Kun én flow (eller
+1-klik optimering) kører ad gangen. En blok uden nøgle springes over (⏭️) med en forklaring, og en blok der fejler stopper ikke
+resten. Under **Seneste kørsler** ser du hvert trin med ✅/⏭️/❌, tid og fund (de sidste 50 gemmes).
+
+## 1-klik optimering (v7.29.0)
+
+Øverst i **Cockpit**. Adressefeltet er projektet (det første domæne under Domæner, ellers den sidst optimerede adresse).
+
+| Knap | Kører |
+|---|---|
+| ⚡ Optimér hele projektet | Teknik → crawl → on-page → AI titel/meta → indhold → søgeord → monitors |
+| Teknik | oppetid, svartid og SSL for projektet og dine domæner + crawl (404-sider, robots.txt, sitemap) |
+| On-page | crawl + titel, meta, overskrifter, links, schema m.m. pr. side + AI-forslag til titel/meta |
+| Indhold | crawl + indholdsscore for de 5 svageste sider (ordantal, H2, søgeord, interne links) |
+| Søgeord | opdaterer placeringer (med `SERPAPI_KEY`) og fremhæver ord på plads 4-20 ("tæt på toppen") |
+| Monitors | kører alle monitors og viser dem, der fejler |
+
+Resultatet er én liste sorteret efter prioritet (høj → middel → lav), med siden, problemet og hvad du gør ved det.
+AI-forslag til titel og meta står under siden — klik på et forslag for at kopiere det. **✓ Løst** krydser en handling af.
+Intet skrives til WordPress eller sitet; et trin uden nøgle springes over (⏭️) med en forklaring. AI bruges højst på
+3 sider pr. kørsel, så et klik ikke bruger budgettet op. Kun én optimering kører ad gangen.
+
+## Funktionsstatus (revision 12. november 2026, v7.28.1)
+
+Alle formularer og knapper er kørt igennem. Uden nøgle siger hver funktion, hvad der mangler (under Alarmer eller i
+svaret) — ingen går ned. Hvad hver funktion kræver:
+
+| Funktion | Kræver | Status |
+|---|---|---|
+| Domæne-tjek, SEO-audit, crawl, redirects, dubletter, linktjek | intet | virker |
+| Vækst: optimerer, sammenligning, plan, linkliste | intet | virker |
+| Monitors (tekst, JSON, pris), noter, backup, moduler, API-nøgler, brugere (login/kode) | intet | virker (pris-monitor rettet i 7.28.1) |
+| 1-klik optimering (teknik, crawl, on-page, indhold, monitors) | intet (AI-forslag og placeringer kræver deres nøgle) | virker (v7.29.0) |
+| Flows (automatiske kæder) | blokkene kræver det samme som funktionerne ovenfor | virker (v7.30.0) |
+| Konkurrent-søgning (Spy) | intet (DuckDuckGo) | virker, men DuckDuckGo kan blokere servere — så siger alarmen det |
+| Søgeordsidéer | intet (Google/DuckDuckGo-forslag) | virker |
+| Søgeords-placeringer, backlink-prospekter, content gap, sværhedsgrad | `SERPAPI_KEY` | virker med nøgle |
+| Artikler, meta, autopilot, link-forslag, AI-omskrivning, AI-synlighed, Chat | `OPENROUTER_API_KEY` | virker med nøgle (AI-omskrivning rettet i 7.28.1) |
+| Core Web Vitals i SEO-audit | `PSI_API_KEY` | virker med nøgle |
+| Send artikel/opslag til WordPress, synk, login-knap | `WP_URL` + `WP_USER` + `WP_APP_PASSWORD` | virker med nøgle |
+| Invitationer og e-mail-alarmer | `SMTP_HOST` + `SMTP_FROM` | virker med nøgle |
+| Telegram/ntfy/webhook-alarmer | kanalens nøgle | virker med nøgle |
+| Opdatering fra GitHub-knappen | `GITHUB_TOKEN` | virker med nøgle (ellers `git pull` på serveren) |
+
 ## nginx / Ultra.cc
 
 Appen skal blive på `127.0.0.1`; nginx står for TLS:

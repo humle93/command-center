@@ -142,6 +142,32 @@ with main.get_db() as db:
     saved = db.execute("SELECT type FROM monitors WHERE name='x'").fetchone()
 check("monitors: unknown type falls back to 'contains'",
       r.status_code == 303 and saved and saved["type"] == "contains", (r.status_code, saved and saved["type"]))
+# Funktionsrevision 12/11: en pris-monitor bruger ikke "forventet", men feltet var paakraevet - et tomt
+# felt gav en tavs 303 uden monitor og uden besked.
+r = a.post("/monitors/add", data={"name": "Pris", "url": "https://example.com/produkt", "type_": "price", "expected": ""},
+           follow_redirects=False)
+with main.get_db() as db:
+    saved = db.execute("SELECT type, expected FROM monitors WHERE name='Pris'").fetchone()
+check("revision: pris-monitor kan oprettes uden 'forventet'",
+      r.status_code == 303 and saved and saved["type"] == "price", (r.status_code, saved and dict(saved)))
+with main.get_db() as db:
+    _before = db.execute("SELECT COUNT(*) FROM alarms WHERE type='monitor'").fetchone()[0]
+r = a.post("/monitors/add", data={"name": "Tom", "url": "https://example.com", "type_": "contains", "expected": ""},
+           follow_redirects=False)
+with main.get_db() as db:
+    _none = db.execute("SELECT COUNT(*) FROM monitors WHERE name='Tom'").fetchone()[0]
+    _msg = db.execute("SELECT message FROM alarms WHERE type='monitor' ORDER BY id DESC LIMIT 1").fetchone()
+check("revision: contains-monitor uden tekst afvises med en forklaring (ikke tavst)",
+      r.status_code == 303 and _none == 0 and _msg and "forventet" in _msg["message"]
+      and "tab=monitors" in r.headers.get("location", ""), (_none, _msg and _msg["message"]))
+import re as _re_alp
+_tpl = open(os.path.join(ROOT, "app", "templates", "dashboard.html"), encoding="utf-8").read()
+check("revision: ingen tomme Alpine-udtryk i dashboardet (et tomt :class gav en JS-fejl ved hvert crawl)",
+      not _re_alp.search(r'\s(?::[a-z-]+|x-[a-z.:-]+|@[a-z.:-]+)=""', _tpl),
+      _re_alp.findall(r'\s(?::[a-z-]+|x-[a-z.:-]+|@[a-z.:-]+)=""', _tpl)[:5])
+check("revision: formularen kraever ikke 'forventet' (pris bruger det ikke)",
+      'name="expected" placeholder="fx \'Add to cart\' eller products.0.name (tom ved pris)" class' in
+      open(os.path.join(ROOT, "app", "templates", "dashboard.html"), encoding="utf-8").read())
 
 # --- GitHub update: no token is explained, and extraction is whitelisted/traversal-safe ---
 main.GITHUB_TOKEN = ""
@@ -1485,6 +1511,25 @@ main.LEGACY_AIMLAPI_KEY_SET = _legacy_before
 check("openrouter: ingen aimlapi-adresser tilbage i koden",
       "aimlapi.com" not in open(os.path.join(ROOT, "app", "main.py"), encoding="utf-8").read())
 
+# --- Funktionsrevision 12/11: AI-omskrivning af titel/meta gik ned (500) med en noegle ---
+# rewrite_meta_sync sendte temperature= til ai_chat (fjernet i v7.25) og returnerede raa tekst.
+_ai_queue.append(_FakeAIResp(200, {"choices": [{"message": {"content":
+    'Her er forslag:\n```json\n{"titles": ["Messing tandhjul", "Tandhjul i messing"], '
+    '"descriptions": ["Koeb messing tandhjul her"], "note": "kortere titler"}\n```'}}]}))
+try:
+    _rw = main.rewrite_meta_sync("https://steamgears.eu/", "Gammel titel", "", "messing tandhjul")
+except TypeError as _e:
+    _rw = {"crash": repr(_e)}
+check("revision: AI-omskrivning gaar ikke ned og giver titler/beskrivelser",
+      _rw.get("titles") == ["Messing tandhjul", "Tandhjul i messing"]
+      and _rw.get("descriptions") == ["Koeb messing tandhjul her"] and _rw.get("note") == "kortere titler", _rw)
+_ai_queue.append(_FakeAIResp(200, {"choices": [{"message": {"content": "Beklager, det kan jeg ikke"}}]}))
+_rw = main.rewrite_meta_sync("https://steamgears.eu/", "", "", "")
+check("revision: AI-omskrivning forklarer et svar uden JSON i stedet for at gaa ned", "error" in _rw, _rw)
+_ai_queue.append(_FakeAIResp(200, {"error": {"code": 502, "message": "upstream nede"}}))
+_rw = main.rewrite_meta_sync("https://steamgears.eu/", "", "", "")
+check("revision: AI-omskrivning viser OpenRouters fejl", _rw.get("error", "").startswith("AI-fejl"), _rw)
+
 main.HTTP.post = _real_http_post
 main.OPENROUTER_API_KEY, main.CC_PUBLIC_URL = _ai_before
 
@@ -1855,6 +1900,240 @@ check("systemd: enhederne foelger CC_HOST/CC_PORT fra .env med standard",
           and "$${CC_PORT:-8000}" in open(os.path.join(ROOT, "deploy", _u)).read()
           for _u in ("command-center.user.service", "command-center.service")))
 shutil.rmtree(_ud, ignore_errors=True)
+
+# --- v7.29.0: 1-klik optimering af hele projektet eller én del ---
+_ob = f"http://127.0.0.1:{port}/"
+_saved_opt = (main.OPENROUTER_API_KEY, main.SERPAPI_KEY)
+main.OPENROUTER_API_KEY, main.SERPAPI_KEY = "", ""
+with main.get_db() as db:
+    db.execute("DELETE FROM keywords"); db.execute("DELETE FROM monitors")
+    db.execute("INSERT INTO keywords (keyword, position, target_url, checked_at) VALUES (?,?,?,?)",
+               ("brass goggles", 7, _ob + "a", main.now_iso()))
+    _rid = db.execute("INSERT INTO optimize_runs (scope, url, status, started_at) VALUES ('alt', ?, 'koerer', ?)",
+                      (_ob, main.now_iso())).lastrowid
+_sum = main.optimize_project_sync(_rid, "alt", _ob)
+_steps = {s["key"]: s for s in _sum["steps"]}
+check("optimering: hele projektet koerer alle syv trin", list(_steps) == ["teknik", "crawl", "onpage", "meta", "indhold", "soegeord", "monitors"],
+      list(_steps))
+check("optimering: crawl og on-page virker uden noegler", _steps["crawl"]["ok"] is True and _steps["onpage"]["ok"] is True,
+      (_steps["crawl"], _steps["onpage"]))
+check("optimering: AI- og placeringstrin springes over med forklaring uden noegle",
+      _steps["meta"]["ok"] is None and "OPENROUTER_API_KEY" in _steps["meta"]["note"]
+      and _steps["soegeord"]["ok"] is None and "SERPAPI_KEY" in _steps["soegeord"]["note"], (_steps["meta"], _steps["soegeord"]))
+_acts = _sum["actions"]
+check("optimering: handlingerne er sorteret efter prioritet",
+      [main.OPTIMIZE_PRIORITY[a["priority"]] for a in _acts] == sorted(main.OPTIMIZE_PRIORITY[a["priority"]] for a in _acts) and _acts,
+      [a["priority"] for a in _acts])
+check("optimering: on-page-handlinger har konkrete rettelser pr. side",
+      any(a["area"] == "On-page" and a["url"].startswith(_ob) and a["fix"] and "On-page-score" in a["problem"] for a in _acts))
+_op_urls = [a["url"].rstrip("/") for a in _acts if a["area"] == "On-page"]
+check("optimering: samme side optraeder kun én gang (forside med og uden /)", len(_op_urls) == len(set(_op_urls)), _op_urls)
+check("optimering: manglende robots.txt/sitemap bliver en teknisk handling",
+      any(a["area"] == "Teknik" and "sitemap" in a["problem"] for a in _acts))
+check("optimering: soegeord nr. 7 er 'taet paa toppen' med hoej prioritet",
+      any(a["area"] == "Søgeord" and "nr. 7" in a["problem"] and a["priority"] == "høj" for a in _acts))
+check("optimering: ingen monitors giver et forslag om at oprette en", any(a["area"] == "Monitor" for a in _acts))
+check("optimering: rapporten gemmes og kan laeses igen", (main.optimize_latest() or {}).get("id") == _rid
+      and main.optimize_latest()["counts"]["høj"] == sum(1 for a in _acts if a["priority"] == "høj"))
+with main.get_db() as db:
+    _al = db.execute("SELECT message FROM alarms WHERE type='optimering' ORDER BY id DESC LIMIT 1").fetchone()
+check("optimering: en faerdig koersel staar under Alarmer", _al and "færdig" in _al["message"], _al and _al["message"])
+# AI-forslag til titel/meta: hoejst OPTIMIZE_AI_PAGES kald, og forslagene haefter paa sidens handling
+_opt_calls = []
+_real_rw = main.rewrite_meta_sync
+def _fake_rw(url, title, desc, kw):
+    _opt_calls.append(url)
+    return {"titles": [f"Ny titel {len(_opt_calls)}"], "descriptions": ["Ny beskrivelse"], "note": ""}
+main.rewrite_meta_sync, main.OPENROUTER_API_KEY = _fake_rw, "sk-test"
+with main.get_db() as db:
+    _rid2 = db.execute("INSERT INTO optimize_runs (scope, url, status, started_at) VALUES ('onpage', ?, 'koerer', ?)",
+                       (_ob, main.now_iso())).lastrowid
+_sum2 = main.optimize_project_sync(_rid2, "onpage", _ob)
+main.rewrite_meta_sync, main.OPENROUTER_API_KEY = _real_rw, ""
+check("optimering: kun den valgte del koeres (on-page = crawl, on-page, meta)", [s["key"] for s in _sum2["steps"]] == ["crawl", "onpage", "meta"],
+      [s["key"] for s in _sum2["steps"]])
+check("optimering: AI-forslag er loftet og haefter paa sidens handling",
+      0 < len(_opt_calls) <= main.OPTIMIZE_AI_PAGES and any(a.get("suggestions", {}).get("titles") for a in _sum2["actions"]),
+      (_opt_calls, [a.get("suggestions") for a in _sum2["actions"]][:3]))
+# Ruterne: start, status, dobbeltklik og "Løst"
+_oc = TestClient(main.app)
+main.create_user("optimering@example.dk", "optimering-pass")
+_oc.post("/login", data={"email": "optimering@example.dk", "password": "optimering-pass"}, follow_redirects=False)
+main.OPTIMIZE_STATE["running"] = True
+r = _oc.post("/optimize/run", data={"scope": "monitors", "url": _ob}, follow_redirects=False)
+check("optimering: et andet klik mens den koerer starter ikke en ny", "opt=koerer" in r.headers.get("location", ""),
+      r.headers.get("location"))
+main.OPTIMIZE_STATE["running"] = False
+r = _oc.post("/optimize/run", data={"scope": "monitors", "url": _ob}, follow_redirects=False)
+check("optimering: knappen starter en koersel og sender tilbage til Cockpit", "opt=startet" in r.headers.get("location", ""),
+      r.headers.get("location"))
+for _ in range(100):
+    if not main.OPTIMIZE_STATE["running"]:
+        break
+    main.time.sleep(0.1)
+_st = _oc.get("/api/optimize/status").json()
+check("optimering: status-API giver fremdrift og seneste rapport", _st["running"] is False and _st["latest"]
+      and _st["latest"]["label"] == "Monitors", _st)
+r = _oc.post("/optimize/run", data={"scope": "alt", "url": "ikke en adresse"}, follow_redirects=False)
+check("optimering: en ugyldig adresse forklares i stedet for at starte", "opt=fejl" in r.headers.get("location", ""),
+      r.headers.get("location"))
+_last = main.optimize_latest()
+_oc.post("/optimize/done", data={"run_id": str(_last["id"]), "action_id": "0"}, follow_redirects=False)
+check("optimering: en handling kan markeres som løst", main.optimize_latest()["actions"][0]["done"] is True
+      and main.optimize_latest()["open"] == len(_last["actions"]) - 1)
+_page = _oc.get("/?tab=cockpit").text
+check("optimering: kortet vises i Cockpit med knapper til hele projektet og de enkelte dele",
+      "⚡ Optimér hele projektet" in _page and 'value="onpage"' in _page and 'value="indhold"' in _page
+      and "Seneste rapport" in _page, _page[:100])
+main.OPENROUTER_API_KEY, main.SERPAPI_KEY = _saved_opt
+
+# --- v7.30.0: flows - kaedede funktioner, plan og auto-optimering ---
+from datetime import datetime as _dt
+_mon = _dt(2026, 11, 9, 10, 30)          # mandag 10:30
+check("flow: plan - dagligt kl. 07 efter kl. 10 er i morgen", main.flow_next_run("daily@07", _mon) == "2026-11-10T07:00:00")
+check("flow: plan - dagligt kl. 12 er i dag", main.flow_next_run("daily@12", _mon) == "2026-11-09T12:00:00")
+check("flow: plan - onsdag kl. 06 fra en mandag", main.flow_next_run("weekly@3@06", _mon) == "2026-11-11T06:00:00")
+check("flow: plan - mandag kl. 06 efter kl. 10 er naeste mandag", main.flow_next_run("weekly@1@06", _mon) == "2026-11-16T06:00:00")
+check("flow: plan - hver time og manuel", main.flow_next_run("hourly", _mon) == "2026-11-09T11:00:00"
+      and main.flow_next_run("manual", _mon) is None)
+check("flow: ugyldige planer afvises", not any(main.flow_schedule_valid(x) for x in ("daily@24", "weekly@8@06", "cron * *", "")))
+_cl = main.flow_clean_steps([{"block": "crawl"}, {"block": "rm -rf"}, {"block": "brief", "when": "hvis_fund",
+                             "params": {"keyword": " messing ", "max": "x", "evil": "1"}}, {"block": "note", "when": "??"}])
+check("flow: trin valideres (ukendte blokke, parametre og betingelser fjernes)",
+      _cl == [{"block": "crawl", "when": "altid", "params": {}},
+              {"block": "brief", "when": "hvis_fund", "params": {"keyword": "messing"}},
+              {"block": "note", "when": "altid", "params": {}}], _cl)
+check("flow: hoejst FLOW_MAX_STEPS trin", len(main.flow_clean_steps([{"block": "note"}] * 30)) == main.FLOW_MAX_STEPS)
+check("flow: navn, trin og plan kraeves",
+      main.flow_save("", "manual", [{"block": "note"}])[1] and main.flow_save("x", "manual", [])[1]
+      and main.flow_save("x", "hver dag", [{"block": "note"}])[1])
+
+# En flow med egne testblokke: betingelser og deling af ctx mellem blokke
+_calls = []
+_real_blocks = dict(main.FLOW_BLOCKS)
+main.FLOW_BLOCKS["t_find"] = ("Find", "Analyse", "", lambda ctx, p: (_calls.append("find"), ctx.update(striking=["messing tandhjul"]),
+                                                                        (True, "fandt 1", 1))[-1], [])
+main.FLOW_BLOCKS["t_tom"] = ("Tom", "Analyse", "", lambda ctx, p: (_calls.append("tom"), (True, "intet", 0))[-1], [])
+main.FLOW_BLOCKS["t_brug"] = ("Brug", "Generér", "", lambda ctx, p: (_calls.append("brug:" + ",".join(main._flow_kw(ctx, p))),
+                                                                       (True, "ok", 1))[-1], ["keyword"])
+main.FLOW_BLOCKS["t_boom"] = ("Boom", "Handling", "", lambda ctx, p: 1 / 0, [])
+_fid, _err = main.flow_save("Test-flow", "manual", [{"block": "t_find"}, {"block": "t_brug", "when": "hvis_fund"},
+                                                    {"block": "t_tom"}, {"block": "t_brug", "when": "hvis_fund"},
+                                                    {"block": "t_boom"}, {"block": "t_brug", "when": "hvis_hoej"},
+                                                    {"block": "note"}])
+_res = main.run_flow_sync(_fid, "test")
+_st = [(s["block"], s["ok"]) for s in _res["steps"]]
+check("flow: en blok bruger det, en tidligere blok fandt (soegeord deles)", "brug:messing tandhjul" in _calls, _calls)
+check("flow: 'kun hvis fund' springes over efter et tomt trin", _st[3] == ("t_brug", None) and _calls.count("brug:messing tandhjul") == 1, _st)
+check("flow: en blok der fejler vaelter ikke resten", _st[4] == ("t_boom", False) and _st[-1] == ("note", True)
+      and _res["status"] == "delvist", _st)
+check("flow: 'kun hvis hoej' springes over uden hoej prioritet", _st[5] == ("t_brug", None), _st)
+with main.get_db() as db:
+    _fr = db.execute("SELECT * FROM flow_runs WHERE flow_id=? ORDER BY id DESC", (_fid,)).fetchone()
+    _note = db.execute("SELECT content FROM notes ORDER BY id DESC LIMIT 1").fetchone()
+check("flow: koerslen logges med trin og opsummering", _fr and _fr["status"] == "delvist"
+      and len(json.loads(_fr["log_json"])["steps"]) == 7)
+check("flow: note-blokken skriver resultatet i Noter", _note and "Test-flow" in _note["content"], _note and _note["content"][:80])
+main.FLOW_BLOCKS.clear(); main.FLOW_BLOCKS.update(_real_blocks)
+
+# Indholdsmaskinen: artikel -> kvalitetstjek -> WordPress KUN som kladde, og hoejst FLOW_MAX_ARTICLES
+_saved_flow = (main.OPENROUTER_API_KEY, main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD, main.generate_article_ai, main.wp_push_draft)
+_pushed = []
+_good_art = "<h2>Hvad</h2><p>" + ("messing tandhjul damp " * 160) + "</p><h2>Hvordan</h2><p><a href='/a'>a</a> <a href='/b'>b</a></p>"
+main.OPENROUTER_API_KEY, main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD = "sk-test", "https://wp.example.dk", "u", "p"
+main.generate_article_ai = lambda kw, st=None: _good_art.replace("messing tandhjul", kw) if "kort" not in kw else "<p>for kort</p>"
+main.wp_push_draft = lambda title, content: (_pushed.append(title), 4242)[-1]
+_fid2, _ = main.flow_save("Maskine", "manual", [{"block": "artikel", "params": {"keyword": "messing tandhjul", "max": "9"}},
+                                               {"block": "artikel", "params": {"keyword": "kort emne"}},
+                                               {"block": "wp_kladde", "when": "hvis_fund"}])
+_res2 = main.run_flow_sync(_fid2, "test")
+check("flow: kun artikler der bestaar kvalitetstjekket sendes til WordPress", _pushed == ["Guide: messing tandhjul"], _pushed)
+check("flow: WordPress-blokken siger at intet er udgivet", "intet er udgivet" in _res2["steps"][2]["note"], _res2["steps"][2])
+with main.get_db() as db:
+    _wa = db.execute("SELECT status, wp_link FROM articles WHERE keyword='messing tandhjul' ORDER BY id DESC").fetchone()
+check("flow: artiklen markeres som kladde i WordPress", _wa and "kladde" in _wa["status"] and "4242" in _wa["wp_link"], _wa and dict(_wa))
+_src = open(os.path.join(ROOT, "app", "main.py"), encoding="utf-8").read()
+check("flow: WordPress-push i flows bruger kun wp_push_draft (status draft)",
+      '"status": "draft"' in _src and "_flow_wp_draft" in _src and '"status": "publish"' not in _src)
+_n_art = []
+main.generate_article_ai = lambda kw, st=None: (_n_art.append(kw), _good_art)[-1]
+main.run_flow_sync(main.flow_save("Loft", "manual", [{"block": "artikel", "params": {"max": "5"}}])[0], "test")
+check("flow: hoejst FLOW_MAX_ARTICLES AI-artikler pr. blok", len(_n_art) <= main.FLOW_MAX_ARTICLES, _n_art)
+main.OPENROUTER_API_KEY, main.WP_URL, main.WP_USER, main.WP_APP_PASSWORD, main.generate_article_ai, main.wp_push_draft = _saved_flow
+_ai_keep = main.OPENROUTER_API_KEY
+main.OPENROUTER_API_KEY, main.WP_URL = "", ""
+_res3 = main.run_flow_sync(main.flow_save("Uden noegler", "manual", [{"block": "artikel"}, {"block": "wp_kladde"}])[0], "test")
+check("flow: blokke uden noegle springes over med forklaring", [s["ok"] for s in _res3["steps"]] == [None, None]
+      and "OPENROUTER_API_KEY" in _res3["steps"][0]["note"], _res3["steps"])
+main.OPENROUTER_API_KEY, main.WP_URL = _ai_keep, _saved_flow[1]
+main.FLOW_BLOCKS["t_x"] = ("X", "Analyse", "", lambda ctx, p: (True, "", 0), [])
+_gone = main.flow_save("Med fjernet blok", "manual", [{"block": "t_x"}])[0]
+main.FLOW_BLOCKS.pop("t_x")
+
+
+# Skabeloner, planlaegger og ruter
+_fc = TestClient(main.app)
+main.create_user("flows@example.dk", "flows-pass-1")
+_fc.post("/login", data={"email": "flows@example.dk", "password": "flows-pass-1"}, follow_redirects=False)
+for _k in main.FLOW_TEMPLATES:
+    r = _fc.post("/flows/template", data={"key": _k}, follow_redirects=False)
+check("flow: alle skabeloner kan oprettes", "flow=ok" in r.headers.get("location", "")
+      and len([f for f in main.flow_rows() if f["template"]]) == len(main.FLOW_TEMPLATES), r.headers.get("location"))
+check("flow: skabelonerne bruger kun kendte blokke", all(s["block"] in main.FLOW_BLOCKS for t in main.FLOW_TEMPLATES.values()
+                                                       for s in t["steps"]))
+_daily = next(f for f in main.flow_rows() if f["template"] == "daglig_sundhed")
+check("flow: en planlagt flow faar et naeste tidspunkt", _daily["next_run_at"] and _daily["schedule"] == "daily@07", _daily["next_run_at"])
+r = _fc.post("/flows/save", data={"name": "Min flow", "schedule": "weekly", "weekday": "2", "hour": "9",
+                                  "block_0": "crawl", "when_0": "altid", "block_1": "", "block_2": "note", "when_2": "hvis_fund"},
+             follow_redirects=False)
+_mine = next(f for f in main.flow_rows() if f["name"] == "Min flow")
+check("flow: egen flow gemmes fra formularen (tomme raekker springes over)",
+      _mine["schedule"] == "weekly@2@09" and [s["block"] for s in _mine["steps"]] == ["crawl", "note"], _mine)
+_fc.post("/flows/save", data={"id": str(_mine["id"]), "name": "Min flow 2", "schedule": "manual", "block_0": "note"},
+         follow_redirects=False)
+check("flow: redigering opdaterer i stedet for at oprette", next(f for f in main.flow_rows() if f["id"] == _mine["id"])["name"] == "Min flow 2"
+      and not any(f["name"] == "Min flow" for f in main.flow_rows()))
+r = _fc.post("/flows/save", data={"name": "Tom", "schedule": "manual"}, follow_redirects=False)
+check("flow: en flow uden blokke forklares", "flow=fejl" in r.headers.get("location", ""), r.headers.get("location"))
+with main.get_db() as db:
+    db.execute("UPDATE flows SET enabled=0")
+    db.execute("UPDATE flows SET enabled=1, schedule='daily@07', next_run_at='2000-01-01T00:00:00' WHERE id=?", (_mine["id"],))
+_ran = main.run_due_flows_sync()
+_m2 = next(f for f in main.flow_rows() if f["id"] == _mine["id"])
+check("flow: planlaeggeren koerer en flow, hvis tid er kommet", _ran == 1 and _m2["last_run_at"], (_ran, _m2["last_run_at"]))
+check("flow: planlaeggeren springer manuelle og slaaede-fra flows over", main.run_due_flows_sync() == 0)
+_fc.post("/flows/toggle", data={"id": str(_daily["id"])}, follow_redirects=False)
+_d2 = next(f for f in main.flow_rows() if f["id"] == _daily["id"])
+check("flow: slaas en flow til igen, regnes naeste koersel fra nu (koerer ikke straks)",
+      _d2["enabled"] == 1 and _d2["next_run_at"] > _dt.now().isoformat(timespec="seconds"), _d2["next_run_at"])
+main.FLOW_STATE["running"] = True
+r = _fc.post("/flows/run", data={"id": str(_mine["id"])}, follow_redirects=False)
+check("flow: kun én flow ad gangen", "flow=fejl" in r.headers.get("location", ""), r.headers.get("location"))
+r = _fc.post("/optimize/run", data={"scope": "monitors"}, follow_redirects=False)
+check("flow: 1-klik optimering venter, mens en flow koerer", "opt=koerer" in r.headers.get("location", ""))
+main.FLOW_STATE["running"] = False
+r = _fc.post("/flows/run", data={"id": str(_mine["id"])}, follow_redirects=False)
+check("flow: 'Koer nu' starter flowen", "flow=ok" in r.headers.get("location", ""), r.headers.get("location"))
+for _ in range(100):
+    if not main.FLOW_STATE["running"]:
+        break
+    main.time.sleep(0.1)
+check("flow: status-API melder faerdig", _fc.get("/api/flows/status").json()["running"] is False)
+_pg = _fc.get("/?tab=flows").text
+check("flow: fanen viser skabeloner, flows, editor og koersler",
+      "🔁 Flows" in _pg and "Færdige flows" in _pg and "Dine flows" in _pg and "Byg din egen flow" in _pg
+      and "Seneste kørsler" in _pg and "Min flow 2" in _pg)
+check("flow: fanen taaler en flow med en blok, der ikke findes laengere",
+      _gone and "Med fjernet blok" in _pg and "t_x" in _pg)
+_pe = _fc.get(f"/?tab=flows&edit={_mine['id']}").text
+check("flow: redigering udfylder editoren", "Redigér &#39;Min flow 2&#39;" in _pe or "Redigér 'Min flow 2'" in _pe)
+_fc.post("/flows/delete", data={"id": str(_mine["id"])}, follow_redirects=False)
+check("flow: en flow kan slettes", not any(f["id"] == _mine["id"] for f in main.flow_rows()))
+_srt = main._flow_sorted([{"priority": "lav"}, {"priority": "høj", "score": 50}, {"priority": "middel"}, {"priority": "høj", "score": 10}])
+check("flow: fund sorteres med hoej prioritet (og lavest score) foerst",
+      [(a["priority"], a.get("score")) for a in _srt] == [("høj", 10), ("høj", 50), ("middel", None), ("lav", None)], _srt)
+check("flow: 'flows' er et gyldigt fane-navn og har et heartbeat-job",
+      "flows" in main.DASHBOARD_TABS and "flows" in main.JOB_MAX_AGE_HOURS)
 
 srv.shutdown()
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)

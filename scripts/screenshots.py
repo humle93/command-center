@@ -23,6 +23,7 @@ import sys
 TABS = [
     ("cockpit", "cc-cockpit"),
     ("chat", "cc-chat"),
+    ("flows", "cc-flows"),
     ("seo", "cc-seo"),
     ("keywords", "cc-keywords"),
     ("articles", "cc-articles"),

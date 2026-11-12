@@ -9451,7 +9451,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
 
     {% if not ai_enabled or not wp_enabled %}
     <div class="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-3 text-xs text-amber-300">
-        Setup: AI {{ '✅' if ai_enabled else '❌ (OPENROUTER_API_KEY)' }} · WordPress {{ '✅' if wp_enabled else '❌ (WP_URL/WP_USER/WP_APP_PASSWORD)' }} · SerpAPI {{ '✅' if serpapi_enabled else '❌ (SERPAPI_KEY)' }} · Telegram {{ '✅' if telegram_enabled else '— (valgfrit)' }} — se .env.example
+        Setup: AI {{ '✅' if ai_enabled else '❌ (OPENROUTER_API_KEY)' }} · WordPress {{ '✅' if wp_enabled else '❌ (WP_URL/WP_USER/WP_APP_PASSWORD)' }} · SerpAPI {{ '✅' if serpapi_enabled else '❌ (SERPAPI_KEY)' }} · Telegram {{ '✅' if telegram_enabled else '— (valgfrit)' }} — <a href="/?tab=moduler#forbindelser" class="underline">sæt nøglerne under Moduler → Forbindelser</a>
     </div>
     {% endif %}
 

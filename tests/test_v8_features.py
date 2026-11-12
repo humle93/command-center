@@ -1,5 +1,8 @@
 """In-process tests for the v8-plan features: quality gate, API budget guard, /health.
 Usage: python3 tests/test_v8_features.py   (from the repo root, requirements installed)"""
+import time as _time_mod
+_TEST_STARTED = _time_mod.time() - 1
+
 import os, sys, shutil, threading, json, io, tarfile, tempfile, base64, hmac, hashlib, urllib.parse
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -2591,5 +2594,11 @@ check("historik: crawleren er uændret (max 100 sider, 0,4 s pause)",
 
 srv.shutdown()
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)
+# Testene laver rigtige backups i app/backups; fjern dem, der blev lavet under denne koersel.
+_bdir = os.path.join(ROOT, "app", "backups")
+if os.path.isdir(_bdir):
+    for _f in os.listdir(_bdir):
+        if _f.endswith(".db") and os.path.getmtime(os.path.join(_bdir, _f)) >= _TEST_STARTED:
+            os.remove(os.path.join(_bdir, _f))
 print("ALL PASS" if not FAILED else f"{len(FAILED)} FAILED")
 sys.exit(1 if FAILED else 0)

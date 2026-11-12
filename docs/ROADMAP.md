@@ -31,6 +31,7 @@ findes.
 
 | Version | Indhold |
 | --- | --- |
+| **v7.32.0** | Længere historik: `KEEP_DAYS`/`KEEP_ROWS`/`BACKUP_KEEP` (1 år, 500 kørsler, 60 backups); crawl-tempo og -loft uændret af hensyn til fair use på den delte server · 3 `historik:`-checks. Næste: crawl-historik over tid (kræver at forespørgsler på `seopages` filtrerer på `run_id`). Verifikation: `grep -n 'KEEP_DAYS' app/main.py` |
 | **v7.31.0** | Gratis AI-reserve: kreditfejl (402) → `AI_FREE_MODELS` (`nvidia/nemotron-3-ultra-550b-a55b:free`, `google/gemma-4-31b-it:free`, `openrouter/free`) via `models`-listen + info-alarm · 8 `gratis:`-checks. Samme reserve i Steamgears Autopilot 7.81.0. Verifikation: `grep -n 'def ai_wants_free_retry' app/main.py` |
 | **v7.30.1** | Standard-`AI_MODEL` rettet til `google/gemini-3.8-flash`; grænsen mod Steamgears Autopilot skrevet ned (pluginnet = sociale opslag, CC = analyse/SEO/artikler som kladder). Verifikation: `grep -n 'gemini-3.8-flash' app/main.py` |
 | **v7.30.0** | **Flows** — kæder af 17 blokke (analyse, generér, handling) med betingelser og plan (manuelt/time/dag/uge), 4 færdige flows inkl. "Indholdsmaskine" (søgeord tæt på toppen → plan → AI-artikel → WordPress-kladde) · aldrig udgivelse, kvalitetstjek før WordPress, AI-loft, én kørsel ad gangen · fanen 🔁 Flows med editor og kørselslog · 40 `flow:`-checks + browserforløb uden JS-fejl. Næste skridt: "Anvend"-blok, der skriver godkendte titler/meta til WordPress, og en blok der reagerer på alarmer. Verifikation: `grep -n 'def run_flow_sync' app/main.py` |

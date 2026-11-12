@@ -2170,6 +2170,23 @@ check("flow: fund sorteres med hoej prioritet (og lavest score) foerst",
 check("flow: 'flows' er et gyldigt fane-navn og har et heartbeat-job",
       "flows" in main.DASHBOARD_TABS and "flows" in main.JOB_MAX_AGE_HOURS)
 
+
+# ---------- lang historik (v7.32.0) ----------
+_old = lambda d: (main.datetime.now() - main.timedelta(days=d)).isoformat(timespec="seconds")
+with main.get_db() as db:
+    db.execute("INSERT INTO check_history (domain_id, status, response_time, ssl_days, checked_at) VALUES (999,'up',1,1,?)", (_old(200),))
+    db.execute("INSERT INTO check_history (domain_id, status, response_time, ssl_days, checked_at) VALUES (999,'up',1,1,?)", (_old(400),))
+main.cleanup_old_data()
+with main.get_db() as db:
+    _kept = [r[0] for r in db.execute("SELECT checked_at FROM check_history WHERE domain_id=999").fetchall()]
+    db.execute("DELETE FROM check_history WHERE domain_id=999")
+check("historik: tjek fra for 200 dage siden bliver, 400 dage ryddes", len(_kept) == 1 and _kept[0][:10] == _old(200)[:10], _kept)
+check("historik: lofterne er hævet (1 år, 500 kørsler, 60 backups)",
+      main.KEEP_DAYS["check_history"] == 365 and main.KEEP_ROWS["flow_runs"] == 500 and main.BACKUP_KEEP == 60)
+check("historik: crawleren er uændret (max 100 sider, 0,4 s pause)",
+      "max(5, min(int(max_pages or 30), 100))" in open(os.path.join(ROOT, "app", "main.py")).read()
+      and "time.sleep(0.4)" in open(os.path.join(ROOT, "app", "main.py")).read())
+
 srv.shutdown()
 shutil.rmtree(os.path.join(ROOT, "app", "data"), ignore_errors=True)
 print("ALL PASS" if not FAILED else f"{len(FAILED)} FAILED")

@@ -1,9 +1,13 @@
-# Command Center v7.31 PRO
+# Command Center v7.32 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
+
+## Nyheder i v7.32
+
+- **Længere historik (v7.32.0)** — CC gemmer nu 1 år oppetidstjek, sundhedsscore, søgeordsidéer og MCP-audit (før 90-180 dage), 180 dage løste alarmer (før 30), 500 flow-kørsler og indholdsmålinger (før 50), 200 optimeringer (før 20) og 60 backups pr. type (før 14, `CC_BACKUP_KEEP`). Det koster kun diskplads — ingen ekstra kald. Crawleren er **bevidst uændret** (højst 100 sider, 0,4 s pause), så en delt server og de sider, der crawles, ikke mærker noget. Login-forsøg (IP-adresser) gemmes stadig kun 30 dage.
 
 ## Nyheder i v7.31
 

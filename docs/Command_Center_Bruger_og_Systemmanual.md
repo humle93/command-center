@@ -311,6 +311,20 @@ Cockpit-panelet viser **installeret commit** og **seneste commit på `main`**:
 Opdateringen kører kontrollen automatisk, **før** den skriver noget: er `install.sh` på disken ældre end koden, stopper den med kode 7 og rører ingen filer. Beskeden siger hvad man gør i stedet (`git checkout -- install.sh` eller `git pull`), og at intet er ændret. Grunden er, at en gammel installatør ellers kan ligge klar og rulle koden tilbage, næste gang nogen kører den. `--check` og `--version` skriver intet og virker uanset. `bash scripts/restart.sh` genstarter uden at opdatere
 - Status som JSON: `GET /api/update` (inkl. `restart_mode`/`auto_restart`), `POST /api/update/check`, `POST /api/update/apply` (bruges af scriptet). `/self-update` er alias for `/update/apply`
 
+## Historik og diskplads (v7.32.0)
+
+| Data | Gemmes |
+|---|---|
+| Oppetidstjek, sundhedsscore, søgeordsidéer, MCP-audit | 1 år |
+| Løste alarmer | 180 dage |
+| Flow-kørsler, indholdsmålinger | de seneste 500 |
+| 1-klik optimeringer | de seneste 200 |
+| Backups | de seneste 60 pr. type (`CC_BACKUP_KEEP`) |
+| Login-forsøg (IP-adresser) | 30 dage (uændret, privatliv) |
+| Crawl | det nyeste + det forrige (til sammenligning) |
+
+Længere historik bruger kun diskplads. Crawleren er bevidst ikke gjort hurtigere eller større (højst 100 sider, 0,4 s pause mellem sider), så den ikke belaster en delt server eller de sider, den henter.
+
 ## Flows (v7.30.0)
 
 Fanen **🔁 Flows** kæder funktionerne sammen, så de kører af sig selv.

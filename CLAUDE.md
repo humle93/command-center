@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 11. november 2026 · **Version:** 7.31.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 11. november 2026 · **Version:** 7.32.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,12 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Længere historik (v7.32.0, 12. november)
+- **Baggrund:** serveren har masser af plads (8 TB, 50 Gbit), men er delt — brugeren: "så længe det ik påvirker fair usage … vil ik ødelægge noget for de andre".
+- **Valg:** kun opbevaring er hævet (`KEEP_DAYS`, `KEEP_ROWS`, `BACKUP_KEEP`/`CC_BACKUP_KEEP`). Crawl-loft (100), pause (0,4 s) og jobfrekvenser er **uændrede**; `login_attempts` forbliver 30 dage (IP-adresser). Visningerne har stadig `LIMIT`, så siderne bliver ikke tungere.
+- **Ikke gjort:** crawl-historik over tid — `seopages`-forespørgsler skal først filtrere på `run_id` overalt.
+- **Test:** 3 `historik:`-checks.
 
 ### Gratis AI-reserve (v7.31.0, 12. november)
 - **Baggrund:** brugeren: "openrouter har en auto/free som vi kan tilføje". Målt fra steamgears.eu (containeren når ikke openrouter.ai): `openrouter/free` har pris 0, og `openrouter/auto` er betalt (pris -1 = variabel), så det er kun `free`, der bruges som reserve.

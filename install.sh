@@ -83,6 +83,8 @@ UPDATE_RESTART_CMD=
 OPENROUTER_API_KEY=
 AI_MODEL=google/gemini-3.8-flash
 # Gratis reserve ved manglende kredit (402), proeves i raekkefoelge. Tom = slaa reserven fra.
+# Antal backups der gemmes pr. type (daglig, pre-update ...). Standard 60.
+CC_BACKUP_KEEP=60
 AI_FREE_MODELS=nvidia/nemotron-3-ultra-550b-a55b:free,google/gemma-4-31b-it:free,openrouter/free
 # Valgfri: anden OpenAI-kompatibel adresse (budget-loftet AI_MONTHLY_LIMIT foelger vaertsnavnet).
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
@@ -222,6 +224,11 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_BASE_URL = (os.environ.get("OPENROUTER_BASE_URL", "").strip()
                        or "https://openrouter.ai/api/v1").rstrip("/")
 AI_MODEL = os.environ.get("AI_MODEL", "google/gemini-3.8-flash")
+# Historik (v7.32.0): kun disk, ingen ekstra kald ud af huset. Tallene er sat efter en delt server
+# med god plads; crawleren er bevidst IKKE gjort hurtigere eller stoerre (fair use + hoeflighed).
+KEEP_DAYS = {"check_history": 365, "alarms": 180, "health_history": 365, "keyword_ideas": 365, "api_audit": 365}
+KEEP_ROWS = {"content_audits": 500, "flow_runs": 500, "optimize_runs": 200}
+BACKUP_KEEP = max(1, int(os.environ.get("CC_BACKUP_KEEP", "60") or 60))
 # Gratis reserve naar OpenRouter afviser AI_MODEL for manglende kredit (402). Prøves i raekkefoelge via
 # OpenRouters "models"-liste; openrouter/free er OpenRouters egen router over de gratis modeller.
 # Tom vaerdi slaar reserven fra.
@@ -260,10 +267,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.31.0"
+APP_VERSION = "7.32.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.32.0", "Laengere historik: 1 aar oppetid/sundhed/soegeordsideer, 500 flow-koersler og indholdsmaalinger, 60 backups - crawleren er uaendret (fair use)"),
     ("7.31.0", "Gratis reserve: mangler OpenRouter-kredit, svarer en gratis model (openrouter/free) i stedet for en fejl - og det bliver en alarm"),
     ("7.30.1", "Standardmodellen er rettet til google/gemini-3.8-flash - den gamle slug findes ikke hos OpenRouter"),
     ("7.30.0", "Flows: kaed funktionerne sammen og lad dem koere automatisk (time/dag/uge) - 17 blokke, 4 faerdige flows, betingelser, og alt til WordPress bliver kladder"),
@@ -297,7 +305,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Gratis AI-reserve via openrouter/free, naar kreditten slipper op"
+NEWEST_LINE = "Laengere historik (1 aar) uden ekstra belastning af serveren"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -811,11 +819,11 @@ def cleanup_old_data():
         return (now - timedelta(days=days)).isoformat(timespec="seconds")
 
     with get_db() as db:
-        db.execute("DELETE FROM check_history WHERE checked_at < ?", (cutoff(90),))
-        db.execute("DELETE FROM alarms WHERE resolved=1 AND created_at < ?", (cutoff(30),))
-        db.execute("DELETE FROM health_history WHERE checked_at < ?", (cutoff(180),))
-        db.execute("DELETE FROM keyword_ideas WHERE created_at < ?", (cutoff(180),))
-        db.execute("DELETE FROM api_audit WHERE created_at < ?", (cutoff(90),))
+        db.execute("DELETE FROM check_history WHERE checked_at < ?", (cutoff(KEEP_DAYS["check_history"]),))
+        db.execute("DELETE FROM alarms WHERE resolved=1 AND created_at < ?", (cutoff(KEEP_DAYS["alarms"]),))
+        db.execute("DELETE FROM health_history WHERE checked_at < ?", (cutoff(KEEP_DAYS["health_history"]),))
+        db.execute("DELETE FROM keyword_ideas WHERE created_at < ?", (cutoff(KEEP_DAYS["keyword_ideas"]),))
+        db.execute("DELETE FROM api_audit WHERE created_at < ?", (cutoff(KEEP_DAYS["api_audit"]),))
         # en noegle der blev vist men aldrig laest (fx lukket fane) skal ikke blive liggende i klartekst
         row = db.execute("SELECT value FROM settings WHERE key='api_key_once'").fetchone()
         if row:
@@ -4066,7 +4074,7 @@ def backup_db_sync(tag: str = "daglig"):
         dst.close()
         src.close()
         backups = sorted(f for f in os.listdir(bdir) if f.startswith("cc-" + tag + "-") and f.endswith(".db"))
-        for old in backups[:-14]:
+        for old in backups[:-BACKUP_KEEP]:
             try:
                 os.remove(os.path.join(bdir, old))
             except OSError:
@@ -5461,7 +5469,7 @@ async def growth_optimize(request: Request):
              jsonlib.dumps(result["terms"], ensure_ascii=False),
              jsonlib.dumps(result["fixes"], ensure_ascii=False), now_iso()),
         )
-        db.execute("DELETE FROM content_audits WHERE id NOT IN (SELECT id FROM content_audits ORDER BY id DESC LIMIT 50)")
+        db.execute("DELETE FROM content_audits WHERE id NOT IN (SELECT id FROM content_audits ORDER BY id DESC LIMIT ?)", (KEEP_ROWS["content_audits"],))
     return JSONResponse(result)
 
 
@@ -7375,7 +7383,7 @@ def optimize_project_sync(run_id: int, scope: str, url: str) -> dict:
     with get_db() as db:
         db.execute("UPDATE optimize_runs SET status=?, finished_at=?, summary_json=? WHERE id=?",
                    (status, now_iso(), jsonlib.dumps(summary, ensure_ascii=False), run_id))
-        db.execute("DELETE FROM optimize_runs WHERE id NOT IN (SELECT id FROM optimize_runs ORDER BY id DESC LIMIT 20)")
+        db.execute("DELETE FROM optimize_runs WHERE id NOT IN (SELECT id FROM optimize_runs ORDER BY id DESC LIMIT ?)", (KEEP_ROWS["optimize_runs"],))
         add_alarm(db, "optimering", f"1-klik optimering ({label}) færdig: {counts['høj']} høj, {counts['middel']} middel, "
                                     f"{counts['lav']} lav prioritet", "info")
     OPTIMIZE_STATE.update({"running": False, "step": len(parts)})
@@ -7829,7 +7837,7 @@ def run_flow_sync(flow_id: int, trigger: str = "manuel", run_id: int | None = No
                                                       "actions": _flow_sorted(ctx["actions"])[:40]}, ensure_ascii=False), run_id))
         db.execute("UPDATE flows SET last_run_at=?, last_status=?, next_run_at=? WHERE id=?",
                    (now_iso(), status, flow_next_run(f["schedule"]), flow_id))
-        db.execute("DELETE FROM flow_runs WHERE id NOT IN (SELECT id FROM flow_runs ORDER BY id DESC LIMIT 50)")
+        db.execute("DELETE FROM flow_runs WHERE id NOT IN (SELECT id FROM flow_runs ORDER BY id DESC LIMIT ?)", (KEEP_ROWS["flow_runs"],))
     return {"ok": True, "run_id": run_id, "status": status, "steps": log, "summary": summary}
 
 
@@ -10637,12 +10645,16 @@ EOF_USERSVC
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.31 PRO
+# Command Center v7.32 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
+
+## Nyheder i v7.32
+
+- **Længere historik (v7.32.0)** — CC gemmer nu 1 år oppetidstjek, sundhedsscore, søgeordsidéer og MCP-audit (før 90-180 dage), 180 dage løste alarmer (før 30), 500 flow-kørsler og indholdsmålinger (før 50), 200 optimeringer (før 20) og 60 backups pr. type (før 14, `CC_BACKUP_KEEP`). Det koster kun diskplads — ingen ekstra kald. Crawleren er **bevidst uændret** (højst 100 sider, 0,4 s pause), så en delt server og de sider, der crawles, ikke mærker noget. Login-forsøg (IP-adresser) gemmes stadig kun 30 dage.
 
 ## Nyheder i v7.31
 

@@ -81,7 +81,7 @@ UPDATE_RESTART_CMD=
 # AI_MODEL er en OpenRouter-slug (udbyder/model), se https://openrouter.ai/models.
 # AIMLAPI_KEY bruges ikke laengere (v7.25.0); staar den alene, kommer der en advarsel ved opstart.
 OPENROUTER_API_KEY=
-AI_MODEL=google/gemini-3-8-flash
+AI_MODEL=google/gemini-3.8-flash
 # Valgfri: anden OpenAI-kompatibel adresse (budget-loftet AI_MONTHLY_LIMIT foelger vaertsnavnet).
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 # Chat-fanen (v7.26): tom CHAT_MODEL = AI_MODEL. Modellen skal kunne bruge tools (function calling).
@@ -219,7 +219,7 @@ GITHUB_REPO = os.environ.get("GITHUB_REPO", "humle93/command-center").strip()
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_BASE_URL = (os.environ.get("OPENROUTER_BASE_URL", "").strip()
                        or "https://openrouter.ai/api/v1").rstrip("/")
-AI_MODEL = os.environ.get("AI_MODEL", "google/gemini-3-8-flash")
+AI_MODEL = os.environ.get("AI_MODEL", "google/gemini-3.8-flash")
 # aimlapi er udfaset: en tilbagebleven noegle bruges ikke, men giver en advarsel ved opstart.
 LEGACY_AIMLAPI_KEY_SET = bool(os.environ.get("AIMLAPI_KEY", "").strip())
 WP_URL = os.environ.get("WP_URL", "").strip()                # fx https://steamgears.eu
@@ -253,10 +253,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.30.0"
+APP_VERSION = "7.30.1"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.30.1", "Standardmodellen er rettet til google/gemini-3.8-flash - den gamle slug findes ikke hos OpenRouter"),
     ("7.30.0", "Flows: kaed funktionerne sammen og lad dem koere automatisk (time/dag/uge) - 17 blokke, 4 faerdige flows, betingelser, og alt til WordPress bliver kladder"),
     ("7.29.0", "1-klik optimering i Cockpit: hele projektet eller en enkelt del (teknik, on-page, indhold, soegeord, monitors) giver én prioriteret liste med faerdige forslag - intet aendres paa sitet"),
     ("7.28.1", "Funktionsrevision: AI-omskrivning af titel/meta gik ned med en AI-noegle, og en pris-monitor kunne ikke oprettes uden et meningsloest felt - begge rettet"),
@@ -10607,6 +10608,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 
 ## Nyheder i v7.30
 
+- **v7.30.1:** standardmodellen er `google/gemini-3.8-flash` (den gamle `google/gemini-3-8-flash` findes ikke hos OpenRouter). Har du `AI_MODEL=` i `.env`, så ret den dér.
 - **Flows — kæd funktionerne sammen til auto-optimering (v7.30.0)** — ny fane **🔁 Flows**. En flow er en kæde af op til 10 **blokke**, der kører i rækkefølge og deler resultater: *Analyse* (teknik, crawl, on-page, indholdsscore, søgeord, monitors, konkurrenter, content gap, backlinks), *Generér* (søgeordsidéer, AI-titler/meta, indholdsplan, AI-artikel) og *Handling* (WordPress-kladde, growth-autopilot, rapport til Alarmer/kanaler, note). "Søgeord" finder ord på plads 4-20, og "Indholdsplan"/"Skriv artikel" bruger dem automatisk. Hver blok kan have en betingelse (*altid*, *kun hvis forrige trin fandt noget*, *kun hvis der er høj prioritet*), og flowen kører **manuelt, hver time, dagligt eller ugentligt**. Fire færdige flows: **Daglig sundhed**, **Ugentlig optimering**, **Indholdsmaskine** (søgeord tæt på toppen → plan → AI-artikel → WordPress-kladde) og **Konkurrent-overvågning**. Sikkerhed: alt til WordPress er **kladder** (aldrig udgivet), kun artikler der består kvalitetstjekket sendes, højst 2 AI-artikler pr. blok, én kørsel ad gangen (også mod 1-klik optimeringen), og en blok uden nøgle springes over med en forklaring. Hver kørsel logges trin for trin
 
 ## Nyheder i v7.29

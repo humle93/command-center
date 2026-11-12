@@ -7,6 +7,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 
 ## Nyheder i v7.30
 
+- **v7.30.1:** standardmodellen er `google/gemini-3.8-flash` (den gamle `google/gemini-3-8-flash` findes ikke hos OpenRouter). Har du `AI_MODEL=` i `.env`, så ret den dér.
 - **Flows — kæd funktionerne sammen til auto-optimering (v7.30.0)** — ny fane **🔁 Flows**. En flow er en kæde af op til 10 **blokke**, der kører i rækkefølge og deler resultater: *Analyse* (teknik, crawl, on-page, indholdsscore, søgeord, monitors, konkurrenter, content gap, backlinks), *Generér* (søgeordsidéer, AI-titler/meta, indholdsplan, AI-artikel) og *Handling* (WordPress-kladde, growth-autopilot, rapport til Alarmer/kanaler, note). "Søgeord" finder ord på plads 4-20, og "Indholdsplan"/"Skriv artikel" bruger dem automatisk. Hver blok kan have en betingelse (*altid*, *kun hvis forrige trin fandt noget*, *kun hvis der er høj prioritet*), og flowen kører **manuelt, hver time, dagligt eller ugentligt**. Fire færdige flows: **Daglig sundhed**, **Ugentlig optimering**, **Indholdsmaskine** (søgeord tæt på toppen → plan → AI-artikel → WordPress-kladde) og **Konkurrent-overvågning**. Sikkerhed: alt til WordPress er **kladder** (aldrig udgivet), kun artikler der består kvalitetstjekket sendes, højst 2 AI-artikler pr. blok, én kørsel ad gangen (også mod 1-klik optimeringen), og en blok uden nøgle springes over med en forklaring. Hver kørsel logges trin for trin
 
 ## Nyheder i v7.29

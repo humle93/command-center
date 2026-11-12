@@ -311,6 +311,26 @@ Cockpit-panelet viser **installeret commit** og **seneste commit på `main`**:
 Opdateringen kører kontrollen automatisk, **før** den skriver noget: er `install.sh` på disken ældre end koden, stopper den med kode 7 og rører ingen filer. Beskeden siger hvad man gør i stedet (`git checkout -- install.sh` eller `git pull`), og at intet er ændret. Grunden er, at en gammel installatør ellers kan ligge klar og rulle koden tilbage, næste gang nogen kører den. `--check` og `--version` skriver intet og virker uanset. `bash scripts/restart.sh` genstarter uden at opdatere
 - Status som JSON: `GET /api/update` (inkl. `restart_mode`/`auto_restart`), `POST /api/update/check`, `POST /api/update/apply` (bruges af scriptet). `/self-update` er alias for `/update/apply`
 
+## Funktionsstatus (revision 12. november 2026, v7.28.1)
+
+Alle formularer og knapper er kørt igennem. Uden nøgle siger hver funktion, hvad der mangler (under Alarmer eller i
+svaret) — ingen går ned. Hvad hver funktion kræver:
+
+| Funktion | Kræver | Status |
+|---|---|---|
+| Domæne-tjek, SEO-audit, crawl, redirects, dubletter, linktjek | intet | virker |
+| Vækst: optimerer, sammenligning, plan, linkliste | intet | virker |
+| Monitors (tekst, JSON, pris), noter, backup, moduler, API-nøgler, brugere (login/kode) | intet | virker (pris-monitor rettet i 7.28.1) |
+| Konkurrent-søgning (Spy) | intet (DuckDuckGo) | virker, men DuckDuckGo kan blokere servere — så siger alarmen det |
+| Søgeordsidéer | intet (Google/DuckDuckGo-forslag) | virker |
+| Søgeords-placeringer, backlink-prospekter, content gap, sværhedsgrad | `SERPAPI_KEY` | virker med nøgle |
+| Artikler, meta, autopilot, link-forslag, AI-omskrivning, AI-synlighed, Chat | `OPENROUTER_API_KEY` | virker med nøgle (AI-omskrivning rettet i 7.28.1) |
+| Core Web Vitals i SEO-audit | `PSI_API_KEY` | virker med nøgle |
+| Send artikel/opslag til WordPress, synk, login-knap | `WP_URL` + `WP_USER` + `WP_APP_PASSWORD` | virker med nøgle |
+| Invitationer og e-mail-alarmer | `SMTP_HOST` + `SMTP_FROM` | virker med nøgle |
+| Telegram/ntfy/webhook-alarmer | kanalens nøgle | virker med nøgle |
+| Opdatering fra GitHub-knappen | `GITHUB_TOKEN` | virker med nøgle (ellers `git pull` på serveren) |
+
 ## nginx / Ultra.cc
 
 Appen skal blive på `127.0.0.1`; nginx står for TLS:

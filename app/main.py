@@ -116,10 +116,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.28.0"
+APP_VERSION = "7.28.1"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.28.1", "Funktionsrevision: AI-omskrivning af titel/meta gik ned med en AI-noegle, og en pris-monitor kunne ikke oprettes uden et meningsloest felt - begge rettet"),
     ("7.28.0", "Login uden Cloudflare: direkte paa serverens IP (http://ip:port, CC_HOST=0.0.0.0) eller paa en understi bag Ultra.cc's nginx - login-laasen kan ikke laengere snydes med X-Forwarded-For"),
     ("7.27.0", "Log ind fra WordPress med et klik: knappen i Steamgears (7.76+) sender en signeret billet, der holder 1 minut og kun virker en gang - kun for en kendt e-mail"),
     ("7.26.0", "Ny fane Chat: tal med AI og giv den vaerktoejer fra MCP-connectors (GitHub, WordPress, Gmail, Google Drive m.fl.) - alt der aendrer noget kraever din godkendelse"),
@@ -4482,7 +4483,22 @@ def rewrite_meta_sync(url: str, title: str, desc: str, keyword: str):
         '"descriptions": ["<155 tegn description 1", "description 2", "description 3"], '
         '"note": "kort begrundelse pa dansk"}'
     )
-    return ai_chat(prompt, max_tokens=800, temperature=0.7)
+    # ai_chat() giver tekst (siden v7.25 uden temperature-parameter); dashboardet forventer
+    # {titles, descriptions, note}, saa JSON'en skal pilles ud af svaret her.
+    try:
+        raw = ai_chat(prompt, max_tokens=800)
+    except requests.RequestException as e:   # AIError er en RequestException
+        return {"error": f"AI-fejl: {str(e)[:200]}"}
+    m = re.search(r"\{.*\}", raw, re.S)
+    try:
+        data = jsonlib.loads(m.group(0)) if m else {}
+    except ValueError:
+        data = {}
+    titles = [str(t)[:120] for t in (data.get("titles") or []) if str(t).strip()][:3]
+    descs = [str(d)[:300] for d in (data.get("descriptions") or []) if str(d).strip()][:3]
+    if not titles and not descs:
+        return {"error": "AI-svaret kunne ikke laeses som forslag - proev igen"}
+    return {"titles": titles, "descriptions": descs, "note": str(data.get("note") or "")[:400]}
 
 
 @app.post("/seo/rewrite")
@@ -4647,11 +4663,18 @@ def check_all_monitors_sync():
 
 
 @app.post("/monitors/add")
-async def add_monitor(name: str = Form(...), url: str = Form(...), type_: str = Form(...), expected: str = Form(...)):
-    if not (name.strip() and url.strip() and expected.strip()):
-        return RedirectResponse("/", status_code=303)
+async def add_monitor(name: str = Form(""), url: str = Form(""), type_: str = Form("contains"), expected: str = Form("")):
     if type_ not in ("contains", "json", "price"):
         type_ = "contains"
+    # En pris-monitor laeser prisen selv (JSON-LD / product:price) og bruger ikke "forventet" -
+    # foer kraevede baade formularen og ruten feltet, og et tomt felt forsvandt uden besked.
+    missing = [label for label, value in (("navn", name), ("URL", url)) if not value.strip()]
+    if type_ != "price" and not expected.strip():
+        missing.append("forventet tekst/JSON-sti")
+    if missing:
+        with get_db() as db:
+            add_alarm(db, "monitor", f"Monitor blev ikke oprettet: {', '.join(missing)} mangler", "advarsel")
+        return RedirectResponse("/?tab=monitors", status_code=303)
     try:
         clean_url = normalize_url(url)
     except ValueError as e:

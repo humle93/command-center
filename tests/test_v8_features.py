@@ -142,6 +142,27 @@ with main.get_db() as db:
     saved = db.execute("SELECT type FROM monitors WHERE name='x'").fetchone()
 check("monitors: unknown type falls back to 'contains'",
       r.status_code == 303 and saved and saved["type"] == "contains", (r.status_code, saved and saved["type"]))
+# Funktionsrevision 12/11: en pris-monitor bruger ikke "forventet", men feltet var paakraevet - et tomt
+# felt gav en tavs 303 uden monitor og uden besked.
+r = a.post("/monitors/add", data={"name": "Pris", "url": "https://example.com/produkt", "type_": "price", "expected": ""},
+           follow_redirects=False)
+with main.get_db() as db:
+    saved = db.execute("SELECT type, expected FROM monitors WHERE name='Pris'").fetchone()
+check("revision: pris-monitor kan oprettes uden 'forventet'",
+      r.status_code == 303 and saved and saved["type"] == "price", (r.status_code, saved and dict(saved)))
+with main.get_db() as db:
+    _before = db.execute("SELECT COUNT(*) FROM alarms WHERE type='monitor'").fetchone()[0]
+r = a.post("/monitors/add", data={"name": "Tom", "url": "https://example.com", "type_": "contains", "expected": ""},
+           follow_redirects=False)
+with main.get_db() as db:
+    _none = db.execute("SELECT COUNT(*) FROM monitors WHERE name='Tom'").fetchone()[0]
+    _msg = db.execute("SELECT message FROM alarms WHERE type='monitor' ORDER BY id DESC LIMIT 1").fetchone()
+check("revision: contains-monitor uden tekst afvises med en forklaring (ikke tavst)",
+      r.status_code == 303 and _none == 0 and _msg and "forventet" in _msg["message"]
+      and "tab=monitors" in r.headers.get("location", ""), (_none, _msg and _msg["message"]))
+check("revision: formularen kraever ikke 'forventet' (pris bruger det ikke)",
+      'name="expected" placeholder="fx \'Add to cart\' eller products.0.name (tom ved pris)" class' in
+      open(os.path.join(ROOT, "app", "templates", "dashboard.html"), encoding="utf-8").read())
 
 # --- GitHub update: no token is explained, and extraction is whitelisted/traversal-safe ---
 main.GITHUB_TOKEN = ""
@@ -1484,6 +1505,25 @@ check("openrouter: ingen advarsel naar OPENROUTER_API_KEY er sat", main.warn_leg
 main.LEGACY_AIMLAPI_KEY_SET = _legacy_before
 check("openrouter: ingen aimlapi-adresser tilbage i koden",
       "aimlapi.com" not in open(os.path.join(ROOT, "app", "main.py"), encoding="utf-8").read())
+
+# --- Funktionsrevision 12/11: AI-omskrivning af titel/meta gik ned (500) med en noegle ---
+# rewrite_meta_sync sendte temperature= til ai_chat (fjernet i v7.25) og returnerede raa tekst.
+_ai_queue.append(_FakeAIResp(200, {"choices": [{"message": {"content":
+    'Her er forslag:\n```json\n{"titles": ["Messing tandhjul", "Tandhjul i messing"], '
+    '"descriptions": ["Koeb messing tandhjul her"], "note": "kortere titler"}\n```'}}]}))
+try:
+    _rw = main.rewrite_meta_sync("https://steamgears.eu/", "Gammel titel", "", "messing tandhjul")
+except TypeError as _e:
+    _rw = {"crash": repr(_e)}
+check("revision: AI-omskrivning gaar ikke ned og giver titler/beskrivelser",
+      _rw.get("titles") == ["Messing tandhjul", "Tandhjul i messing"]
+      and _rw.get("descriptions") == ["Koeb messing tandhjul her"] and _rw.get("note") == "kortere titler", _rw)
+_ai_queue.append(_FakeAIResp(200, {"choices": [{"message": {"content": "Beklager, det kan jeg ikke"}}]}))
+_rw = main.rewrite_meta_sync("https://steamgears.eu/", "", "", "")
+check("revision: AI-omskrivning forklarer et svar uden JSON i stedet for at gaa ned", "error" in _rw, _rw)
+_ai_queue.append(_FakeAIResp(200, {"error": {"code": 502, "message": "upstream nede"}}))
+_rw = main.rewrite_meta_sync("https://steamgears.eu/", "", "", "")
+check("revision: AI-omskrivning viser OpenRouters fejl", _rw.get("error", "").startswith("AI-fejl"), _rw)
 
 main.HTTP.post = _real_http_post
 main.OPENROUTER_API_KEY, main.CC_PUBLIC_URL = _ai_before

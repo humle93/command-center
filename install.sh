@@ -253,10 +253,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.28.0"
+APP_VERSION = "7.28.1"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.28.1", "Funktionsrevision: AI-omskrivning af titel/meta gik ned med en AI-noegle, og en pris-monitor kunne ikke oprettes uden et meningsloest felt - begge rettet"),
     ("7.28.0", "Login uden Cloudflare: direkte paa serverens IP (http://ip:port, CC_HOST=0.0.0.0) eller paa en understi bag Ultra.cc's nginx - login-laasen kan ikke laengere snydes med X-Forwarded-For"),
     ("7.27.0", "Log ind fra WordPress med et klik: knappen i Steamgears (7.76+) sender en signeret billet, der holder 1 minut og kun virker en gang - kun for en kendt e-mail"),
     ("7.26.0", "Ny fane Chat: tal med AI og giv den vaerktoejer fra MCP-connectors (GitHub, WordPress, Gmail, Google Drive m.fl.) - alt der aendrer noget kraever din godkendelse"),
@@ -4619,7 +4620,22 @@ def rewrite_meta_sync(url: str, title: str, desc: str, keyword: str):
         '"descriptions": ["<155 tegn description 1", "description 2", "description 3"], '
         '"note": "kort begrundelse pa dansk"}'
     )
-    return ai_chat(prompt, max_tokens=800, temperature=0.7)
+    # ai_chat() giver tekst (siden v7.25 uden temperature-parameter); dashboardet forventer
+    # {titles, descriptions, note}, saa JSON'en skal pilles ud af svaret her.
+    try:
+        raw = ai_chat(prompt, max_tokens=800)
+    except requests.RequestException as e:   # AIError er en RequestException
+        return {"error": f"AI-fejl: {str(e)[:200]}"}
+    m = re.search(r"\{.*\}", raw, re.S)
+    try:
+        data = jsonlib.loads(m.group(0)) if m else {}
+    except ValueError:
+        data = {}
+    titles = [str(t)[:120] for t in (data.get("titles") or []) if str(t).strip()][:3]
+    descs = [str(d)[:300] for d in (data.get("descriptions") or []) if str(d).strip()][:3]
+    if not titles and not descs:
+        return {"error": "AI-svaret kunne ikke laeses som forslag - proev igen"}
+    return {"titles": titles, "descriptions": descs, "note": str(data.get("note") or "")[:400]}
 
 
 @app.post("/seo/rewrite")
@@ -4784,11 +4800,18 @@ def check_all_monitors_sync():
 
 
 @app.post("/monitors/add")
-async def add_monitor(name: str = Form(...), url: str = Form(...), type_: str = Form(...), expected: str = Form(...)):
-    if not (name.strip() and url.strip() and expected.strip()):
-        return RedirectResponse("/", status_code=303)
+async def add_monitor(name: str = Form(""), url: str = Form(""), type_: str = Form("contains"), expected: str = Form("")):
     if type_ not in ("contains", "json", "price"):
         type_ = "contains"
+    # En pris-monitor laeser prisen selv (JSON-LD / product:price) og bruger ikke "forventet" -
+    # foer kraevede baade formularen og ruten feltet, og et tomt felt forsvandt uden besked.
+    missing = [label for label, value in (("navn", name), ("URL", url)) if not value.strip()]
+    if type_ != "price" and not expected.strip():
+        missing.append("forventet tekst/JSON-sti")
+    if missing:
+        with get_db() as db:
+            add_alarm(db, "monitor", f"Monitor blev ikke oprettet: {', '.join(missing)} mangler", "advarsel")
+        return RedirectResponse("/?tab=monitors", status_code=303)
     try:
         clean_url = normalize_url(url)
     except ValueError as e:
@@ -8378,7 +8401,7 @@ cat << 'EOF_HTML' > "$PROJECT_DIR/app/templates/dashboard.html"
                     <option value="json">json (API-felt)</option>
                     <option value="price">pris (JSON-LD / product:price)</option>
                 </select>
-                <input type="text" name="expected" placeholder="fx 'Add to cart' eller products.0.name" required class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
+                <input type="text" name="expected" placeholder="fx 'Add to cart' eller products.0.name (tom ved pris)" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm">
                 <button class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-5 py-2 rounded-xl text-sm">Tilføj</button>
             </form>
             <div class="space-y-2">
@@ -9440,6 +9463,7 @@ Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md
 
 ## Nyheder i v7.28
 
+- **Funktionsrevision (v7.28.1)** — alle 63 formularer og knapper er kørt igennem to gange (uden nøgler og med eksterne tjenester fra lokale fakes), og alle 16 faner er åbnet i Chromium. To fejl er rettet: **AI-omskrivning af titel/meta** (fanen SEO) gik altid ned med 500, når der var en AI-nøgle (`ai_chat()` fik et `temperature`-argument, der forsvandt med OpenRouter i v7.25, og svaret blev ikke læst som JSON), og en **pris-monitor** krævede et "forventet"-felt, den slet ikke bruger — et tomt felt gav en tavs side uden monitor. Nu kan pris-monitoren oprettes uden feltet, og en manglende værdi for de andre typer forklares under Alarmer
 - **Eget domæne eller offentlig IP — ingen Cloudflare, ingen token, ingen nginx (v7.28.0)** — `bash scripts/ultracc_setup.sh --domain www.ditdomaene.dk` (eller `--ip`) viser planen; localhost og lokalnet afvises, og `--apply` udfører den: stopper `cloudflared`, sætter `CC_HOST=0.0.0.0`, `CC_PORT` og `CC_PUBLIC_URL=http://<ip>:<port>` i `.env`, skifter en gammel systemd-enhed ud (den havde `--host 127.0.0.1 --port 8000` skrevet fast og ignorerede `.env`), genstarter og tjekker at `http://<ip>:<port>/login` svarer. Derefter logger du ind med e-mail og adgangskode på `http://<ip>:<port>/`. **Obs:** uden TLS sendes adgangskoden ukrypteret — brug en stærk, unik kode. Samtidig lukket: `client_ip()` stolede på `X-Forwarded-For` fra alle, så en klient direkte på IP'en kunne omgå login-låsen ved at skifte header; nu bruges headeren kun fra en betroet proxy (127.0.0.1 + `CC_FORWARDED_ALLOW_IPS`)
 - **Almindeligt login via Ultra.cc — ingen Cloudflare-tunnel (v7.28.0)** — Ultra.cc's egen nginx giver kun en understi på din faste adresse (`https://<bruger>.<server>.usbx.me/cc/`), og appen kunne før kun ligge på roden af et domæne; derfor blev der brugt en `trycloudflare`-tunnel, hvis URL skiftede ved hver genstart. Nu kan appen ligge på en understi: sæt `CC_PUBLIC_URL=https://<bruger>.<server>.usbx.me/cc`, læg `deploy/nginx-ultracc-proxy.conf` i `~/.apps/nginx/proxy.d/` og log ind på `…/cc/` med e-mail og adgangskode som altid. `bash scripts/ultracc_setup.sh --url https://<bruger>.<server>.usbx.me/cc` viser planen (tunnel, `.env`, nginx-blok), og med `--apply` stopper den `cloudflared`, retter `.env`, lægger blokken ind, genstarter og tjekker at `…/cc/login` svarer 200. Et ASGI-lag (`BasePathMiddleware`) fjerner `/cc` fra indgående kald og sætter det på redirects, session-cookien (`Path=/cc`), links/formularer/scripts i HTML og på `fetch()`-kald; uden understi er alt som før. Se [Installation og udrulning §2e](docs/Installation_og_udrulning.md#2e-ultracc-uden-cloudflare) for skridtene og hvordan tunnellen fjernes
 

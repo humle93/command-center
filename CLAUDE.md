@@ -1,6 +1,6 @@
 # Command Center — statusnotat til Claude
 
-**Opdateret:** 11. november 2026 · **Version:** 7.30.1 · **Branch:** `main` · **Seneste commit:** se `git log -1`
+**Opdateret:** 11. november 2026 · **Version:** 7.31.0 · **Branch:** `main` · **Seneste commit:** se `git log -1`
 Dette er et handoff-notat: hvad der er lavet, hvordan du verificerer det, og hvad der er næste skridt.
 Den kanoniske roadmap er [`docs/ROADMAP.md`](docs/ROADMAP.md); brugervejledning er
 [`docs/Command_Center_Bruger_og_Systemmanual.md`](docs/Command_Center_Bruger_og_Systemmanual.md) og
@@ -26,6 +26,11 @@ Seneste kendte status: **begge suites ALL PASS**, og GitHub Actions (`.github/wo
 kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `install.sh` matcher repoet.
 
 ## Ændringer i denne arbejdsperiode
+
+### Gratis AI-reserve (v7.31.0, 12. november)
+- **Baggrund:** brugeren: "openrouter har en auto/free som vi kan tilføje". Målt fra steamgears.eu (containeren når ikke openrouter.ai): `openrouter/free` har pris 0, og `openrouter/auto` er betalt (pris -1 = variabel), så det er kun `free`, der bruges som reserve.
+- **Kode:** `_openrouter_post()`, `ai_wants_free_retry()`, `AI_FREE_MODELS` (env, standard `google/gemma-4-31b-it:free,openrouter/free`), `AI_LAST_FALLBACK`, info-alarm. Kun kreditfejl skifter model, og 401/404 er uændrede.
+- **Test:** 8 `gratis:`-checks. Ikke kaldt mod det rigtige OpenRouter herfra. Pluginnets tilsvarende kode (7.81.0) er målt live: 3 opslag fra en `:free`-model med `cost: 0`.
 
 ### Rettet model-slug (v7.30.1, 12. november)
 - Standarden for `AI_MODEL` var `google/gemini-3-8-flash`, som ikke findes hos OpenRouter. Den er nu `google/gemini-3.8-flash`

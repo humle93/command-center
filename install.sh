@@ -82,6 +82,8 @@ UPDATE_RESTART_CMD=
 # AIMLAPI_KEY bruges ikke laengere (v7.25.0); staar den alene, kommer der en advarsel ved opstart.
 OPENROUTER_API_KEY=
 AI_MODEL=google/gemini-3.8-flash
+# Gratis reserve ved manglende kredit (402), proeves i raekkefoelge. Tom = slaa reserven fra.
+AI_FREE_MODELS=google/gemma-4-31b-it:free,openrouter/free
 # Valgfri: anden OpenAI-kompatibel adresse (budget-loftet AI_MONTHLY_LIMIT foelger vaertsnavnet).
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 # Chat-fanen (v7.26): tom CHAT_MODEL = AI_MODEL. Modellen skal kunne bruge tools (function calling).
@@ -220,6 +222,11 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_BASE_URL = (os.environ.get("OPENROUTER_BASE_URL", "").strip()
                        or "https://openrouter.ai/api/v1").rstrip("/")
 AI_MODEL = os.environ.get("AI_MODEL", "google/gemini-3.8-flash")
+# Gratis reserve naar OpenRouter afviser AI_MODEL for manglende kredit (402). Prøves i raekkefoelge via
+# OpenRouters "models"-liste; openrouter/free er OpenRouters egen router over de gratis modeller.
+# Tom vaerdi slaar reserven fra.
+AI_FREE_MODELS = [m.strip() for m in os.environ.get(
+    "AI_FREE_MODELS", "google/gemma-4-31b-it:free,openrouter/free").split(",") if m.strip()]
 # aimlapi er udfaset: en tilbagebleven noegle bruges ikke, men giver en advarsel ved opstart.
 LEGACY_AIMLAPI_KEY_SET = bool(os.environ.get("AIMLAPI_KEY", "").strip())
 WP_URL = os.environ.get("WP_URL", "").strip()                # fx https://steamgears.eu
@@ -253,10 +260,11 @@ ALERT_MIN_SEVERITY = os.environ.get("ALERT_MIN_SEVERITY", "info").strip().lower(
 ALERT_QUIET_HOURS = os.environ.get("ALERT_QUIET_HOURS", "").strip()   # fx "23-7"; tom = slaaet fra
 ALERT_DEDUPE_MINUTES = int(os.environ.get("ALERT_DEDUPE_MINUTES", "180") or 180)
 
-APP_VERSION = "7.30.1"
+APP_VERSION = "7.31.0"
 
 # --- Nyheder: skrives ved opstart (skaerm + app/data/startup.log) og vises paa login-siden ---
 NEWEST = [
+    ("7.31.0", "Gratis reserve: mangler OpenRouter-kredit, svarer en gratis model (openrouter/free) i stedet for en fejl - og det bliver en alarm"),
     ("7.30.1", "Standardmodellen er rettet til google/gemini-3.8-flash - den gamle slug findes ikke hos OpenRouter"),
     ("7.30.0", "Flows: kaed funktionerne sammen og lad dem koere automatisk (time/dag/uge) - 17 blokke, 4 faerdige flows, betingelser, og alt til WordPress bliver kladder"),
     ("7.29.0", "1-klik optimering i Cockpit: hele projektet eller en enkelt del (teknik, on-page, indhold, soegeord, monitors) giver én prioriteret liste med faerdige forslag - intet aendres paa sitet"),
@@ -289,7 +297,7 @@ NEWEST = [
     ("7.12.0", "Alarmer til e-mail, ntfy og signeret webhook - i koe med dedupe og stille timer"),
     ("7.11.0", "Brugere med adgangskode, GitHub-opdatering med genstart, nginx/systemd"),
 ]
-NEWEST_LINE = "Flows: automatiske kaeder af analyser, AI og WordPress-kladder - fanen Flows"
+NEWEST_LINE = "Gratis AI-reserve via openrouter/free, naar kreditten slipper op"
 
 
 def startup_banner(host: str = "", port: int | None = None) -> list:
@@ -4540,23 +4548,27 @@ def openrouter_complete(messages: list, tools: list | None = None, max_tokens: i
     200 med et ``error``-objekt (fx naar udbyderen bag modellen fejler), saa svaret tjekkes, foer
     ``choices`` laeses - ellers ender en KeyError som "AI-fejl: 'choices'".
     """
-    body = {"model": model or AI_MODEL, "messages": messages, "max_tokens": max_tokens}
+    asked = model or AI_MODEL
+    body = {"model": asked, "messages": messages, "max_tokens": max_tokens}
     if tools:
         body["tools"] = tools
-    resp = HTTP.post(
-        f"{OPENROUTER_BASE_URL}/chat/completions",
-        headers=openrouter_headers(),
-        json=body,
-        timeout=timeout,
-    )
-    try:
-        data = resp.json()
-    except ValueError:
-        data = {}
-    err = data.get("error") if isinstance(data, dict) else None
-    if err:
-        msg = err.get("message") if isinstance(err, dict) else str(err)
-        raise AIError(f"OpenRouter ({resp.status_code}): {str(msg)[:200]}")
+    resp, data, err = _openrouter_post(body, timeout)
+    if err and ai_wants_free_retry(asked, resp.status_code, err):
+        paid = err
+        free_body = dict(body, model=AI_FREE_MODELS[0], models=list(AI_FREE_MODELS))
+        resp, data, err = _openrouter_post(free_body, timeout)
+        if err:
+            raise AIError(f"OpenRouter (402): {paid[:150]} - de gratis modeller fejlede ogsaa: {err[:150]}")
+        used = str(data.get("model") or AI_FREE_MODELS[0])
+        AI_LAST_FALLBACK.update(model=used, at=now_iso())
+        try:
+            with get_db() as db:
+                add_alarm(db, "ai", f"Ingen OpenRouter-kredit til {asked} - svaret kom fra den gratis model {used}. "
+                          "Fyld kredit paa for at faa den betalte model tilbage.", "info")
+        except Exception:
+            pass
+    elif err:
+        raise AIError(f"OpenRouter ({resp.status_code}): {err[:200]}")
     resp.raise_for_status()
     try:
         message = data["choices"][0]["message"]
@@ -4565,6 +4577,32 @@ def openrouter_complete(messages: list, tools: list | None = None, max_tokens: i
     if not isinstance(message, dict) or not (message.get("content") or message.get("tool_calls")):
         raise AIError("OpenRouter svarede med en tom besked")
     return message
+
+
+AI_LAST_FALLBACK: dict = {}
+_AI_CREDIT_RE = re.compile(r"more credits|insufficient credits|can only afford|out of credits", re.I)
+
+
+def _openrouter_post(body: dict, timeout: int):
+    """Ét POST til /chat/completions -> (svar, json, fejltekst eller "")."""
+    resp = HTTP.post(f"{OPENROUTER_BASE_URL}/chat/completions", headers=openrouter_headers(),
+                     json=body, timeout=timeout)
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {}
+    err = data.get("error") if isinstance(data, dict) else None
+    if err:
+        msg = err.get("message") if isinstance(err, dict) else str(err)
+        return resp, data, str(msg) or f"HTTP {resp.status_code}"
+    return resp, data if isinstance(data, dict) else {}, ""
+
+
+def ai_wants_free_retry(model: str, status: int, message: str) -> bool:
+    """Kun en kreditfejl paa en betalt model skifter til de gratis modeller."""
+    if not AI_FREE_MODELS or model.endswith(":free") or model in AI_FREE_MODELS:
+        return False
+    return status == 402 or bool(_AI_CREDIT_RE.search(message or ""))
 
 
 def ai_chat(prompt: str, max_tokens: int = 1500, timeout: int = 120) -> str:
@@ -10599,12 +10637,16 @@ EOF_USERSVC
 
 echo "📄 README.md..."
 cat << 'EOF_README' > "$PROJECT_DIR/README.md"
-# Command Center v7.30 PRO
+# Command Center v7.31 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
+
+## Nyheder i v7.31
+
+- **Gratis AI-reserve (v7.31.0)** — afviser OpenRouter `AI_MODEL` for manglende kredit (402), prøves kaldet én gang til på gratis modeller via OpenRouters `models`-liste: `google/gemma-4-31b-it:free` og derefter `openrouter/free` (OpenRouters router over de gratis modeller). Skiftet bliver en info-alarm, så du kan se det. Styres med `AI_FREE_MODELS` i `.env` (tom = slået fra). Gratis modeller har en dagsgrænse hos OpenRouter, og kvaliteten svinger.
 
 ## Nyheder i v7.30
 

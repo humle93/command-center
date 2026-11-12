@@ -1,9 +1,13 @@
-# Command Center v7.30 PRO
+# Command Center v7.31 PRO
 
 [![CI](https://github.com/humle93/command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/humle93/command-center/actions/workflows/ci.yml)
 
 Selv-hostet SEO- og drifts-center (FastAPI + SQLite) i stil med RankMath Pro / Yoast Premium — bygget til Steamgears.
 Alt kører på din egen server: dine data, ingen abonnement. Se [docs/ROADMAP.md](docs/ROADMAP.md) for hvad der er færdigt og hvad der er næste.
+
+## Nyheder i v7.31
+
+- **Gratis AI-reserve (v7.31.0)** — afviser OpenRouter `AI_MODEL` for manglende kredit (402), prøves kaldet én gang til på gratis modeller via OpenRouters `models`-liste: `google/gemma-4-31b-it:free` og derefter `openrouter/free` (OpenRouters router over de gratis modeller). Skiftet bliver en info-alarm, så du kan se det. Styres med `AI_FREE_MODELS` i `.env` (tom = slået fra). Gratis modeller har en dagsgrænse hos OpenRouter, og kvaliteten svinger.
 
 ## Nyheder i v7.30
 

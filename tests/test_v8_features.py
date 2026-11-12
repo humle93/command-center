@@ -1496,6 +1496,41 @@ check("openrouter: AIError fanges af de eksisterende RequestException-grene",
 main.CC_PUBLIC_URL = ""
 _ai_queue.append(_FakeAIResp(200, {"choices": [{"message": {"content": "ok"}}]}))
 main.ai_chat("x")
+
+# ---------- gratis reserve-model (v7.31.0) ----------
+_ai_calls.clear()
+_ai_queue.append(_FakeAIResp(402, {"error": {"code": 402, "message": "This request requires more credits, or fewer max_tokens. You can only afford 405"}}))
+_ai_queue.append(_FakeAIResp(200, {"model": "nvidia/nemotron-3-ultra-550b-a55b:free", "choices": [{"message": {"content": "Gratis svar"}}]}))
+_out = main.ai_chat("x", max_tokens=900)
+_free_body = _ai_calls[-1][1]["json"]
+check("gratis: kreditfejl paa den betalte model giver svar fra en gratis model", _out == "Gratis svar" and len(_ai_calls) == 2, _out)
+check("gratis: andet kald bruger models-listen i raekkefoelge og samme max_tokens",
+      _free_body["model"] == main.AI_FREE_MODELS[0] and _free_body["models"] == main.AI_FREE_MODELS
+      and _free_body["max_tokens"] == 900 and "openrouter/free" in main.AI_FREE_MODELS, _free_body)
+check("gratis: skiftet huskes med modellen der svarede",
+      main.AI_LAST_FALLBACK.get("model") == "nvidia/nemotron-3-ultra-550b-a55b:free", main.AI_LAST_FALLBACK)
+with main.get_db() as db:
+    _fa = db.execute("SELECT COUNT(*) FROM alarms WHERE message LIKE 'Ingen OpenRouter-kredit%gratis model nvidia%'").fetchone()[0]
+check("gratis: skiftet bliver en alarm (ikke skjult)", _fa >= 1, _fa)
+_ai_queue.append(_FakeAIResp(402, {"error": {"message": "Insufficient credits"}}))
+_ai_queue.append(_FakeAIResp(429, {"error": {"message": "Rate limit exceeded: free-models-per-day"}}))
+_e = None
+try:
+    main.ai_chat("x")
+except Exception as e:  # noqa: BLE001
+    _e = e
+check("gratis: fejler de gratis ogsaa, naevnes begge grunde",
+      isinstance(_e, main.AIError) and "Insufficient credits" in str(_e) and "free-models-per-day" in str(_e), repr(_e))
+_n = len(_ai_calls)
+_e = _ai_error(_FakeAIResp(401, {"error": {"message": "No auth credentials found"}}))
+check("gratis: 401 skifter ikke model (kun ét kald)", isinstance(_e, main.AIError) and len(_ai_calls) == _n + 1)
+check("gratis: en gratis model proeves ikke igen paa sig selv",
+      not main.ai_wants_free_retry("openrouter/free", 402, "x") and not main.ai_wants_free_retry("a/b:free", 402, "x")
+      and main.ai_wants_free_retry("a/b", 200, "can only afford 405"))
+_fm = main.AI_FREE_MODELS
+main.AI_FREE_MODELS = []
+check("gratis: tom AI_FREE_MODELS slaar reserven fra", not main.ai_wants_free_retry("a/b", 402, "x"))
+main.AI_FREE_MODELS = _fm
 check("openrouter: ingen HTTP-Referer uden CC_PUBLIC_URL", "HTTP-Referer" not in _ai_calls[-1][1]["headers"])
 
 _legacy_before = main.LEGACY_AIMLAPI_KEY_SET

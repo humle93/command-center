@@ -86,7 +86,7 @@ Priserne er hentet fra Gelatos API (`/v3/products/{uid}/prices` og `/v4/orders:q
 
 | Fase | Uger | Indhold | Fortsæt hvis | Stop eller ret hvis |
 | --- | --- | --- | --- | --- |
-| 0. Fundament | 1–2 | Gelato-konto, WooCommerce-plugin, testordre til DK, 40 motiver i 4 samlinger | Kvaliteten er god, levering højst 5 dage, priserne bekræftet | Kvaliteten holder ikke, så prøv Prodigi eller Printful |
+| 0. Fundament | 1–2 | Gelato-konto, WooCommerce-plugin, testordre til DK, 60 motiver i 6 samlinger (se motivlisten) | Kvaliteten er god, levering højst 5 dage, priserne bekræftet | Kvaliteten holder ikke, så prøv Prodigi eller Printful |
 | 1. Organisk start | 3–6 | Pinterest hver dag, Etsy-butik, 10 SEO-sider, e-mail-flows | Mindst 1.000 besøg om måneden og første salg | 0 salg efter 6 uger: skift motiver eller samling |
 | 2. Kurvværdi og test | 7–12 | Rammer og sæt, tilbud ved kassen, Meta-test på 3.000 kr. | Ordre over 450 kr. og pris pr. kunde under produktets dækning (afsnit 4) | Annoncerne giver underskud: kun organisk |
 | 3. Skalering | 13+ | Flere samlinger, sæsoner (jul, fars dag), flere sprog (DE/SE) | | |

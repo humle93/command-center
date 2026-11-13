@@ -1,8 +1,20 @@
-# Steamgears Prints – de første 40 motiver og 10 SEO-briefs
+# Steamgears Prints – 60 motiver og 12 SEO-briefs
 
 **Dato:** 13. november 2026 · **Hører til:** [`Steamgears_Business_og_Deployment_plan.md`](Steamgears_Business_og_Deployment_plan.md), fase 0 og 1
 
-Fire samlinger med 10 motiver hver, og 10 sider der skal hente trafik fra Google, AI-svar og Pinterest. Motiverne er skrevet som prompt-kerner til AI-generering. Hvert motiv skal efterredigeres og kvalitetstjekkes i fuld størrelse, før det udgives.
+Seks samlinger med 10 motiver hver, og 12 sider der skal hente trafik fra Google, AI-svar og Pinterest. Motiverne er skrevet som prompt-kerner til AI-generering. Hvert motiv skal efterredigeres og kvalitetstjekkes i fuld størrelse, før det udgives. Udkast til layout og palet ligger i [`steamgears-udkast/`](steamgears-udkast/).
+
+## Ændret efter markedsresearch (13. november 2026)
+
+Researchen af, hvad der sælger, gav fem ændringer:
+
+1. **Art Deco & Dieselpunk er samling nr. 1 i markedsføringen.** Pinterest Predicts 2026 nævner "Neodeco" (art deco med messing og krom) som trend. Motivnumrene er de samme som før (11–20).
+2. **Ny samling: Det mekaniske cirkus (41–50).** Pinterest-søgninger på "vintage circus aesthetic" er steget 70 % og "circus interior" 130 %.
+3. **Ny samling: Mekanisk botanik (51–60).** Botaniske plakater er den største faste kategori (ca. 15–20 % af vægkunst på Etsy). Vi tager efterspørgslen med vores egen vinkel.
+4. **Personlige plakater.** Navn eller by på udvalgte motiver (se "Personlige varianter" nedenfor). Personalisering er det, der sælger bedst på Etsy i 2026.
+5. **Alle samlinger har sæt på 3 og en 70×100-version.** Sæt og 70×100 giver den bedste dækning hos Gelato.
+
+**Rækkefølge for markedsføring:** Art Deco & Dieselpunk → Mekanisk botanik → Det mekaniske cirkus → Steampunk & Gears → Værksted & Garage → Retro Pin-up (kun organisk).
 
 > **Søgeordene er ikke volumen-tjekket.** De er valgt ud fra emnet. Før hver side skrives, køres søgeordet gennem Command Center (Vækst → *Indholdsplan* og *Sammenlign* med de 3 bedste konkurrenter), og målet for ord og H2 justeres efter konkurrenterne.
 
@@ -18,7 +30,9 @@ Fire samlinger med 10 motiver hver, og 10 sider der skal hente trafik fra Google
   - genkendelige personer og kendte figurer
   - kendte kunstneres stil ved navn (fx Elvgren, Vargas, Mucha)
   - nøgenhed
-- **Sæt:** motiver med samme bogstav i kolonnen *Sæt* er lavet til at hænge sammen (2–3 stk.).
+- **Sæt:** motiver med samme bogstav i kolonnen *Sæt* er lavet til at hænge sammen. Hver samling har mindst ét sæt på 3, som sælges samlet.
+- **70×100:** hvert motiv skal kunne tåle 70×100 (ca. 8.300×11.800 px ved 300 dpi). Detaljer, der kun virker i lille format, skal undgås.
+- **Personlige felter:** motiver markeret med *Personlig* får et tekstfelt (navn, by eller årstal), som kunden udfylder. Teksten sættes i et fast skriftsnit på en fast plads i motivet.
 - **Annoncer:** *Ja* = kan bruges i Meta-annoncer. *Nej* = kun Pinterest, Etsy og SEO.
 
 Prompt-skabelon (tilføjes hver prompt-kerne):
@@ -88,9 +102,55 @@ Fuldt påklædte figurer, legende og humoristiske. Ingen nøgenhed, ingen udford
 | 39 | Morgenkaffen | Kvinde i retro-køkken med perkolator og hjemmekjole, humoristisk | retro køkken plakat | L | Nej |
 | 40 | Fiskeren | Kvinde i waders med en alt for stor fisk, retro-humor | sjov retro plakat | – | Nej |
 
+## Samling 5: Det mekaniske cirkus (ny)
+
+Striber, stjerner og akrobater, bygget af messing og tandhjul. Plakatstil fra 1900–1930, med egen tekst.
+
+| # | Titel | Prompt-kerne | Søgeord | Sæt | Annoncer |
+| --- | --- | --- | --- | --- | --- |
+| 41 | Det mekaniske cirkus | Cirkustelt i røde og creme striber med messingspir og vimpler, stjernehimmel | cirkus plakat | M | Ja |
+| 42 | Urværks-akrobaten | Akrobat af messing og fjedre på en trapez under teltkuplen | vintage cirkus plakat | M | Ja |
+| 43 | Den mekaniske elefant | Nittet elefant af kobberplader med karrusel-pynt, balancerende på en tønde | cirkus elefant plakat | M | Ja |
+| 44 | Karrusellen | Karrusel med mekaniske heste, tandhjul synlige under taget, lys i aftenen | karrusel plakat | N | Ja |
+| 45 | Linedanseren | Silhuet på line mellem to tårne af tandhjul, stjerner og måne | cirkus kunst | N | Ja |
+| 46 | Kanonkuglen | Artist skudt ud af en messingkanon med damp, stjerneregn | retro cirkus plakat | N | Ja |
+| 47 | Plakat: "Cirkus Steamgears" | Klassisk cirkusplakat med ramme af stjerner og egen tekst, ét hovedmotiv | cirkusplakat vintage | O | Ja |
+| 48 | Den mekaniske løve | Løve af tandhjul springer gennem en ring af ild og damp | cirkus løve plakat | O | Ja |
+| 49 | Spåkonens automat | Mekanisk spåkone-automat i glasskab med kort og kugle | vintage automat plakat | O | Ja |
+| 50 | Børnenes cirkus | Venlig mekanisk bjørn med paraply på en cykel, bløde farver | børneplakat cirkus | – | Ja |
+
+## Samling 6: Mekanisk botanik (ny)
+
+Botaniske plancher i gammel stil, hvor planterne er bygget af messing, kobber og tandhjul. Creme baggrund, latinske navne (opdigtede), tynde streger.
+
+| # | Titel | Prompt-kerne | Søgeord | Sæt | Annoncer |
+| --- | --- | --- | --- | --- | --- |
+| 51 | Rosa mechanica | Rose med kronblade af tynde kobberplader og et tandhjul i midten, botanisk planche | botanisk plakat | P | Ja |
+| 52 | Helianthus horologium | Solsikke hvis midte er et urværk, kronblade af messing | solsikke plakat | P | Ja |
+| 53 | Filix cupri | Bregne af kobbertråd med nitter langs stilken | bregne plakat | P | Ja |
+| 54 | Monstera machina | Monsterablad med huller formet som tandhjul, grøn patina på messing | monstera plakat | Q | Ja |
+| 55 | Eucalyptus aenea | Eukalyptusgren med blade af irret kobber | eukalyptus plakat | Q | Ja |
+| 56 | Olea ferrea | Olivengren af smedejern med perler af messing | oliven plakat | Q | Ja |
+| 57 | Lavandula vaporis | Lavendel hvor blomsterne er små ventiler med damp | lavendel plakat | R | Ja |
+| 58 | Tulipa rotae | Tulipan i snit med indvendigt urværk, teknisk planche | tulipan plakat | R | Ja |
+| 59 | Cactus pressura | Kaktus med manometer-blomst og trykrør | kaktus plakat | R | Ja |
+| 60 | Herbarium mechanicum | Samleplanche med 9 små mekaniske planter i gitter, nummereret | herbarium plakat | – | Ja |
+
+## Personlige varianter
+
+| Motiv | Felt | Eksempel |
+| --- | --- | --- |
+| 7–9 Patenttegninger | Opfinderens navn og årstal i hjørnet | "Patent no. 1 · A. Hansen · 2026" |
+| 17–19 Rejseplakater | Byens navn i titlen | "Nordlys-ekspressen til Skagen" |
+| 26–28 Emaljeskilte | Navn i skiltets titel | "Mads' Værksted" |
+| 47 Cirkusplakat | Navn som cirkusdirektør | "Cirkus Hansen præsenterer" |
+| 60 Herbarium | Navn som samler og årstal | "Collegit E. Jensen, MMXXVI" |
+
+**Teknik:** Gelato understøtter personaliserede produkter. Det skal afprøves i fase 0, at feltet kommer korrekt med fra WooCommerce til trykfilen.
+
 ---
 
-## 10 SEO-briefs
+## 12 SEO-briefs
 
 Fælles for alle sider:
 - **Sprog:** dansk først. Engelsk version senere, hvis Etsy og Pinterest viser international efterspørgsel.
@@ -204,9 +264,32 @@ Fælles for alle sider:
 
 ---
 
+### Brief 11: Cirkusplakater (samlingsside)
+- **Søgeord:** cirkus plakat · varianter: vintage cirkus plakat, retro cirkusplakat, cirkus indretning
+- **Hensigt:** køb
+- **Titel:** Vintage cirkusplakater – det mekaniske cirkus | Steamgears
+- **Meta:** Vintage cirkusplakater med mekaniske akrobater, elefanter og karruseller. Trykt i Danmark på bestilling, også i 70×100 og som sæt.
+- **H1:** Vintage cirkusplakater
+- **H2:** Det mekaniske cirkus · Cirkus i indretningen (trend 2026) · Sæt med 3 · Til børneværelset · Størrelser og rammer
+- **Mål:** 500–700 ord, 5 H2 · **Motiver:** 41–50 · **Interne links:** Brief 6, Brief 9
+- **AI-spørgsmål:** "Hvor kan jeg købe vintage cirkusplakater?"
+
+### Brief 12: Botaniske plakater (samlingsside)
+- **Søgeord:** botanisk plakat · varianter: botaniske plakater, planteplakat, botanisk planche
+- **Hensigt:** køb
+- **Titel:** Botaniske plakater med et mekanisk twist | Steamgears
+- **Meta:** Botaniske plancher i gammel stil, hvor roser, bregner og monstera er bygget af messing og kobber. Trykt i Danmark, også som sæt.
+- **H1:** Botaniske plakater
+- **H2:** Mekanisk botanik: idéen · Roser, solsikker og bregner · Grønne planter (monstera, eukalyptus, oliven) · Herbarium med dit navn · Sæt og størrelser
+- **Mål:** 500–700 ord, 5 H2 · **Motiver:** 51–60 · **Interne links:** Brief 6, Brief 7
+- **AI-spørgsmål:** "Hvor køber jeg en anderledes botanisk plakat?"
+- **Note:** konkurrencen på "botanisk plakat" er hård. Vinklen er de smallere søgninger (fx "monstera plakat", "herbarium plakat"), hvor hvert motiv får sin egen produktside.
+
+---
+
 ## Rækkefølge
 
-1. **Uge 1–2:** generér og redigér motiverne i samling 1 og 3 først, fordi de kan annonceres og har de bredeste søgeord.
-2. **Uge 2:** læg Brief 1, 2, 7 og 9 ind som briefs i Command Center (Vækst → *Indholdsplan*). Kør *Sammenlign* mod de 3 bedste resultater for hvert søgeord.
-3. **Uge 3–6:** skriv siderne i rækkefølgen 1, 2, 3, 9, 7, 5, 6, 4, 10, 8. Hvert motiv får mindst 2 pins (et nærbillede og et billede fra et rum).
+1. **Uge 1–2:** generér og redigér motiverne i rækkefølgen Art Deco (11–20), Mekanisk botanik (51–60), Det mekaniske cirkus (41–50), Steampunk (1–10). De kan annonceres og rammer trends eller store kategorier.
+2. **Uge 2:** læg Brief 3, 12, 11, 1 og 9 ind som briefs i Command Center (Vækst → *Indholdsplan*). Kør *Sammenlign* mod de 3 bedste resultater for hvert søgeord.
+3. **Uge 3–6:** skriv siderne i rækkefølgen 3, 12, 11, 1, 9, 2, 7, 6, 5, 10, 4, 8. Hvert motiv får mindst 2 pins (et nærbillede og et billede fra et rum).
 4. **Efter hver side:** kør Command Centers optimerer, og udgiv først, når siden scorer mindst 75.

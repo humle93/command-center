@@ -43,19 +43,34 @@ Fem muligheder blev scoret på efterspørgsel, indtjening pr. salg, genbrug af d
 - [ ] **AI-motiver kan næppe ophavsretsbeskyttes**, så konkurrenter må kopiere dem. Modtræk: samlinger, egen stil og hurtig udgivelse.
 - [ ] Hvert motiv redigeres manuelt og kvalitetstjekkes i fuld størrelse (300 dpi ved 50×70) før udgivelse.
 
-## 4. Økonomi pr. ordre (regneeksempel)
+## 4. Økonomi pr. ordre (Gelato-priser hentet 13. november 2026)
 
-| Kr. ex moms | 50×70 uden ramme | 50×70 i ramme | Sæt med 3 i ramme |
-| --- | --- | --- | --- |
-| Salgspris (inkl. moms) | 249 → 199 | 599 → 479 | 1.299 → 1.039 |
-| Tryk og fragt | ca. −100 | ca. −193 (Gelato €20,76 + €5,13) | ca. −540 |
-| Betalingsgebyr ca. 2 % | −5 | −12 | −26 |
-| **Før annoncer** | **≈ 94** | **≈ 274** | **≈ 473** |
+Priserne er hentet fra Gelatos API (`/v3/products/{uid}/prices` og `/v4/orders:quote`) for levering til Aarhus. Papiret er 200 g mat. **Antagelse:** Gelatos priser er uden moms. Det skal bekræftes på den første faktura. Kunden betaler **49 kr. i fragt** (39 kr. ex moms) under 499 kr. og ingen fragt over.
+
+| Produkt | Trykkes i | Levering | Gelato: vare + fragt (kr.) | Salgspris inkl. moms (kr.) | **Dækning før annoncer (kr.)** |
+| --- | --- | --- | --- | --- | --- |
+| 30×40 uden ramme | DK | 4–5 dage | 57 + 58 | 199 | **≈ 80** |
+| 50×70 uden ramme | DK | 5–6 dage | 87 + 58 | 299 | **≈ 127** |
+| 70×100 uden ramme | DK | 5–6 dage | 95 + 64 | 399 | **≈ 190** |
+| Sæt 3 × 30×40 uden ramme | DK | 4–5 dage | 170 + 67 | 449 | **≈ 152** |
+| Sæt 3 × 50×70 uden ramme | DK | 5–6 dage | 260 + 67 | 699 (fri fragt) | **≈ 219** |
+| 30×40 i kobberramme (alu) | DE | 7–11 dage (DHL) | 179 + 51 | 449 | **≈ 159** |
+| Sæt 3 × 30×40 i kobberramme | DE | 7–11 dage (DHL) | 537 + 99 | 1.199 (fri fragt) | **≈ 300** |
+| 50×70 i kobberramme (alu) | DE | 7–11 dage (DHL) | 353 + 163 | 899 (fri fragt) | **≈ 186** |
+| 50×70 i sort træramme | SE | 5–6 dage | 409 + 163 | 899 (fri fragt) | **≈ 130** |
+
+**Det har ændret sig i forhold til regneeksemplet:**
+- En 50×70 i ramme koster ca. **516–572 kr.** hos Gelato inkl. fragt, ikke ca. 193 kr. Til 599 kr. ville hver ordre give underskud. Store rammer skal koste mindst 899 kr.
+- Plakater uden ramme **trykkes i Danmark** og leveres på 4–6 dage. Rammer sendes fra Tyskland eller Sverige. Den billigste fragt tager 7–11 dage, mens UPS (6–7 dage) koster 42–83 kr. mere.
+- **70×100 uden ramme har den bedste dækning**, fordi trykket kun koster 8 kr. mere end 50×70.
+- Gelato har **kobber- og guldrammer i aluminium**. De er de billigste og passer direkte til steampunk.
 
 **Regler:**
-1. Betalte annoncer kun på rammer og sæt. Kunden må højst koste **274 kr.** pr. ordre i ramme.
-2. Gennemsnitlig ordre skal over **450 kr.** Midler: tilbud ved kassen (ramme, pakker) og grænse for gratis fragt.
-3. Plakater uden ramme sælges via organiske kanaler (Pinterest, Etsy, SEO).
+1. Kerneprodukterne er **plakater uden ramme i 50×70 og 70×100 samt sæt** (dansk tryk og hurtig levering). Rammer er et tilbud oveni, primært 30×40 i kobber.
+2. Kunden betaler 49 kr. i fragt under 499 kr. Fri fragt over 499 kr. trækker kurven op mod sæt.
+3. Betalte annoncer kun på produkter med en dækning på mindst 186 kr.: 70×100, sæt og kobberrammer. Kunden må højst koste det, produktet dækker.
+4. Rammer leveres på 7–11 dage, og det står ærligt på produktsiden. Alternativt vælges UPS, og prisen hæves med ca. 50 kr.
+5. Store træ- og aluminiumsrammer i 50×70 og 70×100 tages først med, hvis efterspørgslen viser sig.
 
 ## 5. Kanaler
 
@@ -73,7 +88,7 @@ Fem muligheder blev scoret på efterspørgsel, indtjening pr. salg, genbrug af d
 | --- | --- | --- | --- | --- |
 | 0. Fundament | 1–2 | Gelato-konto, WooCommerce-plugin, testordre til DK, 40 motiver i 4 samlinger | Kvaliteten er god, levering højst 5 dage, priserne bekræftet | Kvaliteten holder ikke, så prøv Prodigi eller Printful |
 | 1. Organisk start | 3–6 | Pinterest hver dag, Etsy-butik, 10 SEO-sider, e-mail-flows | Mindst 1.000 besøg om måneden og første salg | 0 salg efter 6 uger: skift motiver eller samling |
-| 2. Kurvværdi og test | 7–12 | Rammer og sæt, tilbud ved kassen, Meta-test på 3.000 kr. | Ordre over 450 kr. og pris pr. kunde under 274 kr. | Annoncerne giver underskud: kun organisk |
+| 2. Kurvværdi og test | 7–12 | Rammer og sæt, tilbud ved kassen, Meta-test på 3.000 kr. | Ordre over 450 kr. og pris pr. kunde under produktets dækning (afsnit 4) | Annoncerne giver underskud: kun organisk |
 | 3. Skalering | 13+ | Flere samlinger, sæsoner (jul, fars dag), flere sprog (DE/SE) | | |
 
 **Budget for de 90 dage:** ca. 5.000 kr. (prøvetryk ca. 1.000, Etsy-gebyrer ca. 500, Meta-test 3.000, buffer ca. 500). Ingen faste omkostninger ud over den eksisterende hosting.
@@ -82,7 +97,8 @@ Fem muligheder blev scoret på efterspørgsel, indtjening pr. salg, genbrug af d
 
 - [ ] **Login til WordPress fra Command Center-sessionen:** applikationsadgangskoden for steamgears.eu skal rettes. Den gemte nøgle gav "Unknown username" (13. november).
 - [ ] Autopilot 7.76.0 og Command Center 7.28.0 er opdateret (`bash scripts/update.sh --version` giver kode 0).
-- [ ] Opret en Gelato-konto, og installér **Gelato Integration for WooCommerce**. Brug fragtpriser i realtid.
+- [x] Gelato-konto og API-nøgle. Priser og fragt til Danmark er hentet (afsnit 4).
+- [ ] Installér **Gelato Integration for WooCommerce**. Brug fragtpriser i realtid, eller faste 49 kr. med fri fragt over 499 kr. (afsnit 4).
 - [ ] Bestil en testordre til Danmark: 50×70 uden ramme og i ramme. Notér pris, leveringstid og kvalitet.
 - [ ] WooCommerce: kategorier pr. samling, variationer for størrelse og ramme, fragtpris synlig i produktoversigten.
 - [ ] Ryd eller skjul de gamle dropshipping-produkter. 301-omdiriger de vigtigste URL'er til nye samlinger, og kontrollér det med Command Centers redirect-audit.
@@ -109,7 +125,7 @@ Fem muligheder blev scoret på efterspørgsel, indtjening pr. salg, genbrug af d
 - konvertering (mål 1,5 % eller mere)
 - gennemsnitlig ordre (mål over 450 kr.)
 - andel af ordrer med ramme
-- pris pr. kunde (højst 274 kr.)
+- pris pr. kunde (under produktets dækning, afsnit 4)
 - returandel (højst 3 %)
 
 | Risiko | Modtræk |

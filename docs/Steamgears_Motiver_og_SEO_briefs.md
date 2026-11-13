@@ -54,6 +54,7 @@ Prompt-skabelon (tilføjes hver prompt-kerne):
 | 8 | Patenttegning: urværk | Samme stil som #7: urværk set forfra og i snit | blueprint plakat | C | Ja |
 | 9 | Patenttegning: luftskib | Samme stil som #7: luftskib set fra siden med mål | luftskib plakat | C | Ja |
 | 10 | Damptoget | Lokomotiv med messingdetaljer over en stenbro i bjerge, damp i lyset | damptog plakat | – | Ja |
+| 61 | Urværkshjertet (*Cor Horologium*) | Anatomisk hjerte af kobberplader med messingrør, ventilhjul og urværk bag et vindue, planche med latinske etiketter | anatomisk hjerte plakat | A | Ja |
 
 ## Samling 2: Dieselpunk & Art Deco
 

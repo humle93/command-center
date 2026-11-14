@@ -66,6 +66,36 @@ CLASSICS = [
      "of copper plates waiting outside. Magical, warm, nostalgic."),
 ]
 
+PUNK = [
+    ("D1", "Zeppelin Metropolis (dieselpunk)", "1930'er art deco-storby. Passer til samling 2.",
+     "A towering 1930s art deco metropolis at night, a massive riveted diesel zeppelin docking at the mooring mast of a "
+     "stepped skyscraper, searchlight beams sweeping the clouds, rain-slick streets far below with vintage cars and "
+     "glowing signs without readable text, smoke and steam, gold and black palette, dramatic and monumental."),
+    ("D2", "The Diesel Aviatrix (dieselpunk)", "Pin-up-agtig heltinde, fuldt påklædt. Kan annonceres.",
+     "A confident, beautiful woman aviator in her thirties stands beside a huge riveted silver propeller aircraft on "
+     "an airfield at dawn, wearing a brown leather flight jacket with sheepskin collar, a white silk scarf blowing in "
+     "the wind, high-waisted trousers, tall boots and a leather flying helmet with goggles pushed up. Heroic 1930s "
+     "mood, fuel trucks and hangars behind her, warm sunrise light with long shadows. Fully clothed, tasteful."),
+    ("D3", "Iron Titan (dieselpunk)", "Episk 70×100-motiv.",
+     "A colossal riveted diesel-powered walking machine strides through an industrial harbour at sunset, exhaust "
+     "stacks pouring black smoke, cranes and cargo ships around it, tiny workers silhouetted on the docks for scale, "
+     "orange sky with heavy clouds, gunmetal, rust and brass tones, dramatic perspective from below."),
+    ("C1", "The Clockmaker's Workshop (clockwork punk)", "Renæssance, kun urværk, ingen damp.",
+     "A Renaissance inventor's workshop lit by candles and a tall window, an elegant clockwork automaton of carved "
+     "walnut wood and polished brass with visible gears and springs stands half-assembled on a workbench, parchment "
+     "design drawings, quills, hourglasses, brass astrolabes and wooden gear wheels hanging from the beams, warm "
+     "golden light and soft dust in the air. No steam, only clockwork."),
+    ("C2", "The Ornithopter (clockwork punk)", "Lyst og sommerligt. Godt som sæt med C1 og C3.",
+     "A wooden clockwork ornithopter with canvas wings and brass gears flies over a Renaissance hilltop city of "
+     "terracotta roofs, bell towers and a cathedral dome at golden hour, a pilot in a leather cap at the controls, "
+     "cypress trees and rolling hills beyond, soft warm light. No steam, only clockwork."),
+    ("C3", "The Automaton Lady (clockwork punk)", "Elegant og mystisk, fuldt påklædt.",
+     "An elegant female clockwork automaton with a porcelain face, brass joints and visible gears behind a glass panel "
+     "in her chest, wearing a high-collared Renaissance gown of deep green velvet with gold embroidery, standing in a "
+     "cabinet of curiosities among globes, astrolabes, pocket watches and specimen jars, candlelight and soft window "
+     "light. Fully clothed, tasteful, graceful and slightly mysterious."),
+]
+
 
 def card(code, title, note, prompt):
     full = f"{prompt}\n\n{STYLE}"
@@ -94,7 +124,7 @@ table {{ border-collapse: collapse; width: 100%; font-size: 9.5pt; }}
 td, th {{ border-bottom: 1px solid #E6D7B4; padding: 1.5mm 2mm; text-align: left; vertical-align: top; }}
 </style></head><body>
 <h1>Steamgears Prints</h1>
-<p class="lead"><b>Gemini-prompter til realistiske plakater</b> · 13. november 2026 · 12 motiver</p>
+<p class="lead"><b>Gemini-prompter til realistiske plakater</b> · 14. november 2026 · 18 motiver</p>
 
 <div class="box"><b>Sådan bruger du dem i Gemini</b><br>
 1. Åbn gemini.google.com, og vælg billedgenerering (Pro).<br>
@@ -118,6 +148,9 @@ td, th {{ border-bottom: 1px solid #E6D7B4; padding: 1.5mm 2mm; text-align: left
 
 <h2 style="break-before: page">Realistiske udgaver af udkastene</h2>
 {''.join(card(*c) for c in CLASSICS)}
+
+<h2 style="break-before: page">Dieselpunk og clockwork punk</h2>
+{''.join(card(*c) for c in PUNK)}
 
 <h2>Upload</h2>
 <table>

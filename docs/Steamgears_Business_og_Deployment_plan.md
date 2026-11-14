@@ -131,7 +131,9 @@ Priserne er hentet fra Gelatos API (`/v3/products/{uid}/prices` og `/v4/orders:q
 - [ ] Fragt: fragtpriser i realtid fra Gelato, eller faste 49 kr. med fri fragt over 499 kr. (afsnit 4).
 - [ ] Bestil en testordre til Danmark: 50×70 uden ramme og i ramme. Notér pris, leveringstid og kvalitet.
 - [ ] WooCommerce: kategorier pr. samling, variationer for størrelse og ramme, fragtpris synlig i produktoversigten.
-- [ ] Ryd eller skjul de gamle dropshipping-produkter. 301-omdiriger de vigtigste URL'er til nye samlinger, og kontrollér det med Command Centers redirect-audit.
+- [x] **Gamle dropship-varer sat til kladde 14. november** (id 477, 483, 489, 491, 493, 495: briller, hat, to korsetter, to frakker). Rank Math-viderestilling 89–94 har fået produktets nuværende adresse som ekstra kilde og peger nu på `/shop/` (testet: 301). Lommeurene (940, 941) er ikke rørt, men bør tjekkes: har de en leverandør?
+- [x] **Kategorier 14. november:** de 3 Herbarium-plakater ligger nu også i *Posters & Wall Art* og *Mechanical Nature & Botany*. De 5 serie-kategorier har fået engelsk tekst og Rank Math-titel, -beskrivelse og -fokusord. De 4 tomme (*Airship Pirates & Sky Armada*, *Engineers & Steam Machines*, *Steam Rail Legends*, *Neodeco & Cameo Series*) er `noindex, follow`, indtil der er produkter i dem. **Husk at fjerne `noindex`**, når de får produkter.
+- [ ] *Posters & Wall Art*-teksten lover 30×40 og 50×70, men Herbarium-plakaterne har kun én størrelse og pris. Ret produkterne (størrelser via Gelato) eller teksten.
 - [ ] Command Center:
   - overvåg forsiden og kassen
   - kør et planlagt crawl

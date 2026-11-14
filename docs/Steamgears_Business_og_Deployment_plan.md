@@ -155,6 +155,25 @@ Priserne er hentet fra Gelatos API (`/v3/products/{uid}/prices` og `/v4/orders:q
   - 11 udgivne indlæg linker til de 6 fjernede varer (kostumeguider). Linkene viderestilles til `/shop/`, så ingen får 404, men teksterne anbefaler varer, butikken ikke har.
   - Sitet er i dag mest et kostume- og DIY-indholdssite. Indlæggene trækker trafik og skal ikke slettes, men produktanbefalingerne bør skiftes til plakater, T-shirts og hoodies.
 
+### Optimering af hele sitet (14. november)
+
+- **Forside (id 42):** skrevet om til plakater og tøj i samme design. 6 rigtige produkter med kronepriser, sande påstande (gratis fragt i DK, 14 dages fortrydelsesret, trykt på bestilling), ny titel, Rank Math og Open Graph. Sitets undertitel er nu "Steampunk posters, prints & apparel", og organisationsbeskrivelsen i schema er rettet.
+- **Gaveguiden (id 804):** skrevet om fra bunden med de varer, butikken har, og kronepriser. Adressen er den samme.
+- **Fragtsider (582, 1396):** "partner warehouse" er erstattet af plakater fra en separat trykpartner i EU.
+- **Links:** 111 links i 31 indlæg pegede på fjernede varer. De går nu til korsetguiden, brille-guiden, kostume-guiden eller *Posters & Wall Art*. Der er 0 døde produktlinks tilbage.
+- **Kategorier:** T-shirts, hoodies, cover og ure ligger i *T-Shirts*, *Hoodies*, *Phone Cases* og *Jewelry*. Plakaterne ligger også i *Vintage Botanical Prints*, *Steampunk Gifts* og *Clockwork*. 21 tomme kategorier er `noindex, follow`. 5 viderestillinger til tomme kategorier går nu til `/shop/`.
+- **Menu (header-skabelon 12):** *Atelier* er skiftet ud med *Posters & Prints*.
+- **Guides udgivet:** *Poster Sizes Explained* og *Gallery Wall Ideas*.
+- **Plugins og butik:**
+  - Salg er begrænset til de 27 EU-lande. Ny fragtzone "EU (outside Denmark)" med 69 kr. Danmark har stadig gratis fragt.
+  - Bankoverførsel er slået fra (Stripe: kort, Link, Klarna, Amazon Pay).
+  - **Printful Integration for WooCommerce** er installeret, fordi tøjet trykkes hos Printful. **Mangler:** forbindelse til Printful-kontoen.
+  - **UpdraftPlus** er installeret: database dagligt (gem 14), filer ugentligt (gem 4), første kørsel 15. november kl. 00.50. **Mangler:** ekstern lagring.
+  - **Redirection** er deaktiveret (tabellen manglede). Rank Maths 104 viderestillinger bruges.
+  - Shop-siden og Rank Maths arkivbeskrivelse er rettet.
+- **Hændelse:** sitet svarede 503 i 1–2 minutter, efter hele W3TC-cachen blev tømt flere gange tæt efter hinanden. PHP-delen sagde også nej enkelte gange senere. Tøm kun enkelte sider, ikke hele cachen, og tjek PHP-grænsen hos Simply.com.
+- **Mangler (dig):** forbind Printful, sæt UpdraftPlus til Google Drive, SMTP i WP Mail SMTP (i dag PHP `mail()`, havner ofte i spam), og evt. MobilePay i Stripe-dashboardet.
+
 ## 8. Lovkrav
 
 - [ ] Fragtpris vises allerede i produktoversigten (Forbrugerombudsmanden har politianmeldt for det modsatte).

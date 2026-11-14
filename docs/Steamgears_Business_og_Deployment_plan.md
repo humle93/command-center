@@ -118,7 +118,7 @@ Priserne er hentet fra Gelatos API (`/v3/products/{uid}/prices` og `/v4/orders:q
 - WordPress 7.1.4, WooCommerce 11.2.2, Rank Math, Stripe, Autopilot **7.86.0**. **Gelato Integration for WooCommerce 1.3.3**, **Pinterest for WooCommerce** og **Google for WooCommerce** er allerede installeret.
 - 20 udgivne produkter: T-shirts (530 kr.), hoodies (335 kr.), mobilcovers (330 kr.), tre Herbarium-plakater (395 kr., én størrelse), lommeure (865–1.000 kr.) og gamle dropship-varer (korsetter, frakker, hat, briller).
 - Kategorierne til de nye serier findes allerede, men er tomme: *Airship Pirates & Sky Armada*, *Engineers & Steam Machines*, *Mechanical Nature & Botany*, *Neodeco & Cameo Series*, *Steam Rail Legends* og *Posters & Wall Art*.
-- **Fejl:** de eksisterende produkter har ingen Gelato-kobling (ingen Gelato-felter på fx Clockwork Rose, id 965). En ordre bliver altså ikke sendt til tryk af sig selv. Plakaterne har heller ingen størrelser.
+- **Gelato (tjekket 14. november):** butikken er forbundet. API-nøglen *Gelato-live* blev oprettet 13. november kl. 15.46 og senest brugt 14. november kl. 10.30. 6 Gelato-webhooks er aktive uden fejl. Gelato-kontoen har **0 ordrer**. Om produkterne er koblet til trykfiler, kan ikke ses fra WordPress (Gelato gemmer koblingen hos sig selv). Det tjekkes i Gelatos dashboard eller med en testordre. Plakaterne har kun én størrelse.
 
 
 - [ ] **Adgang til WordPress:** connectoren *Steam* (AI Engine på steamgears.eu) og *Novamira – Steamgears* (`/wp-json/mcp/novamira-oauth`) forbinder kun ind imellem i cloud-sessionerne. Applikationsadgangskoden i miljøet *command-center* skal gemmes igen med brugernavnet `steam`.
@@ -127,7 +127,8 @@ Priserne er hentet fra Gelatos API (`/v3/products/{uid}/prices` og `/v4/orders:q
 - [x] Autopilot er på 7.86.0. [ ] Command Center 7.28.0 tjekkes på serveren (`bash scripts/update.sh --version` giver kode 0).
 - [x] Gelato-konto og API-nøgle. Priser og fragt til Danmark er hentet (afsnit 4).
 - [x] **Gelato Integration for WooCommerce** er installeret (1.3.3).
-- [ ] **Kobl produkterne til Gelato.** Produkter skal oprettes eller kobles fra Gelatos dashboard (med trykfil), ellers bliver ordrer ikke sendt til tryk. Start med de tre Herbarium-plakater, og tjek tøj og covers.
+- [x] Butikken er forbundet til Gelato (13. november).
+- [ ] **Tjek produktkoblingen** i Gelatos dashboard (*Stores → steamgears.eu → Products*): står de 3 Herbarium-plakater, T-shirts, hoodies og covers som koblet? Bekræft med én testordre, der dukker op i Gelato.
 - [ ] Fragt: fragtpriser i realtid fra Gelato, eller faste 49 kr. med fri fragt over 499 kr. (afsnit 4).
 - [ ] Bestil en testordre til Danmark: 50×70 uden ramme og i ramme. Notér pris, leveringstid og kvalitet.
 - [ ] WooCommerce: kategorier pr. samling, variationer for størrelse og ramme, fragtpris synlig i produktoversigten.

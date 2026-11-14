@@ -13,6 +13,7 @@
 **Samme kaptajn i R2, R3 og R3B:** vedhæft billedet sg-air-001-aurora-helm-r1a.jpg fra denne mappe i samme besked som prompten.
 **Hold det pænt:** alle personer er fuldt påklædte og uden udfordrende positurer. Ingen kendte kunstnere, film eller spil.
 **Opløsning:** bed om den største størrelse ChatGPT kan levere. Vi opskalerer eller laver trykfiler bagefter.
+**Se også:** dokumentet "LÆS MIG – sådan skal billederne ligge" i samme mappe (filnavne, opløsning, tjekliste og hvordan vi vælger med stjerner).
 
 ## Airship Chronicles (luftskibspiraten)
 

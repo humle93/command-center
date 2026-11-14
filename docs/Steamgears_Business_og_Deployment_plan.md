@@ -174,6 +174,14 @@ Priserne er hentet fra Gelatos API (`/v3/products/{uid}/prices` og `/v4/orders:q
 - **Hændelse:** sitet svarede 503 i 1–2 minutter, efter hele W3TC-cachen blev tømt flere gange tæt efter hinanden. PHP-delen sagde også nej enkelte gange senere. Tøm kun enkelte sider, ikke hele cachen, og tjek PHP-grænsen hos Simply.com.
 - **Mangler (dig):** forbind Printful, sæt UpdraftPlus til Google Drive, SMTP i WP Mail SMTP (i dag PHP `mail()`, havner ofte i spam), og evt. MobilePay i Stripe-dashboardet.
 
+### Roadmap-runde (14. november, eftermiddag)
+
+- **Rank Math SEO-audit:** 92 → **100/100**. Der var 2 sider uden fokusord og 30 sider/varer, hvor fokusordet ikke stod i titlen. Rettet ved at gøre et ord fra titlen til primært fokusord og beholde det gamle søgeord som sekundært. Ingen synlige titler eller menuer er ændret. De gamle værdier er gemt i optionen `steamgears_fk_backup_20261114`. Eneste resterende fejl er Rank Maths egen mobilhastighedstest, som ikke kunne køre hos dem.
+- **Google-produktfeed (Google for WooCommerce 3.10):** 20 varer (3 hoodies med varianter, Raven-printet og et produkt i papirkurven) var afvist med `[ageGroup] … not a valid choice`. Årsagen var attributreglerne: de stod som `fixed_value:adult`/`fixed_value:unisex`/`fixed_value:Steamgears`, men pluginnet sender teksten, som den står. Reglerne er nu `adult`, `unisex`, `Steamgears` og `Multicolour`, verificeret via pluginnets `ProductFactory` (alder `adult`, mærke `Steamgears`), og en ny synkronisering af de 14 varer ligger i kø. Svaret fra Merchant Center er ikke set endnu.
+- **Pinterest:** konto verificeret for steamgears.eu, produktsynk slået til, feedet blev bygget i dag med 46 varer og er registreret. Intet at rette.
+- **Ny guide (brief 7):** [*Steampunk Home Decor*](https://steamgears.eu/steampunk-home-decor/) (id 1816, ca. 1.100 ord, 5 H2 + rum for rum) med links til tre plakater, plakatkategorien, størrelsesguiden, gallerivæg-guiden, DIY-guiden og gaveguiden. DIY-indlægget (1357) linker tilbage. Svarer 200. *Poster Sizes* og *Gallery Wall Ideas* har fået hero-billedet som udvalgt billede, og de tre adresser er sendt til IndexNow.
+- **AI-synlighed:** ingen brand oprettet endnu. Sproget kan ikke ændres bagefter, og Rank Math tillader kun én platform uden Expert-planen. **Mangler (dig):** vælg ChatGPT eller Gemini.
+
 ## 8. Lovkrav
 
 - [ ] Fragtpris vises allerede i produktoversigten (Forbrugerombudsmanden har politianmeldt for det modsatte).

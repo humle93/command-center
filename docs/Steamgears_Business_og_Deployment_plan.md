@@ -143,6 +143,18 @@ Priserne er hentet fra Gelatos API (`/v3/products/{uid}/prices` og `/v4/orders:q
 - [ ] Pinterest for WooCommerce er installeret: forbind kataloget og tjek, at produkterne synkroniseres. Autopilot: 5 opslag om dagen fra kladdekøen.
 - [ ] Etsy-butik koblet på Gelato med samme motiver og priser plus Etsy-gebyrer.
 
+### Indhold på sitet (14. november)
+
+- [x] Siden `/build/weathering/` hed "crawltest". Titel og Rank Math er rettet.
+- [x] To nye guides som **kladder** (ikke udgivet): *Poster Sizes Explained* (id 1773, `/poster-sizes-guide/`, brief 9) og *Gallery Wall Ideas* (id 1774, `/gallery-wall-ideas/`, brief 6). De linker til hinanden, til *Posters & Wall Art*, *Mechanical Nature & Botany* og DIY-guiden til vægdekoration. Rank Math-titel, -beskrivelse og -fokusord er sat.
+- Briefs, der allerede er dækket af eksisterende indlæg: brief 10 (*What Is Dieselpunk?*, *Steampunk vs. Dieselpunk*), delvist brief 7 (*DIY Steampunk Wall Decor*) og brief 8 (*Steampunk Gift Guide 2026*).
+- [ ] **Tekster, der stadig sælger de fjernede varer:**
+  - Forsiden (id 42) lover "hand-picked goggles, corsets and brocade".
+  - Gaveguiden (id 804) nævner plakater til "$21.90 / $29.90" (forkert valuta og pris) og *Sky Corsair*-plakaten, som ikke længere findes.
+  - Fragtsiderne (id 582 og 1396) nævner "partner warehouse" for udstyr og tilbehør.
+  - 11 udgivne indlæg linker til de 6 fjernede varer (kostumeguider). Linkene viderestilles til `/shop/`, så ingen får 404, men teksterne anbefaler varer, butikken ikke har.
+  - Sitet er i dag mest et kostume- og DIY-indholdssite. Indlæggene trækker trafik og skal ikke slettes, men produktanbefalingerne bør skiftes til plakater, T-shirts og hoodies.
+
 ## 8. Lovkrav
 
 - [ ] Fragtpris vises allerede i produktoversigten (Forbrugerombudsmanden har politianmeldt for det modsatte).

@@ -1,6 +1,6 @@
 # Steamgears Prints – business plan og deployment plan
 
-**Dato:** 13. november 2026 · **Beslutning:** plakater på bestilling (print-on-demand) · **Erstatter:** dropshipping-planen af 13. november 2026
+**Dato:** 13. november 2026 · **Opdateret:** 14. november 2026 · **Beslutning:** plakater på bestilling (print-on-demand) · **Erstatter:** dropshipping-planen af 13. november 2026
 
 steamgears.eu bliver en plakatbutik med retro- og steampunk-motiver. Gelato trykker i EU og sender direkte til kunden, så der er intet lager og ingen leverandørjagt. Pengene tjenes på plakater i ramme og på sæt. Plakater uden ramme er døråbneren via Pinterest, Etsy og SEO, som Command Center og Autopilot allerede kan drive.
 
@@ -29,8 +29,27 @@ Fem muligheder blev scoret på efterspørgsel, indtjening pr. salg, genbrug af d
 | **Dieselpunk & Art Deco** | Byer, tog, fly og vintage-reklamer i deco-stil | Ja | Bred appel |
 | **Værksted & Garage** | Retro-skilte, motorcykler, værktøj | Ja | Bred målgruppe og gaveegnet |
 | **Retro Pin-up** | Egne motiver i "sød" stil, uden nøgenhed | **Nej** (Metas regler) | Pinterest, Etsy og SEO |
+| **Det mekaniske cirkus** | Akrobater, karruseller og telte i messing og striber | Ja | Pinterest-trend 2026 (+70–130 % søgninger) |
+| **Mekanisk botanik** | Botaniske plancher af kobber og tandhjul | Ja | Den største faste kategori med egen vinkel |
+| **Airship Chronicles** (realistisk serie) | Luftskibskaptajnen og hendes verden, malerisk realisme | Ja | Hovedserien: sælges enkeltvis og som sæt |
+| **Engine Room / Mechanica Naturalis** (realistisk) | Mekanikeren, den mekaniske ugle og urværkshjertet | Ja | Supplerer hovedserien |
+| **Dieselpunk & Clockwork punk** (realistisk, ny) | Zeppelin-storby, aviatrix, iron titan; renæssanceværksted, ornithopter, automat | Ja | Udvider universet. Prompter D1–D3 og C1–C3 |
 
-**Formater:** 30×40, 50×70 og 70×100 cm, uden ramme eller i ramme, plus sæt med 2–3 motiver i samme stil.
+**Formater:** 30×40, 50×70 og 70×100 cm, uden ramme eller i ramme, plus sæt med 2–3 motiver i samme stil. **Metal** (3 mm aluminium hos Gelato, også i børstet sølv) er et tilvalg til værkstedsskilte og patenttegninger: 30×40 standard koster 180 kr. + 59 kr. fragt (dækning ca. 150 kr. ved 449 kr.), 50×70 standard koster 284 kr. + 147 kr. (dækning ca. 192 kr. ved 799 kr.). Metal trykkes i Tyskland og leveres på 7–11 dage.
+
+**NSFW:** ikke på steamgears.eu. Stripe forbyder AI-genereret voksenindhold, Meta og Pinterest begrænser nøgenhed, og Google SafeSearch kan filtrere hele domænet. Pin-up forbliver fuldt påklædt. En eventuel NSFW-afdeling hører til et separat domæne med egen betalingsudbyder og motiver lavet af mennesker.
+
+## 2b. Motivproduktion
+
+| Trin | Værktøj | Status 14. november |
+| --- | --- | --- |
+| Prompter | [`steamgears-udkast/Gemini_prompter.pdf`](steamgears-udkast/Gemini_prompter.pdf): 18 prompter (R1–R5, K1–K7, D1–D3, C1–C3) | Færdig |
+| Billeder | Gemini Pro (manuelt), Canva (kvote brugt op) eller OpenRouter via [`gen_batch.py`](steamgears-udkast/gen_batch.py) med `google/gemini-3-pro-image` i 4K | 12 billeder fra Gemini på Drive. 2 fra Canva (samme kaptajn i Sky Boarding og The Storm Plank). OpenRouter venter på kredit |
+| Mockups | [`make_posters.py`](steamgears-udkast/make_posters.py): 5:7 med titel og serie | 12 mockups i [`steamgears-udkast/realistisk/`](steamgears-udkast/realistisk/) |
+| Trykfiler | Mindst ca. 4.100 px på højkanten til 50×70 (150 dpi), helst 8.300 px (300 dpi) | **Mangler:** Gemini-billederne er kun ca. 900×1.250 px. De laves igen i 4K via OpenRouter (ca. $0,24 pr. billede) eller opskaleres |
+| Produkter | Gelato-plugin på WooCommerce | Mangler WordPress-adgang (se afsnit 7) |
+
+**Konsistens:** samme kaptajn i hele Airship Chronicles. Billeder laves med The Aurora Helm som referencebillede (`gen_batch.py --ref`).
 
 ## 3. Motiver og ophavsret
 
@@ -86,7 +105,7 @@ Priserne er hentet fra Gelatos API (`/v3/products/{uid}/prices` og `/v4/orders:q
 
 | Fase | Uger | Indhold | Fortsæt hvis | Stop eller ret hvis |
 | --- | --- | --- | --- | --- |
-| 0. Fundament | 1–2 | Gelato-konto, WooCommerce-plugin, testordre til DK, 60 motiver i 6 samlinger (se motivlisten) | Kvaliteten er god, levering højst 5 dage, priserne bekræftet | Kvaliteten holder ikke, så prøv Prodigi eller Printful |
+| 0. Fundament | 1–2 | Gelato-konto, WooCommerce-plugin, testordre til DK, første 18 realistiske motiver som trykfiler i 4K (afsnit 2b), resten af motivlisten løbende | Kvaliteten er god, levering højst 5 dage, priserne bekræftet | Kvaliteten holder ikke, så prøv Prodigi eller Printful |
 | 1. Organisk start | 3–6 | Pinterest hver dag, Etsy-butik, 10 SEO-sider, e-mail-flows | Mindst 1.000 besøg om måneden og første salg | 0 salg efter 6 uger: skift motiver eller samling |
 | 2. Kurvværdi og test | 7–12 | Rammer og sæt, tilbud ved kassen, Meta-test på 3.000 kr. | Ordre over 450 kr. og pris pr. kunde under produktets dækning (afsnit 4) | Annoncerne giver underskud: kun organisk |
 | 3. Skalering | 13+ | Flere samlinger, sæsoner (jul, fars dag), flere sprog (DE/SE) | | |
@@ -95,7 +114,9 @@ Priserne er hentet fra Gelatos API (`/v3/products/{uid}/prices` og `/v4/orders:q
 
 ## 7. Teknisk tjekliste (fase 0)
 
-- [ ] **Login til WordPress fra Command Center-sessionen:** applikationsadgangskoden for steamgears.eu skal rettes. Den gemte nøgle gav "Unknown username" (13. november).
+- [ ] **Adgang til WordPress:** connectoren *Steam* (AI Engine på steamgears.eu) og *Novamira – Steamgears* (`/wp-json/mcp/novamira-oauth`) forbinder kun ind imellem i cloud-sessionerne. Applikationsadgangskoden i miljøet *command-center* skal gemmes igen med brugernavnet `steam`.
+- [ ] **OpenRouter-kredit:** kontoen stod i minus ($15,13 brugt af $15) 14. november. Det stopper både billedproduktionen og Command Centers AI-funktioner.
+- [ ] **Trykfiler i 4K** for de første 18 motiver (afsnit 2b), og en testordre af mindst ét af dem.
 - [ ] Autopilot 7.76.0 og Command Center 7.28.0 er opdateret (`bash scripts/update.sh --version` giver kode 0).
 - [x] Gelato-konto og API-nøgle. Priser og fragt til Danmark er hentet (afsnit 4).
 - [ ] Installér **Gelato Integration for WooCommerce**. Brug fragtpriser i realtid, eller faste 49 kr. med fri fragt over 499 kr. (afsnit 4).
@@ -135,6 +156,8 @@ Priserne er hentet fra Gelatos API (`/v3/products/{uid}/prices` og `/v4/orders:q
 | Platforme (Etsy rydder op i AI-indhold, Meta afviser pin-up) | Kuratering, flere kanaler, pin-up kun organisk |
 | Gelatos kvalitet eller priser passer ikke | Prodigi og Printful som alternativ (fase 0-gate) |
 | Pinterest-trafik konverterer dårligt | Bedre motiver og titler. Etsy og SEO som andre ben |
+| Billeder i for lav opløsning | Lav trykfiler i 4K før salg. Testordre på hvert nyt format |
+| Billed-AI-kvoter (Gemini, Canva) løber tør | OpenRouter som fast kilde med betaling pr. billede |
 
 **Åbne spørgsmål:**
 - Hvem laver og kuraterer motiverne, og hvor mange timer om ugen?

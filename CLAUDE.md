@@ -27,6 +27,13 @@ kørte grønt på `627cd87`. CI tjekker desuden at alle 17 indlejrede filer i `i
 
 ## Ændringer i denne arbejdsperiode
 
+### Steamgears Prints: forretningsplan og plakater (12.–14. november) — kun dokumentation
+- **Beslutning:** steamgears.eu bliver plakatbutik på bestilling (Gelato) i stedet for dropshipping. Grundlaget (research, scoring af fem modeller, Gelato-priser hentet via API) står i [`docs/Steamgears_Business_og_Deployment_plan.md`](docs/Steamgears_Business_og_Deployment_plan.md).
+- **Motiver:** [`docs/Steamgears_Motiver_og_SEO_briefs.md`](docs/Steamgears_Motiver_og_SEO_briefs.md) (61 motiver, 12 briefs) og [`docs/steamgears-udkast/`](docs/steamgears-udkast/): SVG-udkast, 12 realistiske mockups, `Gemini_prompter.pdf` (18 prompter) og scripts (`gen_batch.py` til OpenRouter, `make_posters.py` til mockups).
+- **Miljøet `command-center`** (personligt cloud-miljø) har nøgler til `product.gelatoapis.com`, `order.gelatoapis.com` (kun prisoverslag brugt), `openrouter.ai` og `steamgears.eu` (forkert brugernavn; skal være `steam`), samt adgang til `www.canva.com`.
+- **Åbent:** OpenRouter-kontoen er i minus (det stopper også appens AI-funktioner), billederne er for små til tryk (ca. 900×1.250 px), og WordPress-connectorerne forbinder kun ind imellem.
+- Ingen kodeændring i `app/`, så `install.sh` og testsuiterne er urørte.
+
 ### Ultra.cc uden Cloudflare (v7.28.0) — implementeret
 - **Baggrund:** ønsket var "Fjern Cloudflare og lav almindelig login via Ultra cc serveren". Koden havde ingen Cloudflare-afhængighed; tunnellen (`trycloudflare`, ny URL ved hver genstart) fandtes kun fordi appen ikke kunne ligge på en understi, og Ultra.cc's nginx kun giver `location /<app>/` på `https://<bruger>.<server>.usbx.me` (filerne i `~/.apps/nginx/proxy.d/` er location-blokke, ikke `server { }` — den gamle vejledning var forkert der).
 - **Nyt:** `cc_base_path()` → `CC_BASE_PATH` (env, ellers stien fra `CC_PUBLIC_URL`). `BasePathMiddleware` (ren ASGI, mellem GZip og `auth_middleware`) stripper `/cc` ind, sætter det på `Location`, `Set-Cookie Path`, `href/action/src/formaction` i HTML og injicerer `window.CC_BASE` + en `fetch`-indpakning. `/cc` → 307 `/cc/`. Uden understi: intet ændret. `ccEstimate` i dashboardet stripper præfikset.

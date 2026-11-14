@@ -23,6 +23,9 @@ findes.
 | [`Command_Center_MCP.md`](Command_Center_MCP.md) | Research og plan for MCP-adgang: protokol, nøgler, OAuth, værktøjer |
 | [`Command_Center_Migrering.md`](Command_Center_Migrering.md) | Trin for trin: flyt en server fra den gamle linje over på dette repo, så versionsguarden beskytter den |
 | [`agents-md/steamgears-site.md`](agents-md/steamgears-site.md) | Sammenlagt `AGENTS.md` til `steamgears-site` (lokal §1-§6 + fælles §7-§10) |
+| [`Steamgears_Business_og_Deployment_plan.md`](Steamgears_Business_og_Deployment_plan.md) | Forretningsplan for steamgears.eu: plakater på bestilling via Gelato, økonomi pr. ordre, 90-dages plan med gates, tjeklister (ikke en del af appen) |
+| [`Steamgears_Motiver_og_SEO_briefs.md`](Steamgears_Motiver_og_SEO_briefs.md) | 61 motiver i 6 samlinger og 12 SEO-briefs til Command Centers Vækst-fane |
+| [`steamgears-udkast/`](steamgears-udkast/) | Plakat-udkast (SVG), realistiske mockups, Gemini-prompter (PDF) og scripts til billeder via OpenRouter |
 | `docs/ROADMAP.md` | Dette dokument: dokumentation, færdigt, næste, senere og endgoal |
 | [`CLAUDE.md`](../CLAUDE.md) | Status/handoff, kendte begrænsninger og næste skridt |
 | [`AGENTS.md`](../AGENTS.md) | Faste regler for agenter (docs i samme commit, test før commit) |

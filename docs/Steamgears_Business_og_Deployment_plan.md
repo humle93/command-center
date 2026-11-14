@@ -114,12 +114,21 @@ Priserne er hentet fra Gelatos API (`/v3/products/{uid}/prices` og `/v4/orders:q
 
 ## 7. Teknisk tjekliste (fase 0)
 
+**Status på sitet 14. november 2026** (læst via Steam-connectoren, intet ændret):
+- WordPress 7.1.4, WooCommerce 11.2.2, Rank Math, Stripe, Autopilot **7.86.0**. **Gelato Integration for WooCommerce 1.3.3**, **Pinterest for WooCommerce** og **Google for WooCommerce** er allerede installeret.
+- 20 udgivne produkter: T-shirts (530 kr.), hoodies (335 kr.), mobilcovers (330 kr.), tre Herbarium-plakater (395 kr., én størrelse), lommeure (865–1.000 kr.) og gamle dropship-varer (korsetter, frakker, hat, briller).
+- Kategorierne til de nye serier findes allerede, men er tomme: *Airship Pirates & Sky Armada*, *Engineers & Steam Machines*, *Mechanical Nature & Botany*, *Neodeco & Cameo Series*, *Steam Rail Legends* og *Posters & Wall Art*.
+- **Fejl:** de eksisterende produkter har ingen Gelato-kobling (ingen Gelato-felter på fx Clockwork Rose, id 965). En ordre bliver altså ikke sendt til tryk af sig selv. Plakaterne har heller ingen størrelser.
+
+
 - [ ] **Adgang til WordPress:** connectoren *Steam* (AI Engine på steamgears.eu) og *Novamira – Steamgears* (`/wp-json/mcp/novamira-oauth`) forbinder kun ind imellem i cloud-sessionerne. Applikationsadgangskoden i miljøet *command-center* skal gemmes igen med brugernavnet `steam`.
 - [ ] **OpenRouter-kredit:** kontoen stod i minus ($15,13 brugt af $15) 14. november. Det stopper både billedproduktionen og Command Centers AI-funktioner.
 - [ ] **Trykfiler i 4K** for de første 18 motiver (afsnit 2b), og en testordre af mindst ét af dem.
-- [ ] Autopilot 7.76.0 og Command Center 7.28.0 er opdateret (`bash scripts/update.sh --version` giver kode 0).
+- [x] Autopilot er på 7.86.0. [ ] Command Center 7.28.0 tjekkes på serveren (`bash scripts/update.sh --version` giver kode 0).
 - [x] Gelato-konto og API-nøgle. Priser og fragt til Danmark er hentet (afsnit 4).
-- [ ] Installér **Gelato Integration for WooCommerce**. Brug fragtpriser i realtid, eller faste 49 kr. med fri fragt over 499 kr. (afsnit 4).
+- [x] **Gelato Integration for WooCommerce** er installeret (1.3.3).
+- [ ] **Kobl produkterne til Gelato.** Produkter skal oprettes eller kobles fra Gelatos dashboard (med trykfil), ellers bliver ordrer ikke sendt til tryk. Start med de tre Herbarium-plakater, og tjek tøj og covers.
+- [ ] Fragt: fragtpriser i realtid fra Gelato, eller faste 49 kr. med fri fragt over 499 kr. (afsnit 4).
 - [ ] Bestil en testordre til Danmark: 50×70 uden ramme og i ramme. Notér pris, leveringstid og kvalitet.
 - [ ] WooCommerce: kategorier pr. samling, variationer for størrelse og ramme, fragtpris synlig i produktoversigten.
 - [ ] Ryd eller skjul de gamle dropshipping-produkter. 301-omdiriger de vigtigste URL'er til nye samlinger, og kontrollér det med Command Centers redirect-audit.
@@ -128,7 +137,7 @@ Priserne er hentet fra Gelatos API (`/v3/products/{uid}/prices` og `/v4/orders:q
   - kør et planlagt crawl
   - læg 5 AI-synlighedsspørgsmål ind (fx "hvor køber jeg en steampunk plakat?")
   - lav briefs til de første 10 sider
-- [ ] Autopilot: Pinterest som kanal med 5 opslag om dagen fra kladdekøen.
+- [ ] Pinterest for WooCommerce er installeret: forbind kataloget og tjek, at produkterne synkroniseres. Autopilot: 5 opslag om dagen fra kladdekøen.
 - [ ] Etsy-butik koblet på Gelato med samme motiver og priser plus Etsy-gebyrer.
 
 ## 8. Lovkrav
